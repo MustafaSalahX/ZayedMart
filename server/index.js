@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   createStoreDatabase,
+  resolveWritableDataDir,
   getLocalDateKey,
   getLocalTimeHMS,
   computeLateMinutes,
@@ -43,12 +44,23 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export function createApp(options = {}) {
-  const db = createStoreDatabase(options.dbPath);
-  const uploadsDir =
-    options.uploadsDir || path.resolve(process.cwd(), 'data', 'uploads');
+  const isServerless = Boolean(
+    options.serverless ||
+      process.env.VERCEL ||
+      process.env.VERCEL_ENV ||
+      process.env.AWS_LAMBDA_FUNCTION_NAME
+  );
+  const db = createStoreDatabase(options.dbPath, {
+    seedStoreData: options.seedStoreData,
+  });
+  const uploadsDir = options.uploadsDir || resolveWritableDataDir('uploads');
 
-  if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
+  try {
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+  } catch {
+    // Ignore on read-only paths
   }
 
   const rateLimiter = createLoginRateLimiter({
@@ -86,7 +98,7 @@ export function createApp(options = {}) {
   }
 
   function issueSessionForUser(user, req, durationHours = 24 * 365 * 5) {
-    const sessionId = crypto.randomUUID();
+    const sessionId = `${crypto.randomUUID()}:${user.id}`;
     const now = new Date();
     const expires = new Date(now.getTime() + durationHours * 3600 * 1000);
     db.prepare(`
@@ -119,11 +131,40 @@ export function createApp(options = {}) {
     const sessionId = verifySignedTokenFormat(rawToken, getSessionSecret());
     if (!sessionId) return null;
 
-    const session = db
-      .prepare('SELECT * FROM user_sessions WHERE id = ? AND revoked = 0')
+    let session = db
+      .prepare('SELECT * FROM user_sessions WHERE id = ?')
       .get(sessionId);
-    if (!session) return null;
-    if (new Date(session.expires_at).getTime() <= Date.now()) return null;
+
+    if (session) {
+      if (session.revoked) return null;
+      if (new Date(session.expires_at).getTime() <= Date.now()) return null;
+    } else if (sessionId.includes(':')) {
+      // Stateless rehydration for serverless cold starts when HMAC signature is valid
+      const colonIdx = sessionId.indexOf(':');
+      const embeddedUserId = sessionId.slice(colonIdx + 1).trim();
+      if (!embeddedUserId) return null;
+
+      if (embeddedUserId !== '__DEVICE_KIOSK__') {
+        const activeUser = db
+          .prepare('SELECT id FROM system_users WHERE id = ? AND is_active = 1')
+          .get(embeddedUserId);
+        if (!activeUser) return null;
+      }
+
+      const now = new Date();
+      const expires = new Date(now.getTime() + 24 * 365 * 5 * 3600 * 1000);
+      db.prepare(`
+        INSERT OR IGNORE INTO user_sessions (id, user_id, ip_address, user_agent, created_at, expires_at, revoked)
+        VALUES (?, ?, 'serverless', 'rehydrated', ?, ?, 0)
+      `).run(sessionId, embeddedUserId, now.toISOString(), expires.toISOString());
+
+      session = db
+        .prepare('SELECT * FROM user_sessions WHERE id = ? AND revoked = 0')
+        .get(sessionId);
+      if (!session) return null;
+    } else {
+      return null;
+    }
 
     if (session.user_id === '__DEVICE_KIOSK__') {
       const permissions = getRolePermissions(db, 'kiosk');
@@ -940,6 +981,9 @@ export function createApp(options = {}) {
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders?.();
     res.write(`event: connected\ndata: {"ok":true}\n\n`);
+    if (isServerless) {
+      return res.end();
+    }
     sseClients.add(res);
     req.on('close', () => {
       sseClients.delete(res);
@@ -983,7 +1027,14 @@ export function createApp(options = {}) {
         const safePrefix = String(prefix).replace(/[^a-z0-9_-]/gi, '') || 'proof';
         const fileName = `${safePrefix}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.${ext}`;
         const fullPath = path.join(uploadsDir, fileName);
-        fs.writeFileSync(fullPath, buffer);
+        try {
+          fs.writeFileSync(fullPath, buffer);
+        } catch {
+          return res.json({ ok: true, url: dataUrl });
+        }
+        if (isServerless) {
+          return res.json({ ok: true, url: dataUrl });
+        }
         return res.json({ ok: true, url: `/uploads/${fileName}` });
       } catch (err) {
         return res.status(500).json({ error: err.message });

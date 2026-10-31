@@ -1,5 +1,18 @@
 {
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
   "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index.js"
+    },
+    {
+      "source": "/uploads/(.*)",
+      "destination": "/api/index.js"
+    },
+    {
+      "source": "/((?!api/|uploads/).*)",
+      "destination": "/index.html"
+    }
   ]
 }

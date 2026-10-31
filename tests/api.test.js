@@ -881,3 +881,80 @@ test('Hall Role (عمال الصالة), Shortages (Null / 0 / Number Qty), Stri
     await ctx.close();
   }
 });
+
+test('Vercel Serverless Readiness: Seeded Store Data, Cold-Start Session Rehydration, Non-Blocking SSE & Inline Proof Upload', async () => {
+  const ctx1 = await startTestServer({ serverless: true, seedStoreData: true });
+  const ctx2 = await startTestServer({ serverless: true, seedStoreData: true });
+  try {
+    // 1. All pre-configured role passwords & employee codes work out of the box
+    const rolesToCheck = [
+      { pass: '123', expectedRole: 'owner' },
+      { pass: '777', expectedRole: 'hall' },
+      { pass: '555', expectedRole: 'supervisor' },
+      { pass: '333', expectedRole: 'cctv' },
+      { pass: '444', expectedRole: 'security' },
+      { pass: '000', expectedRole: 'kiosk' },
+      { pass: '101', expectedRole: 'hall' },
+      { pass: '233', expectedRole: 'cctv' },
+    ];
+
+    let ownerToken = '';
+    for (const item of rolesToCheck) {
+      const login = await loginByPassword(ctx1.baseUrl, item.pass);
+      assert.equal(login.status, 200, `Password ${item.pass} should succeed`);
+      assert.equal(login.json.user.role, item.expectedRole);
+      if (item.pass === '123') ownerToken = login.json.token;
+    }
+
+    // 2. Seeded store data (employees, suppliers, catalog, shortages) is present
+    const boot1 = await (
+      await fetch(`${ctx1.baseUrl}/api/bootstrap`, { headers: authHeaders(ownerToken) })
+    ).json();
+    assert.equal(boot1.employees.length, 9);
+    assert.equal(boot1.suppliers.length, 6);
+    assert.ok(boot1.productCatalog.length >= 17);
+    assert.equal(boot1.shortages.length, 5);
+
+    // 3. Cold-Start Session Rehydration: token issued on Instance 1 works seamlessly on cold-started Instance 2
+    const boot2Res = await fetch(`${ctx2.baseUrl}/api/bootstrap`, {
+      headers: authHeaders(ownerToken),
+    });
+    assert.equal(boot2Res.status, 200, 'Token should survive serverless cold start across instances');
+    const boot2 = await boot2Res.json();
+    assert.equal(boot2.auth.user.role, 'owner');
+
+    // 4. SSE endpoint (/api/events) closes cleanly in serverless mode without hanging
+    const sseRes = await fetch(`${ctx1.baseUrl}/api/events`, {
+      headers: authHeaders(ownerToken),
+    });
+    assert.equal(sseRes.status, 200);
+    const sseText = await sseRes.text();
+    assert.ok(sseText.includes('event: connected'));
+
+    // 5. Image upload in serverless mode returns self-contained dataUrl after magic-byte validation
+    const validPngBase64 =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const uploadRes = await fetch(`${ctx1.baseUrl}/api/upload`, {
+      method: 'POST',
+      headers: authHeaders(ownerToken, true),
+      body: JSON.stringify({ dataUrl: validPngBase64, prefix: 'vercel_test' }),
+    });
+    assert.equal(uploadRes.status, 200);
+    const uploadJson = await uploadRes.json();
+    assert.equal(uploadJson.url, validPngBase64);
+
+    // 6. Explicit logout on Instance 2 revokes the rehydrated session on Instance 2
+    const logoutRes = await fetch(`${ctx2.baseUrl}/api/auth/logout`, {
+      method: 'POST',
+      headers: authHeaders(ownerToken),
+    });
+    assert.equal(logoutRes.status, 200);
+    const afterLogoutRes = await fetch(`${ctx2.baseUrl}/api/bootstrap`, {
+      headers: authHeaders(ownerToken),
+    });
+    assert.equal(afterLogoutRes.status, 401);
+  } finally {
+    await ctx1.close();
+    await ctx2.close();
+  }
+});

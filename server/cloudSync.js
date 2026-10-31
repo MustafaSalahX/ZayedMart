@@ -16,10 +16,17 @@ const SYNC_TABLES = [
 export function getCloudConfig(db) {
   const rows = db.prepare('SELECT key, value FROM settings').all();
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  const envUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
+  const envKey = (process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '').trim();
+  const url = (map.supabase_url || envUrl || '').trim();
+  const anonKey = (map.supabase_anon_key || envKey || '').trim();
+  const enabled =
+    map.cloud_sync_enabled === 'true' ||
+    (Boolean(envUrl && envKey) && map.cloud_sync_enabled !== 'false');
   return {
-    url: (map.supabase_url || '').trim(),
-    anonKey: (map.supabase_anon_key || '').trim(),
-    enabled: map.cloud_sync_enabled === 'true',
+    url,
+    anonKey,
+    enabled,
     lastSync: map.last_cloud_sync || '',
   };
 }

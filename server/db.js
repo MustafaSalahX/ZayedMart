@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   DEFAULT_ROLE_PERMISSIONS,
@@ -10,6 +11,36 @@ import {
   encryptPasswordForAdmin,
   normalizeDigits,
 } from './rbac.js';
+import { seedInitialStoreData, deterministicSaltHex } from './seedData.js';
+
+export function deterministicUuidFromSeed(seedStr) {
+  const hash = crypto.createHash('sha256').update(String(seedStr)).digest('hex');
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+}
+
+export function resolveWritableDataDir(subDir = '') {
+  const isServerless = Boolean(process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME);
+  if (!isServerless) {
+    try {
+      const localDir = subDir
+        ? path.resolve(process.cwd(), 'data', subDir)
+        : path.resolve(process.cwd(), 'data');
+      if (!fs.existsSync(localDir)) {
+        fs.mkdirSync(localDir, { recursive: true });
+      }
+      fs.accessSync(localDir, fs.constants.W_OK);
+      return localDir;
+    } catch {
+      // Fall back to os.tmpdir() if local directory is read-only
+    }
+  }
+  const tmpBase = path.join(os.tmpdir(), 'zayed-mart-data');
+  const targetDir = subDir ? path.join(tmpBase, subDir) : tmpBase;
+  if (!fs.existsSync(targetDir)) {
+    fs.mkdirSync(targetDir, { recursive: true });
+  }
+  return targetDir;
+}
 
 export function inferDefaultRoleFromDepartment(department = '', roleTitle = '') {
   const dept = String(department || '').trim();
@@ -116,9 +147,14 @@ export function syncEmployeeLoginAccount(db, emp, options = {}) {
     return null;
   }
 
-  const { saltHex, hashHex } = hashPin(rawPass);
+  const saltSeed = deterministicSaltHex(`emp-user:${emp.id}:${rawPass}`);
+  const { saltHex, hashHex } = hashPin(rawPass, saltSeed);
   const cipher = encryptPasswordForAdmin(rawPass, secretHex);
-  const newUserId = crypto.randomUUID();
+  const candidateUserId = deterministicUuidFromSeed(`emp-user:${emp.id}`);
+  const idCollision = db
+    .prepare('SELECT id FROM system_users WHERE id = ?')
+    .get(candidateUserId);
+  const newUserId = idCollision ? crypto.randomUUID() : candidateUserId;
   const baseUsername = `emp_${rawPass.replace(/[^a-z0-9]/gi, '') || emp.id.slice(0, 6)}`;
   const usernameExists = db
     .prepare('SELECT id FROM system_users WHERE username = ?')
@@ -178,20 +214,30 @@ function safeAddColumn(db, tableName, columnDef) {
   }
 }
 
-export function createStoreDatabase(customDbPath) {
-  const dataDir = customDbPath
+export function createStoreDatabase(customDbPath, options = {}) {
+  const isMemory = customDbPath === ':memory:';
+  const dataDir = isMemory
+    ? ''
+    : customDbPath
     ? path.dirname(customDbPath)
-    : path.resolve(process.cwd(), 'data');
+    : resolveWritableDataDir();
 
-  if (customDbPath !== ':memory:' && !fs.existsSync(dataDir)) {
+  if (!isMemory && dataDir && !fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
   }
 
   const dbPath = customDbPath || path.join(dataDir, 'zayed_mart.db');
   const db = new DatabaseSync(dbPath);
 
-  if (dbPath !== ':memory:') {
-    db.exec('PRAGMA journal_mode = WAL;');
+  if (!isMemory) {
+    const isServerless = Boolean(
+      process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME
+    );
+    try {
+      db.exec(isServerless ? 'PRAGMA journal_mode = DELETE;' : 'PRAGMA journal_mode = WAL;');
+    } catch {
+      // Fallback if journal_mode cannot be changed on the underlying filesystem
+    }
   }
   db.exec('PRAGMA foreign_keys = OFF;');
 
@@ -405,16 +451,31 @@ export function createStoreDatabase(customDbPath) {
   safeAddColumn(db, 'shift_handovers', "from_role TEXT DEFAULT ''");
   safeAddColumn(db, 'shift_handovers', "target_role TEXT DEFAULT ''");
 
+  const envSupabaseUrl = (
+    process.env.SUPABASE_URL ||
+    process.env.VITE_SUPABASE_URL ||
+    ''
+  ).trim();
+  const envSupabaseKey = (
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    ''
+  ).trim();
+  const defaultSessionSecret = crypto
+    .createHash('sha256')
+    .update(process.env.SESSION_SECRET || 'zayed-mart-ops-default-session-secret-v3')
+    .digest('hex');
+
   // Seed default store settings + cryptographic HMAC secret
   const defaultSettings = {
     store_name: 'زايد مارت',
     branch_name: 'الفرع الرئيسي',
-    session_hmac_secret: crypto.randomBytes(32).toString('hex'),
+    session_hmac_secret: defaultSessionSecret,
     max_break_minutes: '30',
     max_unload_minutes: '60',
-    supabase_url: '',
-    supabase_anon_key: '',
-    cloud_sync_enabled: 'false',
+    supabase_url: envSupabaseUrl,
+    supabase_anon_key: envSupabaseKey,
+    cloud_sync_enabled: envSupabaseUrl && envSupabaseKey ? 'true' : 'false',
     last_cloud_sync: '',
   };
 
@@ -529,11 +590,30 @@ export function createStoreDatabase(customDbPath) {
     );
   }
 
-  // Seed ONLY the initial Admin (owner) account with password '123' — Admin creates & manages all other role passwords!
+  const shouldSeedStore =
+    options.seedStoreData !== undefined ? Boolean(options.seedStoreData) : !isMemory;
+
+  if (shouldSeedStore) {
+    const empCount = db.prepare('SELECT COUNT(*) as c FROM employees').get().c;
+    const storeSeedDone = db
+      .prepare("SELECT value FROM settings WHERE key = 'initial_store_seed_v1'")
+      .get()?.value;
+    if (empCount === 0 && !storeSeedDone) {
+      seedInitialStoreData(db, secretHex, getLocalDateKey());
+      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
+        'initial_store_seed_v1',
+        'done'
+      );
+    }
+  }
+
+  // Ensure initial Admin (owner) account with password '123' always exists
   const userCount = db.prepare('SELECT COUNT(*) as c FROM system_users').get().c;
   if (userCount === 0) {
     const defaultAdminPassword = '123';
-    const { saltHex, hashHex } = hashPin(defaultAdminPassword);
+    const adminId = 'cabc0e04-6b8f-4f68-9d6f-8d824cfd0ae9';
+    const saltHex = deterministicSaltHex(`role-user:${adminId}:${defaultAdminPassword}`);
+    const { hashHex } = hashPin(defaultAdminPassword, saltHex);
     const cipher = encryptPasswordForAdmin(defaultAdminPassword, secretHex);
 
     db.prepare(`
@@ -541,7 +621,7 @@ export function createStoreDatabase(customDbPath) {
         id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, is_active, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
     `).run(
-      crypto.randomUUID(),
+      adminId,
       'admin',
       'إدارة زايد مارت (Admin)',
       'owner',
