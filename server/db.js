@@ -1,0 +1,581 @@
+import { DatabaseSync } from 'node:sqlite';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  DEFAULT_ROLE_PERMISSIONS,
+  ROLES_METADATA,
+  hashPin,
+  verifyPinHash,
+  encryptPasswordForAdmin,
+  normalizeDigits,
+} from './rbac.js';
+
+export function inferDefaultRoleFromDepartment(department = '', roleTitle = '') {
+  const dept = String(department || '').trim();
+  const title = String(roleTitle || '').trim();
+  if (title.includes('كاميرات') || dept.includes('كاميرات')) return 'cctv';
+  if (dept === 'نظافة' || title.includes('نظافة')) return 'none';
+  if (dept.includes('أمن') || title.includes('أمن') || title.includes('حارس')) return 'security';
+  if (dept === 'المدير' || title.includes('مدير')) return 'manager';
+  if (dept.includes('إدارة') || dept.includes('مشرف') || title.includes('مشرف')) return 'supervisor';
+  return 'hall';
+}
+
+export function syncEmployeeLoginAccount(db, emp, options = {}) {
+  if (!emp || !emp.id) return null;
+  const secretHex =
+    db.prepare("SELECT value FROM settings WHERE key = 'session_hmac_secret'").get()?.value || '';
+  const nowIso = new Date().toISOString();
+
+  const validRoles = new Set([...Object.keys(ROLES_METADATA), 'none']);
+  const explicitRole = String(options.system_role ?? emp.system_role ?? '').trim();
+  const resolvedRole = validRoles.has(explicitRole)
+    ? explicitRole
+    : inferDefaultRoleFromDepartment(emp.department, emp.role_title);
+
+  const loginEnabled =
+    options.login_enabled !== undefined
+      ? options.login_enabled
+        ? 1
+        : 0
+      : emp.login_enabled !== undefined && emp.login_enabled !== null
+      ? Number(emp.login_enabled)
+      : 1;
+
+  if (emp.system_role !== resolvedRole || emp.login_enabled !== loginEnabled) {
+    db.prepare(
+      'UPDATE employees SET system_role = ?, login_enabled = ? WHERE id = ?'
+    ).run(resolvedRole, loginEnabled, emp.id);
+  }
+
+  const existingLinked = db
+    .prepare('SELECT * FROM system_users WHERE employee_id = ? LIMIT 1')
+    .get(emp.id);
+
+  if (!emp.is_active || !loginEnabled || resolvedRole === 'none') {
+    if (existingLinked) {
+      db.prepare('UPDATE system_users SET is_active = 0, updated_at = ? WHERE id = ?').run(
+        nowIso,
+        existingLinked.id
+      );
+      db.prepare('UPDATE user_sessions SET revoked = 1 WHERE user_id = ?').run(existingLinked.id);
+    }
+    return null;
+  }
+
+  const rawPass = normalizeDigits(
+    String(options.password ?? emp.emp_code ?? '').trim()
+  );
+
+  // Check if another active user already has this password
+  function hasPasswordConflict(candidatePass, excludeUserId = '') {
+    if (!candidatePass) return true;
+    const others = db
+      .prepare('SELECT id, pin_salt, pin_hash FROM system_users WHERE id != ? AND is_active = 1')
+      .all(excludeUserId);
+    for (const u of others) {
+      if (verifyPinHash(candidatePass, u.pin_salt, u.pin_hash)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  if (existingLinked) {
+    let saltHex = existingLinked.pin_salt;
+    let hashHex = existingLinked.pin_hash;
+    let cipher = existingLinked.pin_cipher || '';
+
+    if (options.updatePassword && rawPass && !hasPasswordConflict(rawPass, existingLinked.id)) {
+      const hashed = hashPin(rawPass);
+      saltHex = hashed.saltHex;
+      hashHex = hashed.hashHex;
+      cipher = encryptPasswordForAdmin(rawPass, secretHex);
+    }
+
+    db.prepare(
+      `UPDATE system_users
+       SET display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?, avatar_color = ?, is_active = 1, updated_at = ?
+       WHERE id = ?`
+    ).run(
+      emp.name.trim(),
+      resolvedRole,
+      saltHex,
+      hashHex,
+      cipher,
+      emp.avatar_color || '#0B57D0',
+      nowIso,
+      existingLinked.id
+    );
+    return db.prepare('SELECT * FROM system_users WHERE id = ?').get(existingLinked.id);
+  }
+
+  // Create a new linked system_users row if password is valid and non-conflicting
+  if (!rawPass || hasPasswordConflict(rawPass)) {
+    return null;
+  }
+
+  const { saltHex, hashHex } = hashPin(rawPass);
+  const cipher = encryptPasswordForAdmin(rawPass, secretHex);
+  const newUserId = crypto.randomUUID();
+  const baseUsername = `emp_${rawPass.replace(/[^a-z0-9]/gi, '') || emp.id.slice(0, 6)}`;
+  const usernameExists = db
+    .prepare('SELECT id FROM system_users WHERE username = ?')
+    .get(baseUsername);
+  const finalUsername = usernameExists
+    ? `${baseUsername}_${crypto.randomBytes(2).toString('hex')}`
+    : baseUsername;
+
+  db.prepare(
+    `INSERT INTO system_users (
+      id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, is_active, employee_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`
+  ).run(
+    newUserId,
+    finalUsername,
+    emp.name.trim(),
+    resolvedRole,
+    saltHex,
+    hashHex,
+    cipher,
+    emp.avatar_color || '#0B57D0',
+    emp.id,
+    nowIso,
+    nowIso
+  );
+
+  return db.prepare('SELECT * FROM system_users WHERE id = ?').get(newUserId);
+}
+
+export function getLocalDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function getLocalTimeHMS(date = new Date()) {
+  return [date.getHours(), date.getMinutes(), date.getSeconds()]
+    .map((v) => String(v).padStart(2, '0'))
+    .join(':');
+}
+
+export function computeLateMinutes(shiftStart, checkInDate = new Date()) {
+  if (!shiftStart || !/^\d{2}:\d{2}$/.test(shiftStart)) return 0;
+  const [sh, sm] = shiftStart.split(':').map(Number);
+  const scheduled = new Date(checkInDate);
+  scheduled.setHours(sh, sm, 0, 0);
+  const diffMin = Math.floor((checkInDate.getTime() - scheduled.getTime()) / 60000);
+  return diffMin > 10 ? diffMin : 0;
+}
+
+function safeAddColumn(db, tableName, columnDef) {
+  try {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnDef};`);
+  } catch {
+    // Column already exists
+  }
+}
+
+export function createStoreDatabase(customDbPath) {
+  const dataDir = customDbPath
+    ? path.dirname(customDbPath)
+    : path.resolve(process.cwd(), 'data');
+
+  if (customDbPath !== ':memory:' && !fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
+  }
+
+  const dbPath = customDbPath || path.join(dataDir, 'zayed_mart.db');
+  const db = new DatabaseSync(dbPath);
+
+  if (dbPath !== ':memory:') {
+    db.exec('PRAGMA journal_mode = WAL;');
+  }
+  db.exec('PRAGMA foreign_keys = OFF;');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS system_users (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      display_name TEXT NOT NULL,
+      role TEXT NOT NULL,
+      pin_salt TEXT NOT NULL,
+      pin_hash TEXT NOT NULL,
+      pin_cipher TEXT DEFAULT '',
+      avatar_color TEXT DEFAULT '#0B57D0',
+      is_active INTEGER DEFAULT 1,
+      last_login_at TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS role_policies (
+      role TEXT PRIMARY KEY,
+      permissions_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS user_sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      ip_address TEXT DEFAULT '',
+      user_agent TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      revoked INTEGER DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(user_id, revoked);
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id TEXT PRIMARY KEY,
+      user_id TEXT DEFAULT '',
+      user_name TEXT NOT NULL,
+      role TEXT DEFAULT '',
+      action TEXT NOT NULL,
+      details TEXT DEFAULT '',
+      ip_address TEXT DEFAULT '',
+      severity TEXT DEFAULT 'info',
+      timestamp TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp DESC);
+
+    CREATE TABLE IF NOT EXISTS employees (
+      id TEXT PRIMARY KEY,
+      emp_code TEXT DEFAULT '',
+      name TEXT NOT NULL,
+      department TEXT NOT NULL,
+      role_title TEXT DEFAULT '',
+      shift_start TEXT DEFAULT '08:00',
+      shift_end TEXT DEFAULT '17:00',
+      avatar_color TEXT DEFAULT '#0B57D0',
+      phone TEXT DEFAULT '',
+      is_active INTEGER DEFAULT 1,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS attendance_logs (
+      id TEXT PRIMARY KEY,
+      employee_id TEXT NOT NULL,
+      employee_name TEXT NOT NULL,
+      department TEXT NOT NULL,
+      action_type TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      date_key TEXT NOT NULL,
+      late_minutes INTEGER DEFAULT 0,
+      note TEXT DEFAULT '',
+      proof_url TEXT DEFAULT '',
+      recorded_by TEXT NOT NULL,
+      verified_by_cctv INTEGER DEFAULT 0,
+      verified_at TEXT DEFAULT '',
+      synced INTEGER DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance_logs(date_key);
+    CREATE INDEX IF NOT EXISTS idx_attendance_emp ON attendance_logs(employee_id, timestamp);
+
+    CREATE TABLE IF NOT EXISTS suppliers (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL,
+      icon TEXT DEFAULT 'local_shipping',
+      color TEXT DEFAULT '#0B57D0',
+      has_pending_return INTEGER DEFAULT 0,
+      pending_return_note TEXT DEFAULT '',
+      phone TEXT DEFAULT '',
+      is_active INTEGER DEFAULT 1,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS truck_logs (
+      id TEXT PRIMARY KEY,
+      supplier_id TEXT DEFAULT '',
+      supplier_name TEXT NOT NULL,
+      category TEXT NOT NULL,
+      plate_or_driver TEXT DEFAULT '',
+      status TEXT NOT NULL,
+      arrival_time TEXT NOT NULL,
+      departure_time TEXT DEFAULT '',
+      duration_minutes INTEGER DEFAULT 0,
+      date_key TEXT NOT NULL,
+      delivery_condition TEXT DEFAULT 'pending',
+      invoice_number TEXT DEFAULT '',
+      notes TEXT DEFAULT '',
+      arrival_proof_url TEXT DEFAULT '',
+      completion_proof_url TEXT DEFAULT '',
+      recorded_by TEXT NOT NULL,
+      verified_by_cctv INTEGER DEFAULT 0,
+      synced INTEGER DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_trucks_date ON truck_logs(date_key);
+    CREATE INDEX IF NOT EXISTS idx_trucks_status ON truck_logs(status);
+
+    CREATE TABLE IF NOT EXISTS notes (
+      id TEXT PRIMARY KEY,
+      location_tag TEXT NOT NULL,
+      category_tag TEXT NOT NULL,
+      severity TEXT NOT NULL DEFAULT 'normal',
+      dvr_timestamp TEXT NOT NULL,
+      content TEXT NOT NULL,
+      proof_url TEXT DEFAULT '',
+      recorded_by TEXT NOT NULL,
+      is_open_handover INTEGER DEFAULT 0,
+      resolved_by TEXT DEFAULT '',
+      resolved_at TEXT DEFAULT '',
+      timestamp TEXT NOT NULL,
+      date_key TEXT NOT NULL,
+      synced INTEGER DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_notes_date ON notes(date_key);
+
+    CREATE TABLE IF NOT EXISTS shift_handovers (
+      id TEXT PRIMARY KEY,
+      from_operator TEXT NOT NULL,
+      to_operator TEXT NOT NULL,
+      shift_name TEXT NOT NULL,
+      summary_note TEXT DEFAULT '',
+      open_items_json TEXT DEFAULT '[]',
+      open_trucks_count INTEGER DEFAULT 0,
+      open_notes_count INTEGER DEFAULT 0,
+      present_staff_count INTEGER DEFAULT 0,
+      acknowledged INTEGER DEFAULT 0,
+      acknowledged_at TEXT DEFAULT '',
+      timestamp TEXT NOT NULL,
+      date_key TEXT NOT NULL,
+      synced INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS product_catalog (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'بقالة جافة',
+      default_unit TEXT DEFAULT '',
+      supplier_id TEXT DEFAULT '',
+      usage_count INTEGER DEFAULT 1,
+      is_active INTEGER DEFAULT 1,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_catalog_cat ON product_catalog(category, is_active);
+
+    CREATE TABLE IF NOT EXISTS shortages (
+      id TEXT PRIMARY KEY,
+      product_id TEXT DEFAULT '',
+      item_name TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'بقالة جافة',
+      requested_qty REAL DEFAULT NULL,
+      unit TEXT DEFAULT '',
+      urgency TEXT NOT NULL DEFAULT 'out_of_stock',
+      status TEXT NOT NULL DEFAULT 'open',
+      supplier_id TEXT DEFAULT '',
+      supplier_name TEXT DEFAULT '',
+      notes TEXT DEFAULT '',
+      recorded_by TEXT NOT NULL,
+      recorded_by_role TEXT DEFAULT '',
+      updated_by TEXT DEFAULT '',
+      resolved_by TEXT DEFAULT '',
+      resolved_at TEXT DEFAULT '',
+      timestamp TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      date_key TEXT NOT NULL,
+      synced INTEGER DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_shortages_date ON shortages(date_key);
+    CREATE INDEX IF NOT EXISTS idx_shortages_status ON shortages(status);
+  `);
+
+  safeAddColumn(db, 'system_users', "pin_cipher TEXT DEFAULT ''");
+  safeAddColumn(db, 'system_users', "employee_id TEXT DEFAULT ''");
+  safeAddColumn(db, 'employees', "emp_code TEXT DEFAULT ''");
+  safeAddColumn(db, 'employees', "system_role TEXT DEFAULT ''");
+  safeAddColumn(db, 'employees', 'login_enabled INTEGER DEFAULT 1');
+  safeAddColumn(db, 'shift_handovers', "open_items_json TEXT DEFAULT '[]'");
+  safeAddColumn(db, 'shift_handovers', "acknowledged_at TEXT DEFAULT ''");
+  safeAddColumn(db, 'shift_handovers', "from_role TEXT DEFAULT ''");
+  safeAddColumn(db, 'shift_handovers', "target_role TEXT DEFAULT ''");
+
+  // Seed default store settings + cryptographic HMAC secret
+  const defaultSettings = {
+    store_name: 'زايد مارت',
+    branch_name: 'الفرع الرئيسي',
+    session_hmac_secret: crypto.randomBytes(32).toString('hex'),
+    max_break_minutes: '30',
+    max_unload_minutes: '60',
+    supabase_url: '',
+    supabase_anon_key: '',
+    cloud_sync_enabled: 'false',
+    last_cloud_sync: '',
+  };
+
+  const upsertSettingStmt = db.prepare(
+    'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)'
+  );
+  for (const [k, v] of Object.entries(defaultSettings)) {
+    upsertSettingStmt.run(k, v);
+  }
+
+  const secretHex =
+    db.prepare("SELECT value FROM settings WHERE key = 'session_hmac_secret'").get()?.value || '';
+
+  // Seed default RBAC Role Policies if missing
+  const policyInsert = db.prepare(
+    'INSERT OR IGNORE INTO role_policies (role, permissions_json, updated_at) VALUES (?, ?, ?)'
+  );
+  const nowIso = new Date().toISOString();
+  for (const [role, perms] of Object.entries(DEFAULT_ROLE_PERMISSIONS)) {
+    policyInsert.run(role, JSON.stringify(perms), nowIso);
+  }
+
+  // One-time safe migration: ensure existing 'supervisor' policy receives default shortages permissions
+  const migratedShortages = db
+    .prepare("SELECT value FROM settings WHERE key = 'migration_shortages_v1'")
+    .get()?.value;
+  if (!migratedShortages) {
+    const supRow = db
+      .prepare("SELECT permissions_json FROM role_policies WHERE role = 'supervisor'")
+      .get();
+    if (supRow?.permissions_json) {
+      try {
+        const parsed = JSON.parse(supRow.permissions_json);
+        const merged = Array.from(
+          new Set([...parsed, 'shortages:read', 'shortages:write', 'shortages:manage'])
+        );
+        db.prepare(
+          "UPDATE role_policies SET permissions_json = ?, updated_at = ? WHERE role = 'supervisor'"
+        ).run(JSON.stringify(merged), nowIso);
+      } catch {
+        // ignore malformed json
+      }
+    }
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
+      'migration_shortages_v1',
+      'done'
+    );
+  }
+
+  // One-time safe migration: split merged departments ('أمن ونظافة', 'إدارة ومشرفين') into distinct roles/departments and grant handover:manage to hall
+  const migratedSplitDepts = db
+    .prepare("SELECT value FROM settings WHERE key = 'migration_split_depts_v1'")
+    .get()?.value;
+  if (!migratedSplitDepts) {
+    // 1. Ensure hall has handover:manage in role_policies
+    const hallRow = db
+      .prepare("SELECT permissions_json FROM role_policies WHERE role = 'hall'")
+      .get();
+    if (hallRow?.permissions_json) {
+      try {
+        const parsed = JSON.parse(hallRow.permissions_json);
+        const merged = Array.from(new Set([...parsed, 'handover:manage']));
+        db.prepare(
+          "UPDATE role_policies SET permissions_json = ?, updated_at = ? WHERE role = 'hall'"
+        ).run(JSON.stringify(merged), nowIso);
+      } catch {
+        // ignore
+      }
+    }
+
+    // 2. Split existing employees into 'المدير', 'مشرفين', 'مراقب كاميرات', 'أمن', 'نظافة'
+    const allEmps = db.prepare('SELECT * FROM employees').all();
+    for (const emp of allEmps) {
+      let nextDept = emp.department;
+      let nextRole = emp.system_role;
+      const title = String(emp.role_title || '').trim();
+
+      if (title.includes('كاميرات') || emp.department.includes('كاميرات')) {
+        nextDept = 'مراقب كاميرات';
+        nextRole = 'cctv';
+      } else if (emp.department === 'أمن ونظافة') {
+        if (title.includes('نظافة')) {
+          nextDept = 'نظافة';
+          nextRole = 'none';
+        } else {
+          nextDept = 'أمن';
+          nextRole = 'security';
+        }
+      } else if (emp.department === 'إدارة ومشرفين') {
+        if (title.includes('مدير')) {
+          nextDept = 'المدير';
+          nextRole = 'manager';
+        } else {
+          nextDept = 'مشرفين';
+          nextRole = 'supervisor';
+        }
+      }
+
+      if (nextDept !== emp.department || nextRole !== emp.system_role) {
+        db.prepare(
+          'UPDATE employees SET department = ?, system_role = ?, updated_at = ? WHERE id = ?'
+        ).run(nextDept, nextRole, nowIso, emp.id);
+        db.prepare(
+          'UPDATE attendance_logs SET department = ? WHERE employee_id = ?'
+        ).run(nextDept, emp.id);
+      }
+    }
+
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
+      'migration_split_depts_v1',
+      'done'
+    );
+  }
+
+  // Seed ONLY the initial Admin (owner) account with password '123' — Admin creates & manages all other role passwords!
+  const userCount = db.prepare('SELECT COUNT(*) as c FROM system_users').get().c;
+  if (userCount === 0) {
+    const defaultAdminPassword = '123';
+    const { saltHex, hashHex } = hashPin(defaultAdminPassword);
+    const cipher = encryptPasswordForAdmin(defaultAdminPassword, secretHex);
+
+    db.prepare(`
+      INSERT INTO system_users (
+        id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(
+      crypto.randomUUID(),
+      'admin',
+      'إدارة زايد مارت (Admin)',
+      'owner',
+      saltHex,
+      hashHex,
+      cipher,
+      '#7627BB',
+      nowIso,
+      nowIso
+    );
+  }
+
+  // Sync all active employees with personal login accounts in system_users
+  try {
+    const activeEmployees = db
+      .prepare('SELECT * FROM employees WHERE is_active = 1')
+      .all();
+    for (const emp of activeEmployees) {
+      syncEmployeeLoginAccount(db, emp);
+    }
+  } catch {
+    // ignore startup sync issues
+  }
+
+  // Real-Data Ready: NO fake demo employees or suppliers are seeded!
+  return db;
+}
+
+export function generateNextEmpCode(db) {
+  const rows = db.prepare('SELECT emp_code FROM employees').all();
+  let maxNum = 100;
+  for (const r of rows) {
+    const num = parseInt(r.emp_code, 10);
+    if (!Number.isNaN(num) && num > maxNum) maxNum = num;
+  }
+  return String(maxNum + 1);
+}
