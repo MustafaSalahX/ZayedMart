@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { fetchStorePublicInfo, loginWithPassword, normalizeDigitsClient } from '../lib/api.js';
 import { playSuccessChime } from '../lib/audio.js';
+import PwaInstallBanner from './PwaInstallBanner.jsx';
 
 export default function AuthLoginScreen({
   darkMode,
@@ -84,6 +85,7 @@ export default function AuthLoginScreen({
       </div>
 
       <div className="flex-1 flex flex-col items-center justify-center px-3 sm:px-6 py-3 sm:py-6">
+        <PwaInstallBanner />
         <form
           onSubmit={handleSubmit}
           className="w-full max-w-md g-card p-4 sm:p-7 shadow-sm space-y-3.5 sm:space-y-5 animate-pop"

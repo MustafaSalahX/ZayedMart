@@ -9,6 +9,7 @@ import { playSuccessChime, speakArabicConfirmation } from '../lib/audio.js';
 import {
   buildShortagesWhatsAppText,
   exportShortagesCsv,
+  exportShortagesWord,
   formatTimeArabic,
 } from '../lib/exportUtils.js';
 import VoiceMicButton from './VoiceMicButton.jsx';
@@ -74,6 +75,7 @@ export default function ShortagesView({
   const [qtyInput, setQtyInput] = useState(''); // '' => null, '0' => 0, '5' => 5
   const [unit, setUnit] = useState('');
   const [urgency, setUrgency] = useState('out_of_stock');
+  const [isSuggestion, setIsSuggestion] = useState(false);
   const [supplierId, setSupplierId] = useState('');
   const [notes, setNotes] = useState('');
   const [showExtraFields, setShowExtraFields] = useState(false);
@@ -123,12 +125,14 @@ export default function ShortagesView({
     let open = 0;
     let ordered = 0;
     let resolved = 0;
+    let suggestions = 0;
     for (const s of shortages) {
       if (s.status === 'open') open += 1;
       else if (s.status === 'ordered') ordered += 1;
       else if (s.status === 'resolved') resolved += 1;
+      if (Number(s.is_suggestion) === 1) suggestions += 1;
     }
-    return { open, ordered, resolved, total: shortages.length };
+    return { open, ordered, resolved, suggestions, total: shortages.length };
   }, [shortages]);
 
   const filteredCatalog = useMemo(() => {
@@ -145,7 +149,11 @@ export default function ShortagesView({
   const filteredShortages = useMemo(() => {
     const q = listSearch.trim().toLowerCase();
     return shortages.filter((s) => {
-      if (statusFilter !== 'all' && s.status !== statusFilter) return false;
+      if (statusFilter === 'suggestions') {
+        if (Number(s.is_suggestion) !== 1) return false;
+      } else if (statusFilter !== 'all' && s.status !== statusFilter) {
+        return false;
+      }
       if (
         q &&
         !s.item_name.toLowerCase().includes(q) &&
@@ -208,26 +216,35 @@ export default function ShortagesView({
         requested_qty: parsedQty.value, // null, 0, or positive number
         unit,
         urgency,
+        is_suggestion: isSuggestion ? 1 : 0,
         supplier_id: supplierId,
         notes: notes.trim(),
         save_to_catalog: true,
       });
 
       playSuccessChime('in');
-      speakArabicConfirmation(`تم تسجيل ${cleanName} في النواقص`, voiceEnabled);
+      speakArabicConfirmation(
+        isSuggestion ? `تم تسجيل اقتراح إضافة ${cleanName}` : `تم تسجيل ${cleanName} في النواقص`,
+        voiceEnabled
+      );
 
       if (res?.queuedOffline) {
         onToast?.(`تم حفظ "${cleanName}" مؤقتاً وسيتم إرساله فور عودة الشبكة`);
       } else if (res?.merged) {
         onToast?.(`تم تحديث الصنف الموجود مسبقاً "${cleanName}" بنجاح ✓`);
       } else {
-        onToast?.(`تم تسجيل "${cleanName}" في قائمة النواقص ✓`);
+        onToast?.(
+          isSuggestion
+            ? `تم تسجيل مقترح إضافة "${cleanName}" بنجاح ✓`
+            : `تم تسجيل "${cleanName}" في قائمة النواقص ✓`
+        );
       }
 
       setItemName('');
       setSelectedCatalogId('');
       setQtyInput('');
       setNotes('');
+      setIsSuggestion(false);
       setStatusFilter('open');
       onRefresh?.();
     } catch (err) {
@@ -450,6 +467,14 @@ export default function ShortagesView({
                     <span className="ms-icon text-lg text-[var(--g-primary)]">download</span>
                     <span>ملف Excel</span>
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => exportShortagesWord(shortages, dateKey || 'today', storeName)}
+                    className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[var(--g-surface)] hover:bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-[var(--g-text)] text-xs sm:text-sm font-bold flex items-center gap-1.5 active:scale-[0.98]"
+                  >
+                    <span className="ms-icon text-lg text-[var(--g-primary)]">description</span>
+                    <span>ملف Word</span>
+                  </button>
                 </>
               )}
               {(canManageShortages || canManageRecords) && (
@@ -638,13 +663,43 @@ export default function ShortagesView({
           onSubmit={handleSubmitShortage}
           className="g-card p-4 sm:p-5 space-y-4 border-2 border-[var(--g-primary)]/20"
         >
+          {/* Toggle between Shortage vs Cashier Product Suggestion */}
+          <div className="grid grid-cols-2 gap-2 p-1.5 rounded-2xl bg-[var(--g-surface-variant)]">
+            <button
+              type="button"
+              onClick={() => setIsSuggestion(false)}
+              className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all ${
+                !isSuggestion
+                  ? 'bg-[var(--g-surface)] text-[var(--g-primary)] shadow-xs'
+                  : 'text-[var(--g-muted)]'
+              }`}
+            >
+              <span className="ms-icon text-base">production_quantity_limits</span>
+              <span>🛒 تسجيل صنف ناقص بالصالة</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsSuggestion(true)}
+              className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all ${
+                isSuggestion
+                  ? 'bg-[var(--g-purple-bg)] text-[var(--g-purple)] shadow-xs border border-[var(--g-purple-border)]/40'
+                  : 'text-[var(--g-muted)]'
+              }`}
+            >
+              <span className="ms-icon text-base">lightbulb</span>
+              <span>💡 اقتراح إضافة صنف جديد يطلبه العملاء</span>
+            </button>
+          </div>
+
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex items-center gap-2">
               <span className="w-7 h-7 rounded-full bg-[var(--g-primary)] text-white text-sm font-black flex items-center justify-center">
                 1
               </span>
               <h3 className="text-base sm:text-lg font-black text-[var(--g-text)]">
-                اختر القسم واكتب اسم الصنف الناقص
+                {isSuggestion
+                  ? 'اختر القسم واكتب اسم الصنف المقترح إضافته للماركت'
+                  : 'اختر القسم واكتب اسم الصنف الناقص'}
               </h3>
             </div>
             <VoiceMicButton
@@ -934,6 +989,7 @@ export default function ShortagesView({
           <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
             {[
               { id: 'open', label: `مطلوب الآن (${counts.open})` },
+              { id: 'suggestions', label: `💡 مقترحات الكاشيرية (${counts.suggestions})` },
               { id: 'ordered', label: `تم طلبه (${counts.ordered})` },
               { id: 'resolved', label: `تم توفيره (${counts.resolved})` },
               { id: 'all', label: `الكل (${counts.total})` },
@@ -1014,6 +1070,11 @@ export default function ShortagesView({
                     {/* Item Main Info */}
                     <div className="space-y-1.5 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
+                        {Number(item.is_suggestion) === 1 && (
+                          <span className="px-2.5 py-0.5 rounded-full text-xs font-extrabold bg-[var(--g-purple-bg)] text-[var(--g-purple)] border border-[var(--g-purple-border)]/40">
+                            💡 اقتراح صنف جديد
+                          </span>
+                        )}
                         <span
                           className={`px-2.5 py-0.5 rounded-full text-xs font-extrabold border ${
                             item.status === 'resolved'

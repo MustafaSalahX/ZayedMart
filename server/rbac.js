@@ -19,11 +19,19 @@ export const ROLES_METADATA = {
   },
   supervisor: {
     id: 'supervisor',
-    label: 'مشرف الصالة',
+    label: 'مشرف الصالة والفرع',
     shortLabel: 'مشرف الفرع',
     icon: 'manage_accounts',
     color: '#0B57D0',
     description: 'إدارة الموظفين والموردين، التقارير، إغلاق الملاحظات، ومراجعة التشغيل اليومي',
+  },
+  cashier: {
+    id: 'cashier',
+    label: 'الكاشير / الكاشيرية',
+    shortLabel: 'الكاشير',
+    icon: 'point_of_sale',
+    color: '#D93025',
+    description: 'رؤية وإضافة النواقص ومقترحات الأصناف، تسجيل مشاكل وملاحظات الكاشير، التواصل مع الكاشيرية والتيم، وعرض البروفايل الشخصي',
   },
   cctv: {
     id: 'cctv',
@@ -39,7 +47,7 @@ export const ROLES_METADATA = {
     shortLabel: 'الأمن',
     icon: 'shield_person',
     color: '#146C2E',
-    description: 'تسجيل حضور وانصراف الموظفين، وعربيات الموردين والطلبيات، وملاحظات البوابة وتسليم وردية الأمن',
+    description: 'تسجيل حضور وانصراف الموظفين، إدارة البريك المخصص، عربيات الموردين والطلبيات، ملاحظات البوابة، والتواصل مع التيم',
   },
   hall: {
     id: 'hall',
@@ -47,7 +55,23 @@ export const ROLES_METADATA = {
     shortLabel: 'عمال الصالة',
     icon: 'shopping_basket',
     color: '#007B83',
-    description: 'تحديد الأصناف الناقصة في الصالة وتحديد أو تعديل الكميات المطلوبة وتسليم وردية الصالة',
+    description: 'تحديد الأصناف الناقصة في الصالة وتحديد أو تعديل الكميات المطلوبة والملاحظات والتواصل مع التيم',
+  },
+  warehouse: {
+    id: 'warehouse',
+    label: 'أمين المخزن والاستلام',
+    shortLabel: 'المخزن',
+    icon: 'inventory_2',
+    color: '#8430CE',
+    description: 'متابعة النواقص وتوفيرها من المخزن، استلام عربيات الموردين، وإدارة الكتالوج والملاحظات',
+  },
+  delivery: {
+    id: 'delivery',
+    label: 'الدليفري والتوصيل',
+    shortLabel: 'الدليفري',
+    icon: 'two_wheeler',
+    color: '#C26401',
+    description: 'متابعة النواقص، تسجيل ملاحظات التوصيل، والتواصل الفوري مع الكاشيرية والتيم',
   },
   kiosk: {
     id: 'kiosk',
@@ -61,28 +85,31 @@ export const ROLES_METADATA = {
 
 export const ALL_PERMISSIONS = [
   { id: 'attendance:kiosk', label: 'تسجيل حضور كشك العمال / QR', group: 'الحضور والانصراف' },
-  { id: 'attendance:read', label: 'عرض سجل الحضور التفصيلي', group: 'الحضور والانصراف' },
-  { id: 'attendance:write', label: 'تسجيل حضور وانصراف واستراحات', group: 'الحضور والانصراف' },
+  { id: 'attendance:read', label: 'عرض سجل الحضور التفصيلي والبريك', group: 'الحضور والانصراف' },
+  { id: 'attendance:write', label: 'تسجيل حضور وانصراف وتحديد مدة البريك', group: 'الحضور والانصراف' },
   { id: 'attendance:verify', label: 'ختم مطابقة مراقب الكاميرات ✓', group: 'الحضور والانصراف' },
   { id: 'trucks:read', label: 'عرض سجل عربيات البضاعة', group: 'الموردون والطلبيات' },
   { id: 'trucks:write', label: 'تسجيل وصول وإنهاء استلام العربيات', group: 'الموردون والطلبيات' },
   { id: 'suppliers:clear_return', label: 'تسوية ومسح تنبيهات مرتجعات الموردين', group: 'الموردون والطلبيات' },
-  { id: 'shortages:read', label: 'عرض قائمة نواقص الصالة', group: 'النواقص وأصناف الصالة' },
-  { id: 'shortages:write', label: 'إضافة الأصناف الناقصة وتحديد/تعديل الكمية المطلوبة', group: 'النواقص وأصناف الصالة' },
+  { id: 'shortages:read', label: 'عرض قائمة النواقص ومقترحات الأصناف', group: 'النواقص وأصناف الصالة' },
+  { id: 'shortages:write', label: 'إضافة النواقص واقتراح أصناف جديدة وتعديل الكمية', group: 'النواقص وأصناف الصالة' },
   { id: 'shortages:manage', label: 'اعتماد توفير النواقص وتغيير الحالة وإدارة كتالوج الأصناف', group: 'النواقص وأصناف الصالة' },
-  { id: 'notes:read', label: 'عرض سجل الملاحظات والوقائع', group: 'الملاحظات والورديات' },
-  { id: 'notes:write', label: 'إضافة ملاحظات ووقائع جديدة', group: 'الملاحظات والورديات' },
+  { id: 'notes:read', label: 'عرض سجل الملاحظات ومشاكل الكاشيرية والوقائع', group: 'الملاحظات والورديات' },
+  { id: 'notes:write', label: 'إضافة ملاحظات أو مشاكل كاشير/صالة جديدة', group: 'الملاحظات والورديات' },
   { id: 'notes:resolve', label: 'إغلاق وحل الملاحظات المعلقة', group: 'الملاحظات والورديات' },
   { id: 'handover:manage', label: 'تسليم واستلام الورديات', group: 'الملاحظات والورديات' },
+  { id: 'chat:read', label: 'عرض رسائل وتنبيهات الكاشيرية والتيم', group: 'التواصل والبروفايل' },
+  { id: 'chat:write', label: 'إرسال رسائل ونداءات سريعة للكاشيرية والتيم', group: 'التواصل والبروفايل' },
+  { id: 'profile:view', label: 'عرض البروفايل الشخصي والباسورد والسجل الفردي', group: 'التواصل والبروفايل' },
   { id: 'reports:view', label: 'عرض لوحة التقارير الشاملة والسجل الزمني الموحد', group: 'الإدارة والأمان' },
-  { id: 'reports:export', label: 'تصدير شيتات Excel وتقارير واتساب', group: 'الإدارة والأمان' },
+  { id: 'reports:export', label: 'تصدير تقارير Excel و Word و WhatsApp', group: 'الإدارة والأمان' },
   { id: 'records:manage', label: 'تعديل وحذف أي سجل تشغيلي (حضور، عربيات، نواقص، ملاحظات)', group: 'الإدارة والأمان' },
   { id: 'staff:manage', label: 'إضافة وتعديل وحذف الموظفين وكروت QR', group: 'الإدارة والأمان' },
   { id: 'suppliers:manage', label: 'إضافة وحذف الموردين الدائمين', group: 'الإدارة والأمان' },
-  { id: 'audit:view', label: 'عرض سجل التدقيق الأمني (Audit Log)', group: 'الإدارة والأمان' },
+  { id: 'audit:view', label: 'عرض اللوج الشامل (Master Log) واللوج الفردي', group: 'الإدارة والأمان' },
   { id: 'settings:manage', label: 'تعديل إعدادات الفرع والمزامنة السحابية', group: 'الإدارة والأمان' },
   { id: 'backup:manage', label: 'تصدير واستعادة النسخ الاحتياطية الكاملة', group: 'الإدارة والأمان' },
-  { id: 'users:manage', label: 'إدارة المستخدمين والأدوار ومصفوفة RBAC', group: 'الإدارة والأمان' },
+  { id: 'users:manage', label: 'إدارة المستخدمين والأدوار والصلاحيات المخصصة', group: 'الإدارة والأمان' },
 ];
 
 export const DEFAULT_ROLE_PERMISSIONS = {
@@ -102,6 +129,9 @@ export const DEFAULT_ROLE_PERMISSIONS = {
     'notes:write',
     'notes:resolve',
     'handover:manage',
+    'chat:read',
+    'chat:write',
+    'profile:view',
     'reports:view',
     'reports:export',
     'records:manage',
@@ -125,11 +155,25 @@ export const DEFAULT_ROLE_PERMISSIONS = {
     'notes:write',
     'notes:resolve',
     'handover:manage',
+    'chat:read',
+    'chat:write',
+    'profile:view',
     'reports:view',
     'reports:export',
     'staff:manage',
     'suppliers:manage',
     'audit:view',
+  ],
+  cashier: [
+    'attendance:read',
+    'shortages:read',
+    'shortages:write',
+    'notes:read',
+    'notes:write',
+    'handover:manage',
+    'chat:read',
+    'chat:write',
+    'profile:view',
   ],
   cctv: [
     'attendance:kiosk',
@@ -143,6 +187,9 @@ export const DEFAULT_ROLE_PERMISSIONS = {
     'notes:write',
     'notes:resolve',
     'handover:manage',
+    'chat:read',
+    'chat:write',
+    'profile:view',
     'reports:view',
     'reports:export',
   ],
@@ -152,11 +199,47 @@ export const DEFAULT_ROLE_PERMISSIONS = {
     'attendance:write',
     'trucks:read',
     'trucks:write',
+    'suppliers:clear_return',
+    'shortages:read',
     'notes:read',
     'notes:write',
     'handover:manage',
+    'chat:read',
+    'chat:write',
+    'profile:view',
   ],
-  hall: ['shortages:read', 'shortages:write', 'handover:manage'],
+  hall: [
+    'shortages:read',
+    'shortages:write',
+    'handover:manage',
+    'chat:read',
+    'chat:write',
+    'profile:view',
+  ],
+  warehouse: [
+    'attendance:kiosk',
+    'trucks:read',
+    'trucks:write',
+    'suppliers:clear_return',
+    'shortages:read',
+    'shortages:write',
+    'shortages:manage',
+    'notes:read',
+    'notes:write',
+    'handover:manage',
+    'chat:read',
+    'chat:write',
+    'profile:view',
+  ],
+  delivery: [
+    'attendance:kiosk',
+    'shortages:read',
+    'notes:read',
+    'notes:write',
+    'chat:read',
+    'chat:write',
+    'profile:view',
+  ],
   kiosk: ['attendance:kiosk'],
 };
 
@@ -340,21 +423,36 @@ export function createLoginRateLimiter({ maxAttempts = 5, windowMs = 180000, blo
   };
 }
 
-export function getRolePermissions(db, role) {
+export function getRolePermissions(db, role, customPermsJson = '') {
   if (role === 'owner') {
     return ALL_PERMISSIONS.map((p) => p.id);
   }
+  let basePerms = [];
   const row = db
     .prepare('SELECT permissions_json FROM role_policies WHERE role = ?')
     .get(role);
   if (row?.permissions_json) {
     try {
-      return JSON.parse(row.permissions_json);
+      basePerms = JSON.parse(row.permissions_json);
     } catch {
-      // fallback
+      basePerms = DEFAULT_ROLE_PERMISSIONS[role] || [];
+    }
+  } else {
+    basePerms = DEFAULT_ROLE_PERMISSIONS[role] || [];
+  }
+
+  let customPerms = [];
+  if (customPermsJson) {
+    try {
+      const parsed = typeof customPermsJson === 'string' ? JSON.parse(customPermsJson) : customPermsJson;
+      if (Array.isArray(parsed)) customPerms = parsed;
+    } catch {
+      // ignore
     }
   }
-  return DEFAULT_ROLE_PERMISSIONS[role] || [];
+
+  const extra = role !== 'kiosk' ? ['profile:view', 'chat:read', 'chat:write'] : [];
+  return Array.from(new Set([...basePerms, ...customPerms, ...extra]));
 }
 
 export function recordAuditLog(db, { userId = '', userName = 'النظام', role = '', action, details = '', ip = '', severity = 'info' }) {

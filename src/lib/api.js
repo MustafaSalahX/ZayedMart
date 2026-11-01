@@ -1,12 +1,24 @@
 import { createClient } from '@supabase/supabase-js';
+import {
+  saveBootstrapToLocalDb,
+  loadSnapshotFromLocalDb,
+  loadFullLocalDatasetForRehydrate,
+  clearLocalUserCacheOnLogout,
+  getOutboxSyncMirror,
+  loadOutboxItems,
+  saveOutboxItems,
+  enqueueOutboxMutation,
+  applyOptimisticOutboxToSnapshot,
+  updateSyncState,
+} from './localDb.js';
 
-const OFFLINE_QUEUE_KEY = 'zayed_mart_offline_queue_v1';
 const DIRECT_CLOUD_KEY = 'zayed_mart_direct_cloud_v1';
 const AUTH_TOKEN_KEY = 'zayed_auth_token_v3';
 const AUTH_SESSION_KEY = 'zayed_auth_session_v3';
 const SNAPSHOT_CACHE_KEY = 'zayed_mart_last_snapshot';
 
 const authInvalidListeners = new Set();
+let activeFlushPromise = null;
 
 export const ALL_PERMISSION_IDS = [
   'attendance:kiosk',
@@ -23,6 +35,9 @@ export const ALL_PERMISSION_IDS = [
   'notes:write',
   'notes:resolve',
   'handover:manage',
+  'chat:read',
+  'chat:write',
+  'profile:view',
   'reports:view',
   'reports:export',
   'staff:manage',
@@ -56,6 +71,13 @@ export function formatRequestedQty(qty, unit = '') {
     return unit ? `0 ${unit}` : 'الكمية: 0';
   }
   return unit ? `${num} ${unit}` : `${num}`;
+}
+
+function makeClientUuid() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return `zm_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 // Check if URL hash contains a one-click cloud connection link (#cloud=base64)
@@ -108,6 +130,7 @@ export function clearAuthSession() {
   localStorage.removeItem(AUTH_TOKEN_KEY);
   localStorage.removeItem(AUTH_SESSION_KEY);
   localStorage.removeItem(SNAPSHOT_CACHE_KEY);
+  clearLocalUserCacheOnLogout().catch(() => {});
 }
 
 export function onAuthInvalidated(listener) {
@@ -165,6 +188,14 @@ export async function fetchStorePublicInfo() {
         branch_name: 'متابعة سحابية عن بُعد',
       };
     }
+    const localSnap = await loadSnapshotFromLocalDb();
+    if (localSnap?.settings) {
+      return {
+        offlineMode: true,
+        store_name: localSnap.settings.store_name || 'زايد مارت',
+        branch_name: localSnap.settings.branch_name || 'نسخة الهاتف المحلية (أوفلاين)',
+      };
+    }
     throw err;
   }
 }
@@ -207,7 +238,7 @@ export async function loginWithPassword(password) {
       setAuthSession('DIRECT_CLOUD_OWNER', cloudUser, ALL_PERMISSION_IDS);
       return { ok: true, token: 'DIRECT_CLOUD_OWNER', user: cloudUser, permissions: ALL_PERMISSION_IDS };
     }
-    throw new Error('تعذر الاتصال بخادم زايد مارت');
+    throw new Error('تعذر الاتصال بخادم زايد مارت — تحقق من اتصال الإنترنت لتسجيل الدخول لأول مرة');
   }
 }
 
@@ -270,27 +301,7 @@ export function buildMagicCloudShareUrl(url, anonKey, storeName = 'زايد ما
 }
 
 export function getOfflineQueue() {
-  try {
-    return JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || '[]');
-  } catch {
-    return [];
-  }
-}
-
-function setOfflineQueue(items) {
-  localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(items));
-}
-
-function enqueueOfflineRequest(endpoint, method, body) {
-  const q = getOfflineQueue();
-  q.push({
-    id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
-    endpoint,
-    method,
-    body,
-    queuedAt: new Date().toISOString(),
-  });
-  setOfflineQueue(q);
+  return getOutboxSyncMirror();
 }
 
 function getLocalDateKey(date = new Date()) {
@@ -313,40 +324,50 @@ async function fetchBootstrapFromDirectCloud(dateKey) {
 
   const targetDate = dateKey || getLocalDateKey();
 
-  const [empRes, attRes, supRes, truckRes, notesRes, handRes, shortRes, catRes] = await Promise.all([
-    supabase.from('employees').select('*').eq('is_active', 1).order('department'),
-    supabase
-      .from('attendance_logs')
-      .select('*')
-      .eq('date_key', targetDate)
-      .order('timestamp', { ascending: false }),
-    supabase
-      .from('suppliers')
-      .select('*')
-      .eq('is_active', 1)
-      .order('has_pending_return', { ascending: false }),
-    supabase
-      .from('truck_logs')
-      .select('*')
-      .or(`status.eq.unloading,date_key.eq.${targetDate}`)
-      .order('arrival_time', { ascending: false }),
-    supabase
-      .from('notes')
-      .select('*')
-      .or(`is_open_handover.eq.1,date_key.eq.${targetDate}`)
-      .order('timestamp', { ascending: false }),
-    supabase.from('shift_handovers').select('*').order('timestamp', { ascending: false }).limit(20),
-    supabase
-      .from('shortages')
-      .select('*')
-      .or(`status.neq.resolved,date_key.eq.${targetDate}`)
-      .order('updated_at', { ascending: false }),
-    supabase
-      .from('product_catalog')
-      .select('*')
-      .eq('is_active', 1)
-      .order('usage_count', { ascending: false }),
-  ]);
+  const [empRes, attRes, supRes, truckRes, notesRes, handRes, shortRes, catRes, chatRes] =
+    await Promise.all([
+      supabase.from('employees').select('*').eq('is_active', 1).order('department'),
+      supabase
+        .from('attendance_logs')
+        .select('*')
+        .or(`date_key.eq.${targetDate},shift_date_key.eq.${targetDate}`)
+        .order('timestamp', { ascending: false }),
+      supabase
+        .from('suppliers')
+        .select('*')
+        .eq('is_active', 1)
+        .order('has_pending_return', { ascending: false }),
+      supabase
+        .from('truck_logs')
+        .select('*')
+        .or(`status.eq.unloading,date_key.eq.${targetDate}`)
+        .order('arrival_time', { ascending: false }),
+      supabase
+        .from('notes')
+        .select('*')
+        .or(`is_open_handover.eq.1,date_key.eq.${targetDate}`)
+        .order('timestamp', { ascending: false }),
+      supabase
+        .from('shift_handovers')
+        .select('*')
+        .order('timestamp', { ascending: false })
+        .limit(20),
+      supabase
+        .from('shortages')
+        .select('*')
+        .or(`status.neq.resolved,date_key.eq.${targetDate}`)
+        .order('updated_at', { ascending: false }),
+      supabase
+        .from('product_catalog')
+        .select('*')
+        .eq('is_active', 1)
+        .order('usage_count', { ascending: false }),
+      supabase
+        .from('team_messages')
+        .select('*')
+        .order('timestamp', { ascending: false })
+        .limit(80),
+    ]);
 
   if (empRes.error) throw new Error(empRes.error.message);
 
@@ -358,6 +379,7 @@ async function fetchBootstrapFromDirectCloud(dateKey) {
   const handovers = handRes.data || [];
   const shortages = shortRes?.error ? [] : shortRes?.data || [];
   const productCatalog = catRes?.error ? [] : catRes?.data || [];
+  const teamMessages = chatRes?.error ? [] : chatRes?.data || [];
 
   const logsByEmp = new Map();
   for (let i = attendanceLogs.length - 1; i >= 0; i--) {
@@ -394,6 +416,7 @@ async function fetchBootstrapFromDirectCloud(dateKey) {
     return {
       ...emp,
       currentStatus,
+      shiftDateKey: latestLog?.shift_date_key || latestLog?.date_key || targetDate,
       checkInTime: firstCheckIn ? firstCheckIn.timestamp : null,
       latestActionTime: latestLog ? latestLog.timestamp : null,
       latestLogId: latestLog ? latestLog.id : null,
@@ -406,7 +429,7 @@ async function fetchBootstrapFromDirectCloud(dateKey) {
   const creds = getDirectCloudCredentials();
   const cachedAuth = getCachedAuthSession();
 
-  return {
+  const snap = {
     connectionMode: 'direct_cloud',
     dateKey: targetDate,
     serverTime: new Date().toISOString(),
@@ -441,6 +464,7 @@ async function fetchBootstrapFromDirectCloud(dateKey) {
     productCatalog,
     notes,
     handovers,
+    teamMessages,
     summary: {
       totalEmployees: employees.length,
       presentCount,
@@ -471,60 +495,95 @@ async function fetchBootstrapFromDirectCloud(dateKey) {
       openHandoverNotesCount: notes.filter((n) => n.is_open_handover === 1).length,
     },
   };
+
+  await saveBootstrapToLocalDb(snap);
+  updateSyncState({
+    online: true,
+    connectionMode: 'direct_cloud',
+    lastSyncedAt: new Date().toISOString(),
+  });
+  return snap;
 }
 
 export async function flushOfflineQueue() {
-  const queue = getOfflineQueue();
-  if (queue.length === 0) return 0;
-  if (!getAuthToken()) return 0;
+  if (activeFlushPromise) return activeFlushPromise;
 
-  const remaining = [];
-  let flushed = 0;
+  activeFlushPromise = (async () => {
+    const queue = await loadOutboxItems();
+    if (queue.length === 0) {
+      updateSyncState({ syncing: false, pendingCount: 0 });
+      return 0;
+    }
+    if (!getAuthToken()) return 0;
 
-  for (const item of queue) {
-    try {
-      let body = { ...item.body };
-      if (body._offlineDataUrl) {
-        const upRes = await fetch('/api/upload', {
-          method: 'POST',
-          headers: buildHeaders(true),
-          body: JSON.stringify({ dataUrl: body._offlineDataUrl, prefix: 'offline' }),
-        });
-        if (upRes.ok) {
-          const upJson = await upRes.json();
-          if (body._proofField) {
-            body[body._proofField] = upJson.url;
+    updateSyncState({ syncing: true, pendingCount: queue.length });
+
+    const remaining = [];
+    let flushed = 0;
+
+    for (const item of queue) {
+      try {
+        let body = { ...item.body };
+        if (body._offlineDataUrl) {
+          const upRes = await fetch('/api/upload', {
+            method: 'POST',
+            headers: buildHeaders(true),
+            body: JSON.stringify({ dataUrl: body._offlineDataUrl, prefix: 'offline' }),
+          });
+          if (upRes.ok) {
+            const upJson = await upRes.json();
+            if (body._proofField) {
+              body[body._proofField] = upJson.url;
+            }
           }
+          delete body._offlineDataUrl;
+          delete body._proofField;
         }
-        delete body._offlineDataUrl;
-        delete body._proofField;
-      }
 
-      const res = await fetch(item.endpoint, {
-        method: item.method,
-        headers: buildHeaders(true),
-        body: JSON.stringify(body),
-      });
-      if (res.ok) {
-        flushed += 1;
-      } else if (res.status === 401 || res.status === 403 || res.status === 400) {
-        // Drop forbidden/invalid queued items so they don't loop forever
-        if (res.status === 401) notifyAuthInvalidated();
-      } else {
+        const res = await fetch(item.endpoint, {
+          method: item.method || 'POST',
+          headers: buildHeaders(true),
+          body: JSON.stringify(body),
+        });
+
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && contentType.includes('application/json')) {
+          flushed += 1;
+        } else if (getDirectCloudCredentials() && !contentType.includes('application/json')) {
+          await executeDirectCloudMutation(item.endpoint, body);
+          flushed += 1;
+        } else if (res.status === 401 || res.status === 403 || res.status === 400 || res.status === 404) {
+          // Drop invalid/unauthorized items so they never block the queue forever
+          if (res.status === 401) notifyAuthInvalidated();
+        } else {
+          remaining.push(item);
+        }
+      } catch {
         remaining.push(item);
       }
-    } catch {
-      remaining.push(item);
     }
-  }
 
-  setOfflineQueue(remaining);
-  return flushed;
+    await saveOutboxItems(remaining);
+    updateSyncState({
+      syncing: false,
+      pendingCount: remaining.length,
+      lastSyncedAt: flushed > 0 ? new Date().toISOString() : undefined,
+    });
+    return flushed;
+  })();
+
+  try {
+    return await activeFlushPromise;
+  } finally {
+    activeFlushPromise = null;
+  }
 }
 
 export async function fetchBootstrap(dateKey) {
   try {
+    // 1. Flush any offline mutations first when online
     await flushOfflineQueue();
+
     const qs = dateKey ? `?date=${encodeURIComponent(dateKey)}` : '';
     const res = await fetch(`/api/bootstrap${qs}`, {
       headers: buildHeaders(false),
@@ -541,26 +600,83 @@ export async function fetchBootstrap(dateKey) {
     }
 
     if (res.ok && contentType.includes('application/json')) {
-      const json = await res.json();
+      let json = await res.json();
       if (json.auth?.user) {
         setAuthSession(getAuthToken(), json.auth.user, json.auth.permissions || []);
       }
-      localStorage.setItem(SNAPSHOT_CACHE_KEY, JSON.stringify(json));
-      return { ...json, connectionMode: 'local_server' };
+
+      // 2. ANTI-WIPE & AUTO-REHYDRATE FOR VERCEL COLD-STARTS (Before Supabase is linked):
+      // If Vercel serverless /tmp woke up completely empty while this phone/browser holds real data in IndexedDB,
+      // push the local dataset back into the server instead of wiping the phone's data!
+      if (json.serverColdEmpty) {
+        const { payload, totalCount } = await loadFullLocalDatasetForRehydrate();
+        if (totalCount > 0) {
+          try {
+            const rehydRes = await fetch('/api/sync/rehydrate', {
+              method: 'POST',
+              headers: buildHeaders(true),
+              body: JSON.stringify(payload),
+            });
+            if (rehydRes.ok) {
+              const refreshed = await fetch(`/api/bootstrap${qs}`, {
+                headers: buildHeaders(false),
+              });
+              if (refreshed.ok) {
+                json = await refreshed.json();
+              }
+            }
+          } catch {
+            // If rehydrate fails transiently, merge local cached snapshot below
+          }
+        }
+      }
+
+      const pendingOutbox = await loadOutboxItems();
+      const merged = applyOptimisticOutboxToSnapshot(
+        { ...json, connectionMode: 'local_server' },
+        pendingOutbox
+      );
+
+      await saveBootstrapToLocalDb(merged);
+      updateSyncState({
+        online: true,
+        connectionMode: 'local_server',
+        pendingCount: pendingOutbox.length,
+        lastSyncedAt: new Date().toISOString(),
+      });
+      return merged;
     }
     throw new Error('Local server unavailable');
   } catch (err) {
     if (err.code === 'UNAUTHENTICATED' || err.isServerResponse) {
       throw err;
     }
-    // Fallback 1: Direct Cloud mode if configured (e.g. Owner's phone outside branch / Vercel)
-    if (getDirectCloudCredentials()) {
-      return await fetchBootstrapFromDirectCloud(dateKey);
+    // Fallback 1: Direct Cloud mode if configured (e.g. Owner's phone outside branch)
+    if (getDirectCloudCredentials() && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+      try {
+        const cloudSnap = await fetchBootstrapFromDirectCloud(dateKey);
+        const pendingOutbox = await loadOutboxItems();
+        return applyOptimisticOutboxToSnapshot(cloudSnap, pendingOutbox);
+      } catch {
+        // Fall through to IndexedDB offline snapshot if internet is also down!
+      }
     }
-    // Fallback 2: Cached offline snapshot (only when user already has an active session token)
-    const cached = localStorage.getItem(SNAPSHOT_CACHE_KEY);
-    if (cached && getAuthToken()) {
-      return { ...JSON.parse(cached), connectionMode: 'offline_cached' };
+
+    // Fallback 2: Full Local-First IndexedDB Snapshot + Optimistic Outbox!
+    if (getAuthToken()) {
+      const localSnap = await loadSnapshotFromLocalDb(dateKey);
+      if (localSnap) {
+        const pendingOutbox = await loadOutboxItems();
+        updateSyncState({
+          online: false,
+          connectionMode: 'offline_cached',
+          pendingCount: pendingOutbox.length,
+        });
+        return applyOptimisticOutboxToSnapshot(
+          { ...localSnap, connectionMode: 'offline_cached' },
+          pendingOutbox
+        );
+      }
     }
     throw err;
   }
@@ -583,7 +699,6 @@ export async function uploadProofImage(dataUrl, prefix = 'proof') {
       return json.url;
     }
   } catch {
-    // If direct cloud is active, upload straight to Supabase Storage
     const supabase = getSupabaseDirectClient();
     if (supabase) {
       try {
@@ -604,11 +719,84 @@ export async function uploadProofImage(dataUrl, prefix = 'proof') {
   return dataUrl;
 }
 
+// Resolve QR / Employee Quick-Scan offline using IndexedDB cached employees!
+async function enqueueOfflineQuickScan(body, actorSession) {
+  const localSnap = await loadSnapshotFromLocalDb();
+  const employees = localSnap?.employees || [];
+  const raw = normalizeDigitsClient(String(body?.code_or_qr || '').trim());
+  let emp = null;
+  if (raw.toUpperCase().startsWith('ZMART:EMP:')) {
+    const empId = raw.slice('ZMART:EMP:'.length).trim();
+    emp = employees.find((e) => e.id === empId);
+  } else {
+    emp = employees.find((e) => String(e.emp_code || '').trim() === raw);
+  }
+
+  if (!emp) {
+    throw new Error('لم يتم العثور على الموظف محلياً — تأكد من الكود أو اتصل بالإنترنت لتحديث القائمة');
+  }
+
+  let nextAction = body.preferred_action || '';
+  if (!nextAction) {
+    if (emp.currentStatus === 'present') nextAction = 'check_out';
+    else if (emp.currentStatus === 'on_break') nextAction = 'break_end';
+    else nextAction = 'check_in';
+  }
+
+  const nowIso = new Date().toISOString();
+  await enqueueOutboxMutation({
+    endpoint: '/api/attendance',
+    method: 'POST',
+    body: {
+      id: makeClientUuid(),
+      employee_id: emp.id,
+      employee_name: emp.name,
+      action_type: nextAction,
+      timestamp: nowIso,
+      note: 'مسح بطاقة سريع (مسجل أوفلاين)',
+    },
+    actorName: actorSession?.user?.display_name || 'جهاز الموبايل',
+    actorRole: actorSession?.user?.role || '',
+  });
+
+  return {
+    ok: true,
+    queuedOffline: true,
+    employee: emp,
+    nextAction,
+    log: {
+      employee_id: emp.id,
+      employee_name: emp.name,
+      action_type: nextAction,
+      timestamp: nowIso,
+    },
+  };
+}
+
+const OFFLINE_QUEUEABLE_ENDPOINTS = [
+  '/api/attendance',
+  '/api/attendance/quick-scan',
+  '/api/trucks/arrive',
+  '/api/notes',
+  '/api/shortages',
+  '/api/team-messages',
+  '/api/employees',
+  '/api/suppliers',
+];
+
+function isEndpointQueueableOffline(endpoint, method = 'POST') {
+  if (OFFLINE_QUEUEABLE_ENDPOINTS.includes(endpoint) && method === 'POST') return true;
+  if (endpoint.startsWith('/api/shortages/') && (method === 'PUT' || method === 'POST')) return true;
+  if (endpoint.startsWith('/api/trucks/') && endpoint.endsWith('/complete') && method === 'POST') return true;
+  return false;
+}
+
 export async function postActionWithOfflineSupport(endpoint, body, options = {}) {
   const { rawDataUrl, proofField } = options;
+  const recordId = body?.id || makeClientUuid();
 
   try {
-    let finalBody = { ...body };
+    let finalBody = { ...body, id: recordId };
     if (rawDataUrl && proofField) {
       finalBody[proofField] = await uploadProofImage(rawDataUrl, proofField);
     }
@@ -624,7 +812,7 @@ export async function postActionWithOfflineSupport(endpoint, body, options = {})
       return await res.json();
     }
 
-    // If running in Direct Cloud Mode without local server, write directly to Supabase!
+    // Direct Cloud Mode when running without backend API
     if (getDirectCloudCredentials() && !contentType.includes('application/json')) {
       return await executeDirectCloudMutation(endpoint, finalBody);
     }
@@ -641,16 +829,29 @@ export async function postActionWithOfflineSupport(endpoint, body, options = {})
     if (err.isServerResponse) {
       throw err;
     }
-    // Network failure on local Wi-Fi: queue offline if queueable operational endpoint
-    const queueable = ['/api/attendance', '/api/trucks/arrive', '/api/notes', '/api/shortages'];
-    if (queueable.includes(endpoint) && !getDirectCloudCredentials()) {
-      const offlineBody = { ...body };
+
+    const session = getCachedAuthSession();
+
+    // Special local resolution for QR / Quick-Scan while offline!
+    if (endpoint === '/api/attendance/quick-scan') {
+      return await enqueueOfflineQuickScan(body, session);
+    }
+
+    // Queue any operational mutation into IndexedDB outbox when internet is down!
+    if (isEndpointQueueableOffline(endpoint, 'POST')) {
+      const offlineBody = { ...body, id: recordId, timestamp: body?.timestamp || new Date().toISOString() };
       if (rawDataUrl && proofField) {
         offlineBody._offlineDataUrl = rawDataUrl;
         offlineBody._proofField = proofField;
       }
-      enqueueOfflineRequest(endpoint, 'POST', offlineBody);
-      return { ok: true, queuedOffline: true };
+      await enqueueOutboxMutation({
+        endpoint,
+        method: 'POST',
+        body: offlineBody,
+        actorName: session?.user?.display_name || '',
+        actorRole: session?.user?.role || '',
+      });
+      return { ok: true, queuedOffline: true, id: recordId };
     }
     throw err;
   }
@@ -661,9 +862,34 @@ async function executeDirectCloudMutation(endpoint, body) {
   if (!supabase) throw new Error('لا يوجد اتصال سحابي');
 
   const now = new Date();
-  const iso = now.toISOString();
-  const dateKey = getLocalDateKey(now);
-  const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+  const iso = body.timestamp || now.toISOString();
+  const dateKey = getLocalDateKey(new Date(iso));
+  const id = body.id || makeClientUuid();
+
+  if (endpoint === '/api/attendance') {
+    const row = {
+      id,
+      employee_id: body.employee_id,
+      employee_name: body.employee_name || 'موظف',
+      department: body.department || '',
+      action_type: body.action_type,
+      timestamp: iso,
+      date_key: dateKey,
+      shift_date_key: dateKey,
+      late_minutes: 0,
+      allowed_break_minutes: Number(body.allowed_break_minutes) || 0,
+      break_duration_minutes: 0,
+      break_reason: body.break_reason || '',
+      note: body.note || '',
+      proof_url: body.proof_url || '',
+      recorded_by: body.recorded_by || 'الإدارة (سحابي)',
+      verified_by_cctv: 0,
+      synced: 1,
+    };
+    const { error } = await supabase.from('attendance_logs').upsert(row, { onConflict: 'id' });
+    if (error) throw new Error(error.message);
+    return { ok: true, log: row };
+  }
 
   if (endpoint === '/api/notes') {
     const row = {
@@ -682,7 +908,7 @@ async function executeDirectCloudMutation(endpoint, body) {
       date_key: dateKey,
       synced: 1,
     };
-    const { error } = await supabase.from('notes').insert(row);
+    const { error } = await supabase.from('notes').upsert(row, { onConflict: 'id' });
     if (error) throw new Error(error.message);
     return { ok: true, note: row };
   }
@@ -696,43 +922,66 @@ async function executeDirectCloudMutation(endpoint, body) {
     }
     const row = {
       id,
-      catalog_item_id: body.catalog_item_id || '',
+      product_id: body.product_id || '',
       item_name: body.item_name || 'صنف ناقص',
       category: body.category || 'بقالة جافة',
       requested_qty: parsedQty,
       unit: body.unit || '',
       urgency: body.urgency || 'out_of_stock',
       status: 'open',
+      is_suggestion: body.is_suggestion ? 1 : 0,
       supplier_id: body.supplier_id || '',
       supplier_name: body.supplier_name || '',
       notes: body.notes || '',
       recorded_by: body.recorded_by || 'الإدارة (عن بُعد)',
+      recorded_by_role: 'owner',
+      updated_by: '',
       resolved_by: '',
       resolved_at: '',
-      created_at: iso,
+      timestamp: iso,
       updated_at: iso,
       date_key: dateKey,
       synced: 1,
     };
-    const { error } = await supabase.from('shortages').insert(row);
+    const { error } = await supabase.from('shortages').upsert(row, { onConflict: 'id' });
     if (error) throw new Error(error.message);
     return { ok: true, shortage: row };
+  }
+
+  if (endpoint === '/api/team-messages') {
+    const row = {
+      id,
+      channel: body.channel || 'general',
+      sender_id: 'cloud_owner',
+      sender_name: body.sender_name || 'الإدارة',
+      sender_role: 'owner',
+      content: body.content || body.message || '',
+      is_urgent: body.is_urgent || body.priority === 'urgent' ? 1 : 0,
+      is_pinned: body.is_pinned ? 1 : 0,
+      timestamp: iso,
+      date_key: dateKey,
+      synced: 1,
+    };
+    const { error } = await supabase.from('team_messages').upsert(row, { onConflict: 'id' });
+    if (error) throw new Error(error.message);
+    return { ok: true, message: row };
   }
 
   if (endpoint === '/api/employees') {
     const row = {
       id,
+      emp_code: body.emp_code || '',
       name: body.name,
-      department: body.department || 'منسقي ممرات',
+      department: body.department || 'كاشير',
       role_title: body.role_title || '',
       shift_start: body.shift_start || '08:00',
-      shift_end: body.shift_end || '17:00',
+      shift_end: body.shift_end || '20:00',
       avatar_color: body.avatar_color || '#1A73E8',
       phone: body.phone || '',
       is_active: 1,
       updated_at: iso,
     };
-    const { error } = await supabase.from('employees').insert(row);
+    const { error } = await supabase.from('employees').upsert(row, { onConflict: 'id' });
     if (error) throw new Error(error.message);
     return { ok: true, employee: row };
   }
@@ -741,18 +990,85 @@ async function executeDirectCloudMutation(endpoint, body) {
 }
 
 export async function apiRequest(endpoint, method = 'GET', body) {
-  const res = await fetch(endpoint, {
-    method,
-    headers: buildHeaders(Boolean(body)),
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const contentType = res.headers.get('content-type') || '';
-  const json = contentType.includes('application/json') ? await res.json() : {};
-  if (!res.ok) {
-    if (res.status === 401) {
-      notifyAuthInvalidated();
+  try {
+    const res = await fetch(endpoint, {
+      method,
+      headers: buildHeaders(Boolean(body)),
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const contentType = res.headers.get('content-type') || '';
+    const json = contentType.includes('application/json') ? await res.json() : {};
+    if (!res.ok) {
+      if (res.status === 401) {
+        notifyAuthInvalidated();
+      }
+      const serverErr = new Error(json.error || 'حدث خطأ غير متوقع');
+      serverErr.isServerResponse = true;
+      serverErr.status = res.status;
+      throw serverErr;
     }
-    throw new Error(json.error || 'حدث خطأ غير متوقع');
+    return json;
+  } catch (err) {
+    if (err.isServerResponse) throw err;
+
+    // Queue operational updates/creates into IndexedDB outbox when offline!
+    if (method !== 'GET' && isEndpointQueueableOffline(endpoint, method)) {
+      const session = getCachedAuthSession();
+      const recordId = body?.id || makeClientUuid();
+      await enqueueOutboxMutation({
+        endpoint,
+        method,
+        body: { ...(body || {}), id: recordId },
+        actorName: session?.user?.display_name || '',
+        actorRole: session?.user?.role || '',
+      });
+      return { ok: true, queuedOffline: true, id: recordId };
+    }
+    throw err;
   }
-  return json;
+}
+
+export async function fetchMyProfile() {
+  return apiRequest('/api/profile/me', 'GET');
+}
+
+export async function fetchPersonLog(personId) {
+  return apiRequest(`/api/logs/person/${encodeURIComponent(personId)}`, 'GET');
+}
+
+export async function fetchMasterAuditLogs(params = {}) {
+  const searchParams = new URLSearchParams();
+  if (params.limit) searchParams.set('limit', String(params.limit));
+  if (params.action) searchParams.set('action', params.action);
+  if (params.role) searchParams.set('role', params.role);
+  if (params.q) searchParams.set('q', params.q);
+  if (params.from) searchParams.set('from', params.from);
+  if (params.to) searchParams.set('to', params.to);
+  const qs = searchParams.toString();
+  return apiRequest(`/api/audit-logs${qs ? `?${qs}` : ''}`, 'GET');
+}
+
+export async function clearMasterAuditLogs() {
+  return apiRequest('/api/audit-logs', 'DELETE');
+}
+
+export async function purgeFakeData() {
+  return apiRequest('/api/system/purge-fake-data', 'POST');
+}
+
+export async function fetchTeamMessages(channel = 'all') {
+  const qs = channel && channel !== 'all' ? `?channel=${encodeURIComponent(channel)}` : '';
+  return apiRequest(`/api/team-messages${qs}`, 'GET');
+}
+
+export async function sendTeamMessage(payload) {
+  return postActionWithOfflineSupport('/api/team-messages', payload);
+}
+
+export async function togglePinTeamMessage(id) {
+  return apiRequest(`/api/team-messages/${encodeURIComponent(id)}/pin`, 'POST');
+}
+
+export async function deleteTeamMessage(id) {
+  return apiRequest(`/api/team-messages/${encodeURIComponent(id)}`, 'DELETE');
 }

@@ -12,7 +12,7 @@ const ACTION_AR = {
 };
 
 /**
- * الميزة #4: وضع كروت الـ QR والرمز السريع (بدون لمس أو برمز 3 أرقام) + طباعة كروت الموظفين
+ * كروت الـ QR والرمز السريع + طباعة كروت جميع الموظفين (بدون إظهار الرقم السري على الكرت)
  */
 export default function QrQuickModal({
   open,
@@ -29,8 +29,10 @@ export default function QrQuickModal({
   const [tab, setTab] = useState(initialTab);
   const [codeInput, setCodeInput] = useState('');
   const [preferredAction, setPreferredAction] = useState(''); // '' = automatic smart toggle
+  const [breakMinutes, setBreakMinutes] = useState(30);
   const [submitting, setSubmitting] = useState(false);
   const [scanResultBanner, setScanResultBanner] = useState(null);
+  const [cardSearch, setCardSearch] = useState('');
 
   // Camera QR Scanner state (optional hands-free QR reader when on 'scan' tab)
   const videoRef = useRef(null);
@@ -51,9 +53,9 @@ export default function QrQuickModal({
     }
   }, [open, initialTab, canPrintCards]);
 
-  // Generate QR images locally & offline whenever 'cards' tab opens
+  // Generate QR images locally & offline whenever modal opens or employees change
   useEffect(() => {
-    if (!open || tab !== 'cards') return;
+    if (!open) return;
     let cancelled = false;
     async function generateAll() {
       const nextMap = {};
@@ -61,9 +63,9 @@ export default function QrQuickModal({
         const payload = `ZMART:EMP:${emp.id}`;
         try {
           nextMap[emp.id] = await QRCode.toDataURL(payload, {
-            width: 220,
+            width: 240,
             margin: 1,
-            color: { dark: '#1F1F1F', light: '#FFFFFF' },
+            color: { dark: '#0F172A', light: '#FFFFFF' },
           });
         } catch {
           // ignore
@@ -75,7 +77,7 @@ export default function QrQuickModal({
     return () => {
       cancelled = true;
     };
-  }, [open, tab, employees]);
+  }, [open, employees]);
 
   // Start / Stop QR Scanner stream ONLY when user explicitly opens the 'scan' tab
   useEffect(() => {
@@ -158,6 +160,7 @@ export default function QrQuickModal({
       const res = await apiRequest('/api/attendance/quick-scan', 'POST', {
         code_or_qr: rawCode,
         preferred_action: preferredAction,
+        allowed_break_minutes: preferredAction === 'break_start' ? breakMinutes : undefined,
         recorded_by: `${actorName} (QR/كود)`,
       });
 
@@ -188,7 +191,7 @@ export default function QrQuickModal({
         setScanResultBanner((curr) => (curr?.empName === empName ? null : curr));
       }, 2800);
     } catch (err) {
-      onToast?.(err.message || 'الكود غير معروف', 'error');
+      onToast?.(err.message || 'الكود أو الـ QR غير معروف', 'error');
     } finally {
       setSubmitting(false);
     }
@@ -216,7 +219,200 @@ export default function QrQuickModal({
     img.src = URL.createObjectURL(file);
   }
 
+  function handlePrintCardsWindow(listToPrint) {
+    const cardsList = listToPrint && listToPrint.length > 0 ? listToPrint : employees;
+    if (cardsList.length === 0) {
+      onToast?.('لا يوجد موظفون لطباعة كروتهم حالياً', 'error');
+      return;
+    }
+
+    const cardsHtml = cardsList
+      .map((emp) => {
+        const qrSrc = qrMap[emp.id] || '';
+        const shiftText = `${emp.shift_start || '08:00'} -> ${emp.shift_end || '20:00'}`;
+        return `
+          <div class="badge-card">
+            <div class="badge-info">
+              <div class="badge-header">
+                <img src="${window.location.origin}/logo.jpeg" alt="${storeName}" class="badge-logo" onerror="this.style.display='none'" />
+                <span>${storeName} — بطاقة حضور ذكية</span>
+              </div>
+              <div class="badge-name">${emp.name}</div>
+              <div class="badge-dept">${emp.department}${emp.role_title ? ` • ${emp.role_title}` : ''}</div>
+              <div class="badge-shift">⏰ شفت 12 ساعة: <span dir="ltr">${shiftText}</span></div>
+              <div class="badge-footer">🔒 بطاقة QR مشفرة (بدون رقم سري)</div>
+            </div>
+            <div class="badge-qr-wrap">
+              ${qrSrc ? `<img src="${qrSrc}" alt="QR" class="badge-qr" />` : ''}
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    const printWin = window.open('', '_blank', 'width=900,height=800');
+    if (!printWin) {
+      // Fallback to native window.print() if popup blocked
+      window.print();
+      return;
+    }
+
+    printWin.document.write(`<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="utf-8" />
+  <title>طباعة كروت الـ QR للموظفين — ${storeName} (${cardsList.length} موظف)</title>
+  <style>
+    @page { size: A4; margin: 10mm; }
+    * { box-sizing: border-box; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+    body {
+      font-family: 'Cairo', 'Tajawal', 'Segoe UI', Tahoma, Arial, sans-serif;
+      direction: rtl;
+      margin: 0;
+      padding: 8mm;
+      background: #ffffff;
+      color: #0f172a;
+    }
+    .sheet-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 2px solid #0b57d0;
+      padding-bottom: 8px;
+      margin-bottom: 14px;
+    }
+    .sheet-title { font-size: 16pt; font-weight: 800; color: #0b57d0; }
+    .sheet-meta { font-size: 10pt; color: #475569; font-weight: 700; }
+    .cards-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+    .badge-card {
+      border: 2px solid #1e293b;
+      border-radius: 14px;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: #ffffff;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    .badge-info { flex: 1; min-width: 0; }
+    .badge-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 9.5pt;
+      font-weight: 800;
+      color: #0b57d0;
+      margin-bottom: 4px;
+    }
+    .badge-logo {
+      width: 20px;
+      height: 20px;
+      border-radius: 4px;
+      object-fit: cover;
+    }
+    .badge-name {
+      font-size: 13.5pt;
+      font-weight: 900;
+      color: #0f172a;
+      margin-bottom: 2px;
+    }
+    .badge-dept {
+      font-size: 10pt;
+      font-weight: 700;
+      color: #334155;
+      margin-bottom: 4px;
+    }
+    .badge-shift {
+      font-size: 9pt;
+      color: #475569;
+      margin-bottom: 6px;
+      font-weight: 700;
+    }
+    .badge-footer {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: #e8f0fe;
+      color: #0b57d0;
+      font-size: 8.5pt;
+      font-weight: 800;
+    }
+    .badge-qr-wrap {
+      flex-shrink: 0;
+    }
+    .badge-qr {
+      width: 92px;
+      height: 92px;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      display: block;
+    }
+    @media screen {
+      .no-print-bar {
+        margin-bottom: 14px;
+        padding: 10px 14px;
+        background: #eff6ff;
+        border: 1px solid #bfdbfe;
+        border-radius: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .print-btn {
+        background: #0b57d0;
+        color: #fff;
+        border: none;
+        padding: 8px 18px;
+        border-radius: 8px;
+        font-weight: 800;
+        cursor: pointer;
+      }
+    }
+    @media print {
+      .no-print-bar { display: none !important; }
+      body { padding: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="no-print-bar">
+    <span><strong>جاهز للطباعة:</strong> ${cardsList.length} كرت QR لجميع الموظفين (بدون إظهار كلمات المرور)</span>
+    <button class="print-btn" onclick="window.print()">🖨️ طباعة الآن (A4)</button>
+  </div>
+  <div class="sheet-header">
+    <div class="sheet-title">${storeName} — كروت الحضور والانصراف الذكية (QR)</div>
+    <div class="sheet-meta">إجمالي الكروت: ${cardsList.length} موظف</div>
+  </div>
+  <div class="cards-grid">
+    ${cardsHtml}
+  </div>
+  <script>
+    window.onload = function() {
+      setTimeout(function() { window.print(); }, 350);
+    };
+  </script>
+</body>
+</html>`);
+    printWin.document.close();
+  }
+
   if (!open) return null;
+
+  const filteredCardsEmployees = employees.filter((emp) => {
+    if (!cardSearch.trim()) return true;
+    const q = cardSearch.trim().toLowerCase();
+    return (
+      emp.name?.toLowerCase().includes(q) ||
+      emp.department?.toLowerCase().includes(q) ||
+      emp.role_title?.toLowerCase().includes(q)
+    );
+  });
 
   return (
     <div onClick={onClose} className="g-modal-overlay">
@@ -234,10 +430,10 @@ export default function QrQuickModal({
             </div>
             <div>
               <h3 className="text-base sm:text-lg font-extrabold m-0">
-                كروت الـ QR والرمز السريع للموظفين
+                ماسح الـ QR الذكي وطباعة البطاقات
               </h3>
               <p className="text-xs text-[var(--g-muted)] m-0">
-                تسجيل حضور وانصراف فوري في ثانية واحدة بدون بحث
+                تسجيل حضور وانصراف واستراحات فوري بالـ QR بدون كشف الأرقام السرية
               </p>
             </div>
           </div>
@@ -258,9 +454,11 @@ export default function QrQuickModal({
           } gap-1 bg-[var(--g-surface-variant)] p-1 sm:p-1.5 rounded-2xl sm:rounded-full`}
         >
           {[
-            { id: 'code', label: 'الرمز السريع', icon: 'dialpad' },
-            { id: 'scan', label: 'مسح كرت QR', icon: 'qr_code_scanner' },
-            ...(canPrintCards ? [{ id: 'cards', label: 'طباعة الكروت', icon: 'badge' }] : []),
+            { id: 'code', label: 'الرمز / الماسح', icon: 'dialpad' },
+            { id: 'scan', label: 'كاميرا الـ QR', icon: 'qr_code_scanner' },
+            ...(canPrintCards
+              ? [{ id: 'cards', label: `طباعة الكروت (${employees.length})`, icon: 'badge' }]
+              : []),
           ].map((t) => (
             <button
               key={t.id}
@@ -295,31 +493,53 @@ export default function QrQuickModal({
 
         {/* Action Override Pills (Auto vs Explicit) */}
         {tab !== 'cards' && (
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
-            {[
-              { id: '', label: 'تلقائي ذكي (حضور ⇄ انصراف)' },
-              { id: 'check_in', label: 'حضور فقط 👋' },
-              { id: 'break_start', label: 'استراحة ☕' },
-              { id: 'break_end', label: 'عودة ▶️' },
-              { id: 'check_out', label: 'انصراف 🏠' },
-            ].map((opt) => (
-              <button
-                key={opt.id}
-                type="button"
-                onClick={() => setPreferredAction(opt.id)}
-                className={`px-3 py-1.5 rounded-full text-xs whitespace-nowrap border transition-all ${
-                  preferredAction === opt.id
-                    ? 'g-pill-active border-transparent'
-                    : 'bg-[var(--g-surface)] border-[var(--g-border)] text-[var(--g-muted)] font-medium'
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
+          <div className="space-y-2">
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-0.5">
+              {[
+                { id: '', label: 'تلقائي ذكي (حضور ⇄ انصراف)' },
+                { id: 'check_in', label: 'حضور فقط 👋' },
+                { id: 'break_start', label: 'بداية استراحة ☕' },
+                { id: 'break_end', label: 'عودة من استراحة ▶️' },
+                { id: 'check_out', label: 'انصراف 🏠' },
+              ].map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => setPreferredAction(opt.id)}
+                  className={`px-3 py-1.5 rounded-full text-xs whitespace-nowrap border transition-all ${
+                    preferredAction === opt.id
+                      ? 'g-pill-active border-transparent'
+                      : 'bg-[var(--g-surface)] border-[var(--g-border)] text-[var(--g-muted)] font-medium'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
+            {preferredAction === 'break_start' && (
+              <div className="flex items-center gap-1.5 flex-wrap bg-[var(--g-surface-variant)] px-3 py-2 rounded-2xl">
+                <span className="text-xs font-bold text-[var(--g-muted)]">مدة الاستراحة المسموحة:</span>
+                {[15, 30, 45, 60].map((mins) => (
+                  <button
+                    key={mins}
+                    type="button"
+                    onClick={() => setBreakMinutes(mins)}
+                    className={`px-2.5 py-1 rounded-full text-xs font-extrabold transition-all ${
+                      breakMinutes === mins
+                        ? 'bg-[var(--g-primary)] text-white'
+                        : 'bg-[var(--g-surface)] text-[var(--g-text)] border border-[var(--g-border)]'
+                    }`}
+                  >
+                    {mins} دقيقة
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
-        {/* TAB 1: Quick 3-Digit Employee Code Keypad */}
+        {/* TAB 1: USB QR Scanner / Personal Code Keypad */}
         {tab === 'code' && (
           <form
             onSubmit={(e) => {
@@ -330,16 +550,15 @@ export default function QrQuickModal({
           >
             <div className="text-center">
               <p className="text-xs text-[var(--g-muted)] m-0 mb-2">
-                أدخل كود الموظف السريع (مثال: <strong className="num-ltr">101</strong> أو{' '}
-                <strong className="num-ltr">102</strong>) أو امسح بجهاز الباركود USB:
+                امسح كرت الـ QR بجهاز الباركود (USB) مباشرة، أو أدخل الرمز الشخصي السري الخاص بك:
               </p>
               <input
-                type="text"
-                inputMode="numeric"
+                type="password"
                 value={codeInput}
                 onChange={(e) => setCodeInput(normalizeDigitsClient(e.target.value))}
-                placeholder="101"
-                className="g-input w-full max-w-xs mx-auto text-center text-2xl sm:text-3xl font-extrabold num-ltr tracking-widest"
+                placeholder="امسح الـ QR أو أدخل رمزك السري"
+                autoFocus
+                className="g-input w-full max-w-xs mx-auto text-center text-xl sm:text-2xl font-extrabold num-ltr tracking-widest"
               />
             </div>
 
@@ -348,8 +567,8 @@ export default function QrQuickModal({
                 <button
                   key={d}
                   type="button"
-                  onClick={() => setCodeInput((v) => (v + d).slice(0, 6))}
-                  className="min-h-[54px] rounded-2xl bg-[var(--g-surface-variant)] hover:bg-[var(--g-secondary-container)] active:scale-95 text-2xl font-black flex items-center justify-center transition-all border border-[var(--g-border)]"
+                  onClick={() => setCodeInput((v) => (v + d).slice(0, 32))}
+                  className="min-h-[52px] rounded-2xl bg-[var(--g-surface-variant)] hover:bg-[var(--g-secondary-container)] active:scale-95 text-2xl font-black flex items-center justify-center transition-all border border-[var(--g-border)]"
                 >
                   {d}
                 </button>
@@ -357,47 +576,47 @@ export default function QrQuickModal({
               <button
                 type="button"
                 onClick={() => setCodeInput('')}
-                className="min-h-[54px] rounded-2xl bg-[var(--g-red-bg)] text-[var(--g-red)] text-xs sm:text-sm font-black flex items-center justify-center active:scale-95 transition-all"
+                className="min-h-[52px] rounded-2xl bg-[var(--g-red-bg)] text-[var(--g-red)] text-xs sm:text-sm font-black flex items-center justify-center active:scale-95 transition-all"
               >
                 مسح
               </button>
               <button
                 type="button"
-                onClick={() => setCodeInput((v) => (v + '0').slice(0, 6))}
-                className="min-h-[54px] rounded-2xl bg-[var(--g-surface-variant)] text-2xl font-black flex items-center justify-center active:scale-95 transition-all border border-[var(--g-border)]"
+                onClick={() => setCodeInput((v) => (v + '0').slice(0, 32))}
+                className="min-h-[52px] rounded-2xl bg-[var(--g-surface-variant)] text-2xl font-black flex items-center justify-center active:scale-95 transition-all border border-[var(--g-border)]"
               >
                 0
               </button>
               <button
                 type="submit"
                 disabled={!codeInput || submitting}
-                className="min-h-[54px] rounded-2xl bg-[var(--g-primary)] text-white text-sm font-black flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all shadow-xs"
+                className="min-h-[52px] rounded-2xl bg-[var(--g-primary)] text-white text-sm font-black flex items-center justify-center disabled:opacity-50 active:scale-95 transition-all shadow-xs"
               >
                 تأكيد ✓
               </button>
             </div>
 
-            {/* Quick Directory Reference Chips */}
-            <div className="pt-2 border-t border-[var(--g-border)]">
-              <div className="text-xs font-bold text-[var(--g-muted)] mb-2">
-                أكواد الموظفين السريعة (اضغط على الاسم للتسجيل المباشر بلمسة واحدة):
+            {/* Quick Employee Selection WITHOUT exposing passwords */}
+            {employees.length > 0 && (
+              <div className="pt-2 border-t border-[var(--g-border)]">
+                <div className="text-xs font-bold text-[var(--g-muted)] mb-2">
+                  أو اضغط على اسم الموظف للتسجيل الفوري (محمي بدون إظهار الباسورد):
+                </div>
+                <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-1.5 max-h-36 overflow-y-auto">
+                  {employees.map((emp) => (
+                    <button
+                      key={emp.id}
+                      type="button"
+                      onClick={() => processScanCode(`ZMART:EMP:${emp.id}`)}
+                      className="min-h-[40px] px-3 py-1.5 rounded-xl bg-[var(--g-surface-variant)] hover:bg-[var(--g-secondary-container)] border border-[var(--g-border)] text-xs font-extrabold flex items-center gap-1.5 truncate active:scale-95"
+                    >
+                      <span className="ms-icon text-sm text-[var(--g-primary)] shrink-0">qr_code_2</span>
+                      <span className="truncate">{emp.name}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
-              <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-1.5 max-h-36 overflow-y-auto">
-                {employees.map((emp) => (
-                  <button
-                    key={emp.id}
-                    type="button"
-                    onClick={() => processScanCode(emp.emp_code || emp.id)}
-                    className="min-h-[42px] px-3 py-1.5 rounded-xl bg-[var(--g-surface-variant)] hover:bg-[var(--g-secondary-container)] border border-[var(--g-border)] text-xs font-extrabold flex items-center gap-1.5 truncate active:scale-95"
-                  >
-                    <span className="num-ltr px-1.5 py-0.5 rounded bg-[var(--g-surface)] text-[var(--g-primary)] shrink-0">
-                      #{emp.emp_code}
-                    </span>
-                    <span className="truncate">{emp.name}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
+            )}
           </form>
         )}
 
@@ -405,7 +624,7 @@ export default function QrQuickModal({
         {tab === 'scan' && (
           <div className="space-y-3 text-center">
             <p className="text-xs text-[var(--g-muted)] m-0">
-              ارفَع كرت الـ QR الخاص بالعامل أمام العدسة ليتم التسجيل تلقائياً في ثانية واحدة دون لمس الشاشة
+              ارفَع كرت الـ QR الخاص بالموظف أمام العدسة ليتم التسجيل تلقائياً في ثانية واحدة دون لمس الشاشة
             </p>
 
             <div className="relative mx-auto w-full max-w-sm aspect-4/3 rounded-3xl overflow-hidden bg-black border-2 border-[var(--g-primary)] flex items-center justify-center">
@@ -452,59 +671,111 @@ export default function QrQuickModal({
           </div>
         )}
 
-        {/* TAB 3: Printable Employee QR Cards */}
+        {/* TAB 3: Printable Employee QR Cards (NO PASSWORD SHOWN, ALL EMPLOYEES INCLUDED) */}
         {tab === 'cards' && (
-          <div className="space-y-4">
+          <div className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2 bg-[var(--g-surface-variant)] p-3 rounded-2xl">
-              <p className="text-xs text-[var(--g-muted)] m-0">
-                اطبع هذه الصفحة على ورق عادي أو مقوى وغلّف كل كرت بلاستيك حراري لتسليمه للعمال:
-              </p>
-              <button
-                type="button"
-                onClick={() => window.print()}
-                className="px-4 py-2 rounded-full bg-[var(--g-primary)] text-white text-xs font-bold flex items-center gap-1.5"
-              >
-                <span className="ms-icon text-base">print</span>
-                <span>طباعة كل الكروت (A4)</span>
-              </button>
+              <div className="space-y-0.5">
+                <div className="text-xs font-extrabold text-[var(--g-text)]">
+                  جاهز لطباعة {employees.length} كرت QR لجميع الموظفين (بدون أرقام سرية على الكرت)
+                </div>
+                <p className="text-[11px] text-[var(--g-muted)] m-0">
+                  يحتوي الكرت على رمز الـ QR المشفر والاسم والقسم والشفت فقط للحفاظ على سرية باسورد كل موظف.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {cardSearch.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => handlePrintCardsWindow(filteredCardsEmployees)}
+                    className="px-3.5 py-2 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-bold flex items-center gap-1"
+                  >
+                    <span className="ms-icon text-sm">filter_alt</span>
+                    <span>طباعة المفلتر ({filteredCardsEmployees.length})</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => handlePrintCardsWindow(employees)}
+                  className="px-4 py-2 rounded-full bg-[var(--g-primary)] text-white text-xs font-bold flex items-center gap-1.5 shadow-xs"
+                >
+                  <span className="ms-icon text-base">print</span>
+                  <span>طباعة كل الكروت ({employees.length}) A4</span>
+                </button>
+              </div>
             </div>
 
-            <div
-              id="qr-print-area"
-              className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[52vh] overflow-y-auto p-1"
-            >
-              {employees.map((emp) => (
-                <div
-                  key={emp.id}
-                  className="p-3.5 rounded-2xl border-2 border-[var(--g-border)] bg-white text-[#1F1F1F] flex items-center justify-between gap-3"
-                >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5 text-[11px] font-extrabold text-[#0B57D0]">
+            {employees.length > 4 && (
+              <div className="g-search-bar flex items-center px-3.5 py-2">
+                <span className="ms-icon text-[var(--g-muted)] text-base">search</span>
+                <input
+                  type="text"
+                  value={cardSearch}
+                  onChange={(e) => setCardSearch(e.target.value)}
+                  placeholder="ابحث عن موظف أو قسم لمعاينة أو طباعة كرته..."
+                  className="bg-transparent border-none outline-none w-full text-xs px-2 text-[var(--g-text)]"
+                />
+              </div>
+            )}
+
+            {employees.length === 0 ? (
+              <div className="p-8 text-center text-xs text-[var(--g-muted)] bg-[var(--g-surface-variant)] rounded-2xl">
+                لا يوجد موظفون مسجلون حالياً. أضف الموظفين من تبويب الحضور أو لوحة الإدارة أولاً.
+              </div>
+            ) : (
+              <div
+                id="qr-print-area"
+                className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-h-[50vh] overflow-y-auto p-1"
+              >
+                {filteredCardsEmployees.map((emp) => (
+                  <div
+                    key={emp.id}
+                    className="qr-badge-card p-3.5 rounded-2xl border-2 border-[var(--g-border)] bg-white text-[#1F1F1F] flex items-center justify-between gap-3"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 text-[11px] font-extrabold text-[#0B57D0]">
+                        <img
+                          src="/logo.jpeg"
+                          alt={storeName}
+                          className="w-5 h-5 rounded-md object-cover border border-[#DEE3EB] bg-white shrink-0"
+                        />
+                        <span>{storeName} — بطاقة حضور ذكية</span>
+                      </div>
+                      <div className="text-base font-extrabold truncate mt-1">{emp.name}</div>
+                      <div className="text-xs font-bold text-[#334155] truncate">
+                        {emp.department}
+                        {emp.role_title ? ` • ${emp.role_title}` : ''}
+                      </div>
+                      <div className="text-[11px] text-[#5F6368] mt-0.5 num-ltr">
+                        ⏰ {emp.shift_start || '08:00'} → {emp.shift_end || '20:00'} (12h)
+                      </div>
+                      <div className="mt-2 flex items-center gap-1.5">
+                        <span className="inline-block px-2.5 py-0.5 rounded-lg bg-[#E8F0FE] text-[#0B57D0] text-[11px] font-extrabold">
+                          🔒 QR مشفر بدون باسورد
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handlePrintCardsWindow([emp])}
+                          className="px-2 py-0.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-bold"
+                          title="طباعة هذا الكرت فقط"
+                        >
+                          🖨️ طباعة منفرد
+                        </button>
+                      </div>
+                    </div>
+                    {qrMap[emp.id] ? (
                       <img
-                        src="/logo.jpeg"
-                        alt={storeName}
-                        className="w-5 h-5 rounded-md object-cover border border-[#DEE3EB] bg-white shrink-0"
+                        src={qrMap[emp.id]}
+                        alt={`QR ${emp.name}`}
+                        className="w-22 h-22 rounded-xl border border-[#DEE3EB] shrink-0"
                       />
-                      <span>{storeName} — كرت حضور ذكي</span>
-                    </div>
-                    <div className="text-base font-extrabold truncate mt-0.5">{emp.name}</div>
-                    <div className="text-xs text-[#5F6368]">{emp.department}</div>
-                    <div className="mt-2 inline-block px-2.5 py-0.5 rounded-lg bg-[#E8F0FE] text-[#0B57D0] text-xs font-extrabold num-ltr">
-                      CODE: {emp.emp_code}
-                    </div>
+                    ) : (
+                      <div className="w-22 h-22 rounded-xl bg-gray-100 shrink-0" />
+                    )}
                   </div>
-                  {qrMap[emp.id] ? (
-                    <img
-                      src={qrMap[emp.id]}
-                      alt={`QR ${emp.name}`}
-                      className="w-22 h-22 rounded-xl border border-[#DEE3EB] shrink-0"
-                    />
-                  ) : (
-                    <div className="w-22 h-22 rounded-xl bg-gray-100 shrink-0" />
-                  )}
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

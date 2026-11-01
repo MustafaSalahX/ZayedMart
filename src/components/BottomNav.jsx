@@ -27,6 +27,7 @@ export default function BottomNav({
   ]);
   const canTrucks = hasAnyPermission(permissions, role, ['trucks:read', 'trucks:write']);
   const canNotes = hasAnyPermission(permissions, role, ['notes:read', 'notes:write']);
+  const canChat = hasAnyPermission(permissions, role, ['chat:read', 'chat:write']);
   const canDashboard = hasAnyPermission(permissions, role, [
     'reports:view',
     'staff:manage',
@@ -88,6 +89,16 @@ export default function BottomNav({
     });
   }
 
+  if (canChat) {
+    items.push({
+      id: 'chat',
+      label: 'التيم',
+      icon: 'forum',
+      badge: summary?.urgentMessagesCount || 0,
+      badgeTone: 'bg-[#B3261E] text-white',
+    });
+  }
+
   if (canDashboard) {
     items.push({
       id: 'dashboard',
@@ -103,7 +114,9 @@ export default function BottomNav({
   }
 
   const colClass =
-    items.length === 5
+    items.length >= 6
+      ? 'grid-cols-6'
+      : items.length === 5
       ? 'grid-cols-5'
       : items.length === 4
       ? 'grid-cols-4'

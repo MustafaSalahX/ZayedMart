@@ -9,6 +9,7 @@ import {
 } from '../lib/api.js';
 import {
   exportDailyReportCsv,
+  exportDailyReportWord,
   buildWhatsAppSummaryText,
   formatTimeWithSeconds,
 } from '../lib/exportUtils.js';
@@ -52,11 +53,14 @@ const SUPPLIER_CATEGORIES = [
 
 const EMPLOYEE_SYSTEM_ROLES = [
   { id: '', label: 'تحديد الرول تلقائياً حسب القسم (موصى به)' },
+  { id: 'cashier', label: 'الكاشير / الكاشيرية (cashier)' },
   { id: 'manager', label: 'المدير / مدير الفرع (manager)' },
   { id: 'supervisor', label: 'مشرف الفرع (supervisor)' },
   { id: 'cctv', label: 'مراقب الكاميرات (cctv)' },
   { id: 'security', label: 'أفراد الأمن والبوابة (security)' },
   { id: 'hall', label: 'عمال الصالة والنواقص (hall)' },
+  { id: 'warehouse', label: 'أمين المخزن والاستلام (warehouse)' },
+  { id: 'delivery', label: 'الدليفري والتوصيل (delivery)' },
   { id: 'none', label: 'النظافة / بدون دخول للنظام (كرت حضور فقط)' },
   { id: 'kiosk', label: 'شاشة كشك حضور فقط (kiosk)' },
 ];
@@ -65,9 +69,12 @@ const ROLE_SHORT_LABELS = {
   owner: 'الأدمن العام',
   manager: 'المدير',
   supervisor: 'مشرف الفرع',
+  cashier: 'الكاشير',
   cctv: 'مراقب كاميرات',
   security: 'الأمن',
   hall: 'عمال الصالة',
+  warehouse: 'أمين المخزن',
+  delivery: 'الدليفري',
   kiosk: 'كشك الحضور',
   none: 'النظافة / حضور فقط',
 };
@@ -81,6 +88,7 @@ export default function AdminDashboard({
   voiceConfirmEnabled,
   onToggleVoiceConfirm,
   onOpenQrModal,
+  onOpenPersonLog,
   onRefresh,
   onToast,
   onPreviewImage,
@@ -167,7 +175,7 @@ export default function AdminDashboard({
   const [empSystemRole, setEmpSystemRole] = useState('');
   const [empPhone, setEmpPhone] = useState('');
   const [empShiftStart, setEmpShiftStart] = useState('08:00');
-  const [empShiftEnd, setEmpShiftEnd] = useState('17:00');
+  const [empShiftEnd, setEmpShiftEnd] = useState('20:00');
   const [empColor, setEmpColor] = useState('#0B57D0');
   const [empBulkLines, setEmpBulkLines] = useState('');
   const [editingEmployee, setEditingEmployee] = useState(null);
@@ -692,6 +700,15 @@ export default function AdminDashboard({
 
               <button
                 type="button"
+                onClick={() => exportDailyReportWord(data)}
+                className="px-3.5 py-2 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-extrabold flex items-center justify-center gap-1"
+              >
+                <span className="ms-icon text-base">description</span>
+                <span>ملف Word</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={handleCopyWhatsAppOnly}
                 className="px-3.5 py-2 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-xs font-bold flex items-center justify-center gap-1"
               >
@@ -762,6 +779,8 @@ export default function AdminDashboard({
         <AdminReportsPanel
           data={data}
           canExportReports={canExportReports}
+          isOwner={role === 'owner'}
+          onOpenPersonLog={onOpenPersonLog}
           onToast={onToast}
         />
       )}
@@ -772,6 +791,7 @@ export default function AdminDashboard({
           canManageUsers={canManageUsers}
           canViewAudit={canViewAudit}
           currentUserId={authUser?.id}
+          onOpenPersonLog={onOpenPersonLog}
           onRefreshParent={onRefresh}
           onToast={onToast}
         />
@@ -952,28 +972,57 @@ export default function AdminDashboard({
                         </option>
                       ))}
                     </select>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="block text-[10px] font-bold text-[var(--g-muted)] mb-0.5">
-                          بداية الشفت
-                        </label>
-                        <input
-                          type="time"
-                          value={empShiftStart}
-                          onChange={(e) => setEmpShiftStart(e.target.value)}
-                          className="g-input w-full num-ltr text-xs"
-                        />
+                    <div className="sm:col-span-2 space-y-1.5">
+                      <div className="flex items-center justify-between flex-wrap gap-1">
+                        <span className="text-[11px] font-bold text-[var(--g-muted)]">
+                          مواعيد الشفت (نظام 12 ساعة):
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEmpShiftStart('08:00');
+                              setEmpShiftEnd('20:00');
+                            }}
+                            className="px-2 py-0.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] text-[10px] font-extrabold"
+                          >
+                            ☀️ صباحي 12س (08:00 → 20:00)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEmpShiftStart('20:00');
+                              setEmpShiftEnd('08:00');
+                            }}
+                            className="px-2 py-0.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] text-[10px] font-extrabold"
+                          >
+                            🌙 مسائي 12س (20:00 → 08:00)
+                          </button>
+                        </div>
                       </div>
-                      <div>
-                        <label className="block text-[10px] font-bold text-[var(--g-muted)] mb-0.5">
-                          نهاية الشفت
-                        </label>
-                        <input
-                          type="time"
-                          value={empShiftEnd}
-                          onChange={(e) => setEmpShiftEnd(e.target.value)}
-                          className="g-input w-full num-ltr text-xs"
-                        />
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[10px] font-bold text-[var(--g-muted)] mb-0.5">
+                            بداية الشفت
+                          </label>
+                          <input
+                            type="time"
+                            value={empShiftStart}
+                            onChange={(e) => setEmpShiftStart(e.target.value)}
+                            className="g-input w-full num-ltr text-xs"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold text-[var(--g-muted)] mb-0.5">
+                            نهاية الشفت
+                          </label>
+                          <input
+                            type="time"
+                            value={empShiftEnd}
+                            onChange={(e) => setEmpShiftEnd(e.target.value)}
+                            className="g-input w-full num-ltr text-xs"
+                          />
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1096,9 +1145,11 @@ export default function AdminDashboard({
                         <div className="min-w-0">
                           <div className="font-bold flex flex-wrap items-center gap-1.5">
                             <span className="truncate">{emp.name}</span>
-                            <span className="num-ltr text-[11px] px-1.5 py-0.5 rounded bg-[var(--g-surface-variant)] text-[var(--g-primary)] font-extrabold">
-                              باسورد/كود #{emp.login_password || emp.emp_code}
-                            </span>
+                            {role === 'owner' && (emp.login_password || emp.emp_code) && (
+                              <span className="num-ltr text-[11px] px-1.5 py-0.5 rounded bg-[var(--g-surface-variant)] text-[var(--g-primary)] font-extrabold">
+                                باسورد #{emp.login_password || emp.emp_code}
+                              </span>
+                            )}
                             {emp.system_role && (
                               <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--g-primary-container)] text-[var(--g-primary)] font-extrabold">
                                 {ROLE_SHORT_LABELS[emp.system_role] || emp.system_role}
@@ -1107,15 +1158,26 @@ export default function AdminDashboard({
                           </div>
                           <div className="text-xs text-[var(--g-muted)] truncate">
                             {emp.department}
-                            {emp.role_title ? ` • ${emp.role_title}` : ''} • الشفت{' '}
+                            {emp.role_title ? ` • ${emp.role_title}` : ''} • الشفت (12س){' '}
                             <span className="num-ltr">
-                              {emp.shift_start} - {emp.shift_end || '17:00'}
+                              {emp.shift_start} - {emp.shift_end || '20:00'}
                             </span>
                             {emp.phone ? ` • ${emp.phone}` : ''}
                           </div>
                         </div>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
+                        {onOpenPersonLog && (
+                          <button
+                            type="button"
+                            onClick={() => onOpenPersonLog(emp.id, emp.name)}
+                            className="px-2.5 py-1 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-extrabold flex items-center gap-1"
+                            title={`السجل الكامل لـ ${emp.name}`}
+                          >
+                            <span className="ms-icon text-sm">assignment_ind</span>
+                            <span className="hidden sm:inline">سجله</span>
+                          </button>
+                        )}
                         {emp.phone && (
                           <a
                             href={`tel:${emp.phone}`}

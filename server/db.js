@@ -11,7 +11,7 @@ import {
   encryptPasswordForAdmin,
   normalizeDigits,
 } from './rbac.js';
-import { seedInitialStoreData, deterministicSaltHex } from './seedData.js';
+import { seedInitialStoreData, deterministicSaltHex, purgeLegacyFakeSeedData } from './seedData.js';
 
 export function deterministicUuidFromSeed(seedStr) {
   const hash = crypto.createHash('sha256').update(String(seedStr)).digest('hex');
@@ -50,6 +50,9 @@ export function inferDefaultRoleFromDepartment(department = '', roleTitle = '') 
   if (dept.includes('أمن') || title.includes('أمن') || title.includes('حارس')) return 'security';
   if (dept === 'المدير' || title.includes('مدير')) return 'manager';
   if (dept.includes('إدارة') || dept.includes('مشرف') || title.includes('مشرف')) return 'supervisor';
+  if (dept.includes('كاشير') || title.includes('كاشير')) return 'cashier';
+  if (dept.includes('مخزن') || title.includes('مخزن')) return 'warehouse';
+  if (dept.includes('دليفري') || title.includes('دليفري') || title.includes('توصيل') || title.includes('طيار')) return 'delivery';
   return 'hall';
 }
 
@@ -143,19 +146,30 @@ export function syncEmployeeLoginAccount(db, emp, options = {}) {
   }
 
   // Create a new linked system_users row if password is valid and non-conflicting
-  if (!rawPass || hasPasswordConflict(rawPass)) {
-    return null;
+  let finalPass = rawPass;
+  if (!finalPass || hasPasswordConflict(finalPass)) {
+    // Generate a unique 4-digit private password if emp_code is empty or conflicts
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const candidate = String(1000 + Math.floor(Math.random() * 8999));
+      if (!hasPasswordConflict(candidate)) {
+        finalPass = candidate;
+        break;
+      }
+    }
+    if (!finalPass || hasPasswordConflict(finalPass)) {
+      return null;
+    }
   }
 
-  const saltSeed = deterministicSaltHex(`emp-user:${emp.id}:${rawPass}`);
-  const { saltHex, hashHex } = hashPin(rawPass, saltSeed);
-  const cipher = encryptPasswordForAdmin(rawPass, secretHex);
+  const saltSeed = deterministicSaltHex(`emp-user:${emp.id}:${finalPass}`);
+  const { saltHex, hashHex } = hashPin(finalPass, saltSeed);
+  const cipher = encryptPasswordForAdmin(finalPass, secretHex);
   const candidateUserId = deterministicUuidFromSeed(`emp-user:${emp.id}`);
   const idCollision = db
     .prepare('SELECT id FROM system_users WHERE id = ?')
     .get(candidateUserId);
   const newUserId = idCollision ? crypto.randomUUID() : candidateUserId;
-  const baseUsername = `emp_${rawPass.replace(/[^a-z0-9]/gi, '') || emp.id.slice(0, 6)}`;
+  const baseUsername = `emp_${finalPass.replace(/[^a-z0-9]/gi, '') || emp.id.slice(0, 6)}`;
   const usernameExists = db
     .prepare('SELECT id FROM system_users WHERE username = ?')
     .get(baseUsername);
@@ -165,8 +179,8 @@ export function syncEmployeeLoginAccount(db, emp, options = {}) {
 
   db.prepare(
     `INSERT INTO system_users (
-      id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, is_active, employee_id, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`
+      id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, is_active, employee_id, custom_permissions_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, '[]', ?, ?)`
   ).run(
     newUserId,
     finalUsername,
@@ -191,6 +205,28 @@ export function getLocalDateKey(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
+export function getPreviousDateKey(dateKeyStr) {
+  if (!dateKeyStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateKeyStr)) {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return getLocalDateKey(d);
+  }
+  const [y, m, d] = dateKeyStr.split('-').map(Number);
+  const prev = new Date(y, m - 1, d - 1);
+  return getLocalDateKey(prev);
+}
+
+export function getNextDateKey(dateKeyStr) {
+  if (!dateKeyStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateKeyStr)) {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    return getLocalDateKey(d);
+  }
+  const [y, m, d] = dateKeyStr.split('-').map(Number);
+  const next = new Date(y, m - 1, d + 1);
+  return getLocalDateKey(next);
+}
+
 export function getLocalTimeHMS(date = new Date()) {
   return [date.getHours(), date.getMinutes(), date.getSeconds()]
     .map((v) => String(v).padStart(2, '0'))
@@ -202,7 +238,14 @@ export function computeLateMinutes(shiftStart, checkInDate = new Date()) {
   const [sh, sm] = shiftStart.split(':').map(Number);
   const scheduled = new Date(checkInDate);
   scheduled.setHours(sh, sm, 0, 0);
+  // If shift starts in the evening (e.g. 20:00) and check-in is slightly after midnight (e.g. 00:30),
+  // scheduled was the previous evening
+  if (sh >= 18 && checkInDate.getHours() < 6) {
+    scheduled.setDate(scheduled.getDate() - 1);
+  }
   const diffMin = Math.floor((checkInDate.getTime() - scheduled.getTime()) / 60000);
+  // Ignore if check-in is more than 10 hours before scheduled start
+  if (diffMin < -600) return 0;
   return diffMin > 10 ? diffMin : 0;
 }
 
@@ -257,6 +300,8 @@ export function createStoreDatabase(customDbPath, options = {}) {
       pin_cipher TEXT DEFAULT '',
       avatar_color TEXT DEFAULT '#0B57D0',
       is_active INTEGER DEFAULT 1,
+      employee_id TEXT DEFAULT '',
+      custom_permissions_json TEXT DEFAULT '[]',
       last_login_at TEXT DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -301,10 +346,12 @@ export function createStoreDatabase(customDbPath, options = {}) {
       department TEXT NOT NULL,
       role_title TEXT DEFAULT '',
       shift_start TEXT DEFAULT '08:00',
-      shift_end TEXT DEFAULT '17:00',
+      shift_end TEXT DEFAULT '20:00',
       avatar_color TEXT DEFAULT '#0B57D0',
       phone TEXT DEFAULT '',
       is_active INTEGER DEFAULT 1,
+      system_role TEXT DEFAULT '',
+      login_enabled INTEGER DEFAULT 1,
       updated_at TEXT NOT NULL
     );
 
@@ -316,7 +363,11 @@ export function createStoreDatabase(customDbPath, options = {}) {
       action_type TEXT NOT NULL,
       timestamp TEXT NOT NULL,
       date_key TEXT NOT NULL,
+      shift_date_key TEXT DEFAULT '',
       late_minutes INTEGER DEFAULT 0,
+      allowed_break_minutes INTEGER DEFAULT 0,
+      break_duration_minutes INTEGER DEFAULT 0,
+      break_reason TEXT DEFAULT '',
       note TEXT DEFAULT '',
       proof_url TEXT DEFAULT '',
       recorded_by TEXT NOT NULL,
@@ -396,6 +447,8 @@ export function createStoreDatabase(customDbPath, options = {}) {
       present_staff_count INTEGER DEFAULT 0,
       acknowledged INTEGER DEFAULT 0,
       acknowledged_at TEXT DEFAULT '',
+      from_role TEXT DEFAULT '',
+      target_role TEXT DEFAULT '',
       timestamp TEXT NOT NULL,
       date_key TEXT NOT NULL,
       synced INTEGER DEFAULT 0
@@ -423,6 +476,7 @@ export function createStoreDatabase(customDbPath, options = {}) {
       unit TEXT DEFAULT '',
       urgency TEXT NOT NULL DEFAULT 'out_of_stock',
       status TEXT NOT NULL DEFAULT 'open',
+      is_suggestion INTEGER DEFAULT 0,
       supplier_id TEXT DEFAULT '',
       supplier_name TEXT DEFAULT '',
       notes TEXT DEFAULT '',
@@ -439,17 +493,52 @@ export function createStoreDatabase(customDbPath, options = {}) {
 
     CREATE INDEX IF NOT EXISTS idx_shortages_date ON shortages(date_key);
     CREATE INDEX IF NOT EXISTS idx_shortages_status ON shortages(status);
+
+    CREATE TABLE IF NOT EXISTS team_messages (
+      id TEXT PRIMARY KEY,
+      channel TEXT NOT NULL DEFAULT 'general',
+      sender_id TEXT DEFAULT '',
+      sender_name TEXT NOT NULL,
+      sender_role TEXT DEFAULT '',
+      content TEXT NOT NULL,
+      is_urgent INTEGER DEFAULT 0,
+      is_pinned INTEGER DEFAULT 0,
+      timestamp TEXT NOT NULL,
+      date_key TEXT NOT NULL,
+      synced INTEGER DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_team_messages_date ON team_messages(date_key, channel);
   `);
 
   safeAddColumn(db, 'system_users', "pin_cipher TEXT DEFAULT ''");
   safeAddColumn(db, 'system_users', "employee_id TEXT DEFAULT ''");
+  safeAddColumn(db, 'system_users', "custom_permissions_json TEXT DEFAULT '[]'");
   safeAddColumn(db, 'employees', "emp_code TEXT DEFAULT ''");
   safeAddColumn(db, 'employees', "system_role TEXT DEFAULT ''");
   safeAddColumn(db, 'employees', 'login_enabled INTEGER DEFAULT 1');
+  safeAddColumn(db, 'attendance_logs', "shift_date_key TEXT DEFAULT ''");
+  safeAddColumn(db, 'attendance_logs', 'allowed_break_minutes INTEGER DEFAULT 0');
+  safeAddColumn(db, 'attendance_logs', 'break_duration_minutes INTEGER DEFAULT 0');
+  safeAddColumn(db, 'attendance_logs', "break_reason TEXT DEFAULT ''");
+  safeAddColumn(db, 'shortages', 'is_suggestion INTEGER DEFAULT 0');
   safeAddColumn(db, 'shift_handovers', "open_items_json TEXT DEFAULT '[]'");
   safeAddColumn(db, 'shift_handovers', "acknowledged_at TEXT DEFAULT ''");
   safeAddColumn(db, 'shift_handovers', "from_role TEXT DEFAULT ''");
   safeAddColumn(db, 'shift_handovers', "target_role TEXT DEFAULT ''");
+
+  try {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_attendance_shift_date ON attendance_logs(shift_date_key);');
+  } catch {
+    // ignore
+  }
+
+  // Backfill shift_date_key on any legacy attendance rows
+  try {
+    db.exec("UPDATE attendance_logs SET shift_date_key = date_key WHERE shift_date_key = '' OR shift_date_key IS NULL;");
+  } catch {
+    // ignore
+  }
 
   const envSupabaseUrl = (
     process.env.SUPABASE_URL ||
@@ -498,140 +587,30 @@ export function createStoreDatabase(customDbPath, options = {}) {
     policyInsert.run(role, JSON.stringify(perms), nowIso);
   }
 
-  // One-time safe migration: ensure existing 'supervisor' policy receives default shortages permissions
-  const migratedShortages = db
-    .prepare("SELECT value FROM settings WHERE key = 'migration_shortages_v1'")
+  // Migration v3.5: Purge all legacy fake seed data from existing DB and update role_policies
+  const purgedFakeV35 = db
+    .prepare("SELECT value FROM settings WHERE key = 'migration_purge_fake_v35'")
     .get()?.value;
-  if (!migratedShortages) {
-    const supRow = db
-      .prepare("SELECT permissions_json FROM role_policies WHERE role = 'supervisor'")
-      .get();
-    if (supRow?.permissions_json) {
-      try {
-        const parsed = JSON.parse(supRow.permissions_json);
-        const merged = Array.from(
-          new Set([...parsed, 'shortages:read', 'shortages:write', 'shortages:manage'])
-        );
-        db.prepare(
-          "UPDATE role_policies SET permissions_json = ?, updated_at = ? WHERE role = 'supervisor'"
-        ).run(JSON.stringify(merged), nowIso);
-      } catch {
-        // ignore malformed json
-      }
+  if (!purgedFakeV35) {
+    purgeLegacyFakeSeedData(db);
+    // Sync role_policies with new v3.5 permissions
+    for (const [role, perms] of Object.entries(DEFAULT_ROLE_PERMISSIONS)) {
+      db.prepare(
+        'INSERT OR REPLACE INTO role_policies (role, permissions_json, updated_at) VALUES (?, ?, ?)'
+      ).run(role, JSON.stringify(perms), nowIso);
     }
     db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
-      'migration_shortages_v1',
+      'migration_purge_fake_v35',
       'done'
     );
-  }
-
-  // One-time safe migration: split merged departments ('أمن ونظافة', 'إدارة ومشرفين') into distinct roles/departments and grant handover:manage to hall
-  const migratedSplitDepts = db
-    .prepare("SELECT value FROM settings WHERE key = 'migration_split_depts_v1'")
-    .get()?.value;
-  if (!migratedSplitDepts) {
-    // 1. Ensure hall has handover:manage in role_policies
-    const hallRow = db
-      .prepare("SELECT permissions_json FROM role_policies WHERE role = 'hall'")
-      .get();
-    if (hallRow?.permissions_json) {
-      try {
-        const parsed = JSON.parse(hallRow.permissions_json);
-        const merged = Array.from(new Set([...parsed, 'handover:manage']));
-        db.prepare(
-          "UPDATE role_policies SET permissions_json = ?, updated_at = ? WHERE role = 'hall'"
-        ).run(JSON.stringify(merged), nowIso);
-      } catch {
-        // ignore
-      }
-    }
-
-    // 2. Split existing employees into 'المدير', 'مشرفين', 'مراقب كاميرات', 'أمن', 'نظافة'
-    const allEmps = db.prepare('SELECT * FROM employees').all();
-    for (const emp of allEmps) {
-      let nextDept = emp.department;
-      let nextRole = emp.system_role;
-      const title = String(emp.role_title || '').trim();
-
-      if (title.includes('كاميرات') || emp.department.includes('كاميرات')) {
-        nextDept = 'مراقب كاميرات';
-        nextRole = 'cctv';
-      } else if (emp.department === 'أمن ونظافة') {
-        if (title.includes('نظافة')) {
-          nextDept = 'نظافة';
-          nextRole = 'none';
-        } else {
-          nextDept = 'أمن';
-          nextRole = 'security';
-        }
-      } else if (emp.department === 'إدارة ومشرفين') {
-        if (title.includes('مدير')) {
-          nextDept = 'المدير';
-          nextRole = 'manager';
-        } else {
-          nextDept = 'مشرفين';
-          nextRole = 'supervisor';
-        }
-      }
-
-      if (nextDept !== emp.department || nextRole !== emp.system_role) {
-        db.prepare(
-          'UPDATE employees SET department = ?, system_role = ?, updated_at = ? WHERE id = ?'
-        ).run(nextDept, nextRole, nowIso, emp.id);
-        db.prepare(
-          'UPDATE attendance_logs SET department = ? WHERE employee_id = ?'
-        ).run(nextDept, emp.id);
-      }
-    }
-
-    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
-      'migration_split_depts_v1',
-      'done'
-    );
-  }
-
-  const shouldSeedStore =
-    options.seedStoreData !== undefined ? Boolean(options.seedStoreData) : !isMemory;
-
-  if (shouldSeedStore) {
-    const empCount = db.prepare('SELECT COUNT(*) as c FROM employees').get().c;
-    const storeSeedDone = db
-      .prepare("SELECT value FROM settings WHERE key = 'initial_store_seed_v1'")
-      .get()?.value;
-    if (empCount === 0 && !storeSeedDone) {
-      seedInitialStoreData(db, secretHex, getLocalDateKey());
-      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
-        'initial_store_seed_v1',
-        'done'
-      );
-    }
   }
 
   // Ensure initial Admin (owner) account with password '123' always exists
-  const userCount = db.prepare('SELECT COUNT(*) as c FROM system_users').get().c;
-  if (userCount === 0) {
-    const defaultAdminPassword = '123';
-    const adminId = 'cabc0e04-6b8f-4f68-9d6f-8d824cfd0ae9';
-    const saltHex = deterministicSaltHex(`role-user:${adminId}:${defaultAdminPassword}`);
-    const { hashHex } = hashPin(defaultAdminPassword, saltHex);
-    const cipher = encryptPasswordForAdmin(defaultAdminPassword, secretHex);
-
-    db.prepare(`
-      INSERT INTO system_users (
-        id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, is_active, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-    `).run(
-      adminId,
-      'admin',
-      'إدارة زايد مارت (Admin)',
-      'owner',
-      saltHex,
-      hashHex,
-      cipher,
-      '#7627BB',
-      nowIso,
-      nowIso
-    );
+  const ownerRow = db
+    .prepare("SELECT id FROM system_users WHERE role = 'owner' AND is_active = 1 LIMIT 1")
+    .get();
+  if (!ownerRow) {
+    seedInitialStoreData(db, secretHex);
   }
 
   // Sync all active employees with personal login accounts in system_users
@@ -646,7 +625,6 @@ export function createStoreDatabase(customDbPath, options = {}) {
     // ignore startup sync issues
   }
 
-  // Real-Data Ready: NO fake demo employees or suppliers are seeded!
   return db;
 }
 

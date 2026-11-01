@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { hasAnyPermission, hasPermission } from '../lib/api.js';
+import PwaInstallBanner from './PwaInstallBanner.jsx';
 
 export default function TopBar({
   storeName,
@@ -13,6 +14,9 @@ export default function TopBar({
   summary,
   connectionMode,
   offlineQueueCount,
+  isSyncing = false,
+  onFlushOfflineQueue,
+  onToast,
   darkMode,
   onToggleDarkMode,
   fontScale,
@@ -24,6 +28,7 @@ export default function TopBar({
   todayKey,
   onOpenQrModal,
   onOpenHandoverModal,
+  onOpenProfileModal,
 }) {
   const [clock, setClock] = useState(() => new Date());
 
@@ -48,6 +53,7 @@ export default function TopBar({
   ]);
   const canTrucks = hasAnyPermission(permissions, role, ['trucks:read', 'trucks:write']);
   const canNotes = hasAnyPermission(permissions, role, ['notes:read', 'notes:write']);
+  const canChat = hasAnyPermission(permissions, role, ['chat:read', 'chat:write']);
   const canDashboard = hasAnyPermission(permissions, role, [
     'reports:view',
     'staff:manage',
@@ -105,6 +111,15 @@ export default function TopBar({
     });
   }
 
+  if (canChat) {
+    navTabs.push({
+      id: 'chat',
+      label: 'تواصل الكاشيرية والتيم',
+      icon: 'forum',
+      alertCount: summary?.urgentMessagesCount || 0,
+    });
+  }
+
   if (canDashboard) {
     navTabs.push({
       id: 'dashboard',
@@ -129,12 +144,18 @@ export default function TopBar({
       ? 'workspace_premium'
       : role === 'supervisor'
       ? 'manage_accounts'
+      : role === 'cashier'
+      ? 'point_of_sale'
       : role === 'cctv'
       ? 'videocam'
       : role === 'security'
       ? 'local_police'
       : role === 'hall'
       ? 'shopping_basket'
+      : role === 'warehouse'
+      ? 'warehouse'
+      : role === 'delivery'
+      ? 'two_wheeler'
       : 'person';
 
   return (
@@ -156,23 +177,41 @@ export default function TopBar({
                 <h1 className="text-base sm:text-xl font-black tracking-tight m-0 whitespace-nowrap text-[var(--g-text)]">
                   {storeName || 'زايد مارت'}
                 </h1>
-                <span
-                  className={`inline-flex items-center gap-1 text-[10px] sm:text-[11px] px-2 py-0.5 rounded-full font-extrabold shrink-0 ${
+                <button
+                  type="button"
+                  onClick={() => onFlushOfflineQueue?.()}
+                  title={
                     connectionMode === 'offline_cached'
+                      ? 'البيانات محفوظة محلياً على الهاتف في IndexedDB وسيتم رفعها تلقائياً فور عودة الإنترنت'
+                      : offlineQueueCount > 0
+                      ? 'اضغط لمزامنة الحركات المحفوظة محلياً مع السيرفر الآن'
+                      : 'جميع البيانات متزامنة ومحفوظة رسمياً'
+                  }
+                  className={`inline-flex items-center gap-1 text-[10px] sm:text-[11px] px-2.5 py-0.5 rounded-full font-extrabold shrink-0 transition-all active:scale-95 ${
+                    isSyncing
+                      ? 'bg-[var(--g-primary-container)] text-[var(--g-primary)]'
+                      : connectionMode === 'offline_cached'
                       ? 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]'
                       : connectionMode === 'direct_cloud'
                       ? 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]'
                       : 'bg-[var(--g-green-bg)] text-[var(--g-green)]'
                   }`}
                 >
-                  <span className="w-1.5 h-1.5 rounded-full bg-current" />
-                  {connectionMode === 'offline_cached'
-                    ? 'أوفلاين'
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full bg-current ${
+                      isSyncing ? 'animate-ping' : ''
+                    }`}
+                  />
+                  {isSyncing
+                    ? `جاري المزامنة (${offlineQueueCount})`
+                    : connectionMode === 'offline_cached'
+                    ? `أوفلاين • محفوظ بالهاتف${offlineQueueCount > 0 ? ` (${offlineQueueCount})` : ''}`
+                    : offlineQueueCount > 0
+                    ? `بانتظار المزامنة (${offlineQueueCount})`
                     : connectionMode === 'direct_cloud'
-                    ? 'سحابي'
-                    : 'متصل'}
-                  {offlineQueueCount > 0 ? ` (${offlineQueueCount})` : ''}
-                </span>
+                    ? 'سحابي مباشر'
+                    : 'متصل ومتزامن'}
+                </button>
               </div>
 
               <div className="flex items-center gap-1.5 text-[11px] sm:text-xs text-[var(--g-muted)] min-w-0 mt-0.5">
@@ -191,20 +230,27 @@ export default function TopBar({
             </div>
           </div>
 
-          {/* Left side of Row 1: Kiosk Lock (Admin) + Clear Logout Button */}
+          {/* Left side of Row 1: Profile + Kiosk Lock (Admin) + Clear Logout Button */}
           <div className="flex items-center gap-1.5 shrink-0">
-            <div className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)]">
+            <button
+              type="button"
+              onClick={onOpenProfileModal}
+              title="فتح بروفايلي الشخصي، كلمة المرور الخاصة بي، وسجلي الكامل"
+              className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] hover:border-[var(--g-primary)] flex items-center gap-1.5 active:scale-95 transition-all"
+            >
               <span
                 style={{ backgroundColor: authUser?.avatar_color || '#0B57D0' }}
                 className="w-6 h-6 rounded-full text-white flex items-center justify-center shrink-0"
               >
                 <span className="ms-icon filled text-sm">{roleIcon}</span>
               </span>
-              <span className="text-xs font-extrabold">{authUser?.display_name}</span>
-              <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] font-extrabold">
-                {authUser?.role_label || authUser?.role}
+              <span className="text-xs font-extrabold truncate max-w-[96px] sm:max-w-[140px]">
+                {authUser?.display_name || 'بروفايلي'}
               </span>
-            </div>
+              <span className="hidden lg:inline text-[10px] px-2 py-0.5 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] font-extrabold">
+                بروفايلي
+              </span>
+            </button>
 
             {connectionMode === 'local_server' && isAdminLevel && (
               <button
@@ -233,6 +279,7 @@ export default function TopBar({
         {/* Row 2: Mobile-First Quick Action & Accessibility Bar (No Crushing, Single Calendar Icon) */}
         <div className="flex items-center justify-between gap-1.5 overflow-x-auto no-scrollbar pt-0.5">
           <div className="flex items-center gap-1.5 shrink-0">
+            <PwaInstallBanner compact onToast={onToast} />
             {canQr && (
               <button
                 type="button"

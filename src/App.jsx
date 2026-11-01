@@ -7,11 +7,15 @@ import AttendanceView from './components/AttendanceView.jsx';
 import TrucksView from './components/TrucksView.jsx';
 import ShortagesView from './components/ShortagesView.jsx';
 import CctvNotesView from './components/CctvNotesView.jsx';
+import TeamChatView from './components/TeamChatView.jsx';
 import AdminDashboard from './components/AdminDashboard.jsx';
 import KioskLockView from './components/KioskLockView.jsx';
 import AuthLoginScreen from './components/AuthLoginScreen.jsx';
+import ProfileModal from './components/ProfileModal.jsx';
+import PersonLogModal from './components/PersonLogModal.jsx';
 import {
   fetchBootstrap,
+  flushOfflineQueue,
   getOfflineQueue,
   getCachedAuthSession,
   onAuthInvalidated,
@@ -20,6 +24,7 @@ import {
   hasPermission,
   hasAnyPermission,
 } from './lib/api.js';
+import { subscribeSyncState } from './lib/localDb.js';
 
 function getTodayLocalKey() {
   const d = new Date();
@@ -68,6 +73,12 @@ export default function App() {
   const [authSession, setAuthSessionState] = useState(() => getCachedAuthSession());
   const [selectedDate, setSelectedDate] = useState(todayKey);
   const [activeTab, setActiveTab] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const requestedTab = new URLSearchParams(window.location.search).get('tab');
+      if (['attendance', 'shortages', 'trucks', 'notes', 'chat', 'dashboard'].includes(requestedTab)) {
+        return requestedTab;
+      }
+    }
     const cached = getCachedAuthSession();
     return getPreferredAllowedTab(cached?.user?.role || '', cached?.permissions || []);
   });
@@ -87,12 +98,16 @@ export default function App() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [offlineQueueCount, setOfflineQueueCount] = useState(0);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [liveConnectionMode, setLiveConnectionMode] = useState('local_server');
   const [toast, setToast] = useState(null);
   const [previewModal, setPreviewModal] = useState(null);
 
-  // Global Modals: QR / Quick Code + Shift Handover
+  // Global Modals: QR / Quick Code + Shift Handover + Profile + Person Log
   const [qrModalTab, setQrModalTab] = useState(null);
   const [showHandoverModal, setShowHandoverModal] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [personLogTarget, setPersonLogTarget] = useState(null);
   const [dashboardSubTab, setDashboardSubTab] = useState(null);
   const [attendanceFilterRequest, setAttendanceFilterRequest] = useState(null);
 
@@ -108,6 +123,19 @@ export default function App() {
     return onAuthInvalidated(() => {
       setAuthSessionState(null);
       setData(null);
+    });
+  }, []);
+
+  // Subscribe to IndexedDB outbox & network sync status
+  useEffect(() => {
+    return subscribeSyncState((st) => {
+      setOfflineQueueCount(st.pendingCount || 0);
+      setIsSyncing(Boolean(st.syncing));
+      if (!st.online) {
+        setLiveConnectionMode('offline_cached');
+      } else if (st.connectionMode) {
+        setLiveConnectionMode(st.connectionMode);
+      }
     });
   }, []);
 
@@ -171,7 +199,13 @@ export default function App() {
       loadData();
     }, 20000);
 
-    const handleOnline = () => loadData();
+    const handleOnline = async () => {
+      const flushed = await flushOfflineQueue();
+      if (flushed > 0) {
+        showToast(`تمت مزامنة (${flushed}) حركات محفوظة على الهاتف مع السيرفر تلقائياً ✓`);
+      }
+      loadData();
+    };
     window.addEventListener('online', handleOnline);
 
     return () => {
@@ -179,7 +213,21 @@ export default function App() {
       clearInterval(pollInterval);
       window.removeEventListener('online', handleOnline);
     };
-  }, [authSession?.token, loadData]);
+  }, [authSession?.token, loadData, showToast]);
+
+  const handleManualFlushSync = useCallback(async () => {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      showToast('الهاتف في وضع الأوفلاين حالياً — جميع حركاتك محفوظة بأمان على الجهاز وسيتم رفعها فور عودة الإنترنت', 'error');
+      return;
+    }
+    const flushed = await flushOfflineQueue();
+    await loadData();
+    if (flushed > 0) {
+      showToast(`تم رفع ومزامنة (${flushed}) حركات مع السيرفر بنجاح ✓`);
+    } else {
+      showToast('جميع البيانات محدثة ومتزامنة بالفعل ✓');
+    }
+  }, [loadData, showToast]);
 
   const authUser = data?.auth?.user || authSession?.user || null;
   const permissions = data?.auth?.permissions || authSession?.permissions || [];
@@ -223,6 +271,7 @@ export default function App() {
   ]);
   const canTrucks = hasAnyPermission(permissions, role, ['trucks:read', 'trucks:write']);
   const canNotes = hasAnyPermission(permissions, role, ['notes:read', 'notes:write']);
+  const canChat = hasAnyPermission(permissions, role, ['chat:read', 'chat:write']);
   const canDashboard = hasAnyPermission(permissions, role, [
     'reports:view',
     'staff:manage',
@@ -241,6 +290,7 @@ export default function App() {
       (activeTab === 'shortages' && canShortages) ||
       (activeTab === 'trucks' && canTrucks) ||
       (activeTab === 'notes' && canNotes) ||
+      (activeTab === 'chat' && canChat) ||
       (activeTab === 'dashboard' && canDashboard);
 
     if (!tabAllowed) {
@@ -255,6 +305,7 @@ export default function App() {
     canShortages,
     canTrucks,
     canNotes,
+    canChat,
     canDashboard,
   ]);
 
@@ -370,6 +421,7 @@ export default function App() {
     canShortages,
     canTrucks,
     canNotes,
+    canChat,
     canDashboard,
   ].filter(Boolean).length;
 
@@ -404,8 +456,11 @@ export default function App() {
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         summary={data?.summary}
-        connectionMode={data?.connectionMode}
+        connectionMode={liveConnectionMode === 'offline_cached' ? 'offline_cached' : data?.connectionMode}
         offlineQueueCount={offlineQueueCount}
+        isSyncing={isSyncing}
+        onFlushOfflineQueue={handleManualFlushSync}
+        onToast={showToast}
         darkMode={darkMode}
         onToggleDarkMode={() => setDarkMode((d) => !d)}
         fontScale={fontScale}
@@ -421,6 +476,7 @@ export default function App() {
         todayKey={todayKey}
         onOpenQrModal={() => setQrModalTab('code')}
         onOpenHandoverModal={() => setShowHandoverModal(true)}
+        onOpenProfileModal={() => setShowProfileModal(true)}
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-5">
@@ -457,6 +513,7 @@ export default function App() {
             onJumpToRealData={handleJumpToRealData}
             voiceConfirmEnabled={voiceConfirmEnabled}
             onOpenQrModal={(tab) => setQrModalTab(tab || 'code')}
+            onOpenPersonLog={(id, name) => setPersonLogTarget({ id, name })}
             onRefresh={loadData}
             onToast={showToast}
             onPreviewImage={(url, title) => setPreviewModal({ url, title })}
@@ -519,6 +576,16 @@ export default function App() {
           />
         )}
 
+        {activeTab === 'chat' && canChat && (
+          <TeamChatView
+            teamMessages={data?.teamMessages || []}
+            authUser={authUser}
+            permissions={permissions}
+            onRefresh={loadData}
+            onToast={showToast}
+          />
+        )}
+
         {activeTab === 'dashboard' && canDashboard && data && (
           <AdminDashboard
             data={data}
@@ -534,6 +601,7 @@ export default function App() {
               });
             }}
             onOpenQrModal={(tab) => setQrModalTab(tab || 'cards')}
+            onOpenPersonLog={(id, name) => setPersonLogTarget({ id, name })}
             onRefresh={loadData}
             onToast={showToast}
             onPreviewImage={(url, title) => setPreviewModal({ url, title })}
@@ -561,6 +629,23 @@ export default function App() {
         voiceConfirmEnabled={voiceConfirmEnabled}
         canPrintCards={canPrintCards}
         onRefresh={loadData}
+        onToast={showToast}
+      />
+
+      {/* Personal Profile Modal (Password, Personal QR & Personal Activity Log) */}
+      <ProfileModal
+        open={showProfileModal}
+        onClose={() => setShowProfileModal(false)}
+        authUser={authUser}
+        onToast={showToast}
+      />
+
+      {/* Individual Employee / User Full Log Modal */}
+      <PersonLogModal
+        open={Boolean(personLogTarget)}
+        personId={personLogTarget?.id}
+        personName={personLogTarget?.name}
+        onClose={() => setPersonLogTarget(null)}
         onToast={showToast}
       />
 

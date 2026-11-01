@@ -1,9 +1,32 @@
--- مخطط قاعدة البيانات السحابية لنظام "زايد مارت" (Supabase Cloud Sync & RBAC Security)
+-- مخطط قاعدة البيانات السحابية الشامل لنظام "زايد مارت" (v3.6 - PWA Offline-First + Vercel + Supabase 3-Way Sync)
 -- انسخ هذا الكود بالكامل في نافذة SQL Editor داخل مشروعك المجاني على Supabase واضغط Run
 
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS system_users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  display_name TEXT NOT NULL,
+  role TEXT NOT NULL,
+  pin_salt TEXT NOT NULL,
+  pin_hash TEXT NOT NULL,
+  pin_cipher TEXT DEFAULT '',
+  avatar_color TEXT DEFAULT '#0B57D0',
+  is_active INTEGER DEFAULT 1,
+  employee_id TEXT DEFAULT '',
+  custom_permissions_json TEXT DEFAULT '[]',
+  last_login_at TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS role_policies (
+  role TEXT PRIMARY KEY,
+  permissions_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -25,10 +48,12 @@ CREATE TABLE IF NOT EXISTS employees (
   department TEXT NOT NULL,
   role_title TEXT DEFAULT '',
   shift_start TEXT DEFAULT '08:00',
-  shift_end TEXT DEFAULT '17:00',
+  shift_end TEXT DEFAULT '20:00',
   avatar_color TEXT DEFAULT '#1A73E8',
   phone TEXT DEFAULT '',
   is_active INTEGER DEFAULT 1,
+  system_role TEXT DEFAULT '',
+  login_enabled INTEGER DEFAULT 1,
   updated_at TEXT NOT NULL
 );
 
@@ -40,7 +65,11 @@ CREATE TABLE IF NOT EXISTS attendance_logs (
   action_type TEXT NOT NULL,
   timestamp TEXT NOT NULL,
   date_key TEXT NOT NULL,
+  shift_date_key TEXT DEFAULT '',
   late_minutes INTEGER DEFAULT 0,
+  allowed_break_minutes INTEGER DEFAULT 0,
+  break_duration_minutes INTEGER DEFAULT 0,
+  break_reason TEXT DEFAULT '',
   note TEXT DEFAULT '',
   proof_url TEXT DEFAULT '',
   recorded_by TEXT NOT NULL,
@@ -112,6 +141,8 @@ CREATE TABLE IF NOT EXISTS shift_handovers (
   present_staff_count INTEGER DEFAULT 0,
   acknowledged INTEGER DEFAULT 0,
   acknowledged_at TEXT DEFAULT '',
+  from_role TEXT DEFAULT '',
+  target_role TEXT DEFAULT '',
   timestamp TEXT NOT NULL,
   date_key TEXT NOT NULL,
   synced INTEGER DEFAULT 1
@@ -137,6 +168,7 @@ CREATE TABLE IF NOT EXISTS shortages (
   unit TEXT DEFAULT '',
   urgency TEXT NOT NULL DEFAULT 'out_of_stock',
   status TEXT NOT NULL DEFAULT 'open',
+  is_suggestion INTEGER DEFAULT 0,
   supplier_id TEXT DEFAULT '',
   supplier_name TEXT DEFAULT '',
   notes TEXT DEFAULT '',
@@ -151,27 +183,56 @@ CREATE TABLE IF NOT EXISTS shortages (
   synced INTEGER DEFAULT 1
 );
 
+CREATE TABLE IF NOT EXISTS team_messages (
+  id TEXT PRIMARY KEY,
+  channel TEXT NOT NULL DEFAULT 'general',
+  sender_id TEXT DEFAULT '',
+  sender_name TEXT NOT NULL,
+  sender_role TEXT DEFAULT '',
+  content TEXT NOT NULL,
+  is_urgent INTEGER DEFAULT 0,
+  is_pinned INTEGER DEFAULT 0,
+  timestamp TEXT NOT NULL,
+  date_key TEXT NOT NULL,
+  synced INTEGER DEFAULT 1
+);
+
+-- ترقية آمنة للمشاريع القائمة مسبقاً على Supabase بدون فقدان أي بيانات
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS system_role TEXT DEFAULT '';
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS login_enabled INTEGER DEFAULT 1;
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS shift_date_key TEXT DEFAULT '';
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS allowed_break_minutes INTEGER DEFAULT 0;
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS break_duration_minutes INTEGER DEFAULT 0;
+ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS break_reason TEXT DEFAULT '';
+ALTER TABLE shortages ADD COLUMN IF NOT EXISTS is_suggestion INTEGER DEFAULT 0;
+ALTER TABLE shift_handovers ADD COLUMN IF NOT EXISTS from_role TEXT DEFAULT '';
+ALTER TABLE shift_handovers ADD COLUMN IF NOT EXISTS target_role TEXT DEFAULT '';
+
 INSERT INTO storage.buckets (id, name, public)
 VALUES ('zayed-proofs', 'zayed-proofs', true)
 ON CONFLICT (id) DO NOTHING;
-
-ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
-ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE employees ENABLE ROW LEVEL SECURITY;
-ALTER TABLE attendance_logs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE suppliers ENABLE ROW LEVEL SECURITY;
-ALTER TABLE truck_logs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE shift_handovers ENABLE ROW LEVEL SECURITY;
-ALTER TABLE product_catalog ENABLE ROW LEVEL SECURITY;
-ALTER TABLE shortages ENABLE ROW LEVEL SECURITY;
 
 DO $$
 DECLARE
   tbl TEXT;
 BEGIN
-  FOREACH tbl IN ARRAY ARRAY['settings','audit_logs','employees','attendance_logs','suppliers','truck_logs','notes','shift_handovers','product_catalog','shortages']
+  FOREACH tbl IN ARRAY ARRAY[
+    'settings',
+    'system_users',
+    'role_policies',
+    'audit_logs',
+    'employees',
+    'attendance_logs',
+    'suppliers',
+    'truck_logs',
+    'notes',
+    'shift_handovers',
+    'product_catalog',
+    'shortages',
+    'team_messages'
+  ]
   LOOP
+    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', tbl);
     EXECUTE format('DROP POLICY IF EXISTS "zayed_all_%s" ON %I;', tbl, tbl);
     EXECUTE format('CREATE POLICY "zayed_all_%s" ON %I FOR ALL USING (true) WITH CHECK (true);', tbl, tbl);
   END LOOP;

@@ -882,38 +882,24 @@ test('Hall Role (عمال الصالة), Shortages (Null / 0 / Number Qty), Stri
   }
 });
 
-test('Vercel Serverless Readiness: Seeded Store Data, Cold-Start Session Rehydration, Non-Blocking SSE & Inline Proof Upload', async () => {
+test('Vercel Serverless Readiness: Clean Real Store Data, Cold-Start Session Rehydration, Non-Blocking SSE & Inline Proof Upload', async () => {
   const ctx1 = await startTestServer({ serverless: true, seedStoreData: true });
   const ctx2 = await startTestServer({ serverless: true, seedStoreData: true });
   try {
-    // 1. All pre-configured role passwords & employee codes work out of the box
-    const rolesToCheck = [
-      { pass: '123', expectedRole: 'owner' },
-      { pass: '777', expectedRole: 'hall' },
-      { pass: '555', expectedRole: 'supervisor' },
-      { pass: '333', expectedRole: 'cctv' },
-      { pass: '444', expectedRole: 'security' },
-      { pass: '000', expectedRole: 'kiosk' },
-      { pass: '101', expectedRole: 'hall' },
-      { pass: '233', expectedRole: 'cctv' },
-    ];
+    // 1. Only Owner ('123') is pre-configured out of the box (zero fake accounts or fake employees)
+    const login = await loginByPassword(ctx1.baseUrl, '123');
+    assert.equal(login.status, 200, 'Owner password 123 should succeed');
+    assert.equal(login.json.user.role, 'owner');
+    const ownerToken = login.json.token;
 
-    let ownerToken = '';
-    for (const item of rolesToCheck) {
-      const login = await loginByPassword(ctx1.baseUrl, item.pass);
-      assert.equal(login.status, 200, `Password ${item.pass} should succeed`);
-      assert.equal(login.json.user.role, item.expectedRole);
-      if (item.pass === '123') ownerToken = login.json.token;
-    }
-
-    // 2. Seeded store data (employees, suppliers, catalog, shortages) is present
+    // 2. Store data starts 100% clean (zero fake employees, suppliers, catalog, or shortages)
     const boot1 = await (
       await fetch(`${ctx1.baseUrl}/api/bootstrap`, { headers: authHeaders(ownerToken) })
     ).json();
-    assert.equal(boot1.employees.length, 9);
-    assert.equal(boot1.suppliers.length, 6);
-    assert.ok(boot1.productCatalog.length >= 17);
-    assert.equal(boot1.shortages.length, 5);
+    assert.equal(boot1.employees.length, 0);
+    assert.equal(boot1.suppliers.length, 0);
+    assert.equal(boot1.productCatalog.length, 0);
+    assert.equal(boot1.shortages.length, 0);
 
     // 3. Cold-Start Session Rehydration: token issued on Instance 1 works seamlessly on cold-started Instance 2
     const boot2Res = await fetch(`${ctx2.baseUrl}/api/bootstrap`, {
@@ -956,5 +942,224 @@ test('Vercel Serverless Readiness: Seeded Store Data, Cold-Start Session Rehydra
   } finally {
     await ctx1.close();
     await ctx2.close();
+  }
+});
+
+test('12-Hour Cross-Day Shift Sync, Smart Break Duration, Cashier Role & Suggestions, Team Chat, Profile & Individual Logs', async () => {
+  const ctx = await startTestServer();
+  try {
+    const adminLogin = await loginByPassword(ctx.baseUrl, '123');
+    assert.equal(adminLogin.status, 200);
+    const ownerToken = adminLogin.json.token;
+
+    // 1. Create two Cashiers ('كاشير' -> role 'cashier') with 12-hour night shift (20:00 -> 08:00)
+    const c1Res = await fetch(`${ctx.baseUrl}/api/employees`, {
+      method: 'POST',
+      headers: authHeaders(ownerToken, true),
+      body: JSON.stringify({
+        emp_code: '501',
+        name: 'ندى محمود',
+        department: 'كاشير',
+        role_title: 'كاشير مسائي 12 ساعة',
+        shift_start: '20:00',
+        shift_end: '08:00',
+      }),
+    });
+    assert.equal(c1Res.status, 201);
+    const cashier1 = (await c1Res.json()).employee;
+
+    const c2Res = await fetch(`${ctx.baseUrl}/api/employees`, {
+      method: 'POST',
+      headers: authHeaders(ownerToken, true),
+      body: JSON.stringify({
+        emp_code: '502',
+        name: 'عمر خالد',
+        department: 'كاشير',
+        role_title: 'كاشير صباحي 12 ساعة',
+        shift_start: '08:00',
+        shift_end: '20:00',
+      }),
+    });
+    assert.equal(c2Res.status, 201);
+
+    // 2. Verify Cashier 1 & Cashier 2 log in with 'cashier' role & view personal profile + password
+    const c1Login = await loginByPassword(ctx.baseUrl, '501');
+    assert.equal(c1Login.status, 200);
+    assert.equal(c1Login.json.user.role, 'cashier');
+    const c1Token = c1Login.json.token;
+
+    const c2Login = await loginByPassword(ctx.baseUrl, '502');
+    assert.equal(c2Login.status, 200);
+    assert.equal(c2Login.json.user.role, 'cashier');
+    const c2Token = c2Login.json.token;
+
+    const c1Profile = await (
+      await fetch(`${ctx.baseUrl}/api/profile/me`, { headers: authHeaders(c1Token) })
+    ).json();
+    assert.equal(c1Profile.profile.my_password, '501');
+    assert.equal(c1Profile.profile.display_name, 'ندى محمود');
+
+    // 3. 12-Hour Cross-Day Shift Synchronization (Day 1: 2026-10-31 -> Day 2: 2026-11-01)
+    const day1 = '2026-10-31';
+    const day2 = '2026-11-01';
+
+    // Check in on Day 1 at 20:05
+    const checkInRes = await fetch(`${ctx.baseUrl}/api/attendance`, {
+      method: 'POST',
+      headers: authHeaders(ownerToken, true),
+      body: JSON.stringify({
+        employee_id: cashier1.id,
+        action_type: 'check_in',
+        timestamp: '2026-10-31T20:05:00',
+      }),
+    });
+    assert.equal(checkInRes.status, 201);
+    const checkInLog = (await checkInRes.json()).log;
+    assert.equal(checkInLog.shift_date_key, day1);
+
+    // Inspect Day 2 before any Day 2 action -> Cashier 1 must appear PRESENT on Day 2 via Cross-Day Shift sync!
+    const bootDay2AfterCheckIn = await (
+      await fetch(`${ctx.baseUrl}/api/bootstrap?date=${day2}`, { headers: authHeaders(ownerToken) })
+    ).json();
+    const c1OnDay2 = bootDay2AfterCheckIn.employees.find((e) => e.id === cashier1.id);
+    assert.equal(c1OnDay2.currentStatus, 'present', 'Employee checked in on Day 1 night shift must be present on Day 2');
+    assert.equal(c1OnDay2.isCrossDayShift, true);
+    assert.equal(c1OnDay2.shiftDateKey, day1);
+
+    // On Day 2 at 01:00 AM, Security/Admin gives Cashier 1 a 30-minute break
+    const breakStartRes = await fetch(`${ctx.baseUrl}/api/attendance`, {
+      method: 'POST',
+      headers: authHeaders(ownerToken, true),
+      body: JSON.stringify({
+        employee_id: cashier1.id,
+        action_type: 'break_start',
+        timestamp: '2026-11-01T01:00:00',
+        allowed_break_minutes: 30,
+        break_reason: 'بريك غداء/عشاء',
+      }),
+    });
+    assert.equal(breakStartRes.status, 201);
+    const breakStartLog = (await breakStartRes.json()).log;
+    assert.equal(breakStartLog.shift_date_key, day1, 'Break on Day 2 links to Day 1 shift_date_key');
+    assert.equal(breakStartLog.allowed_break_minutes, 30);
+
+    // Verify both Day 1 and Day 2 show Cashier 1 as on_break with allowedBreakMinutes = 30
+    const bootDay1DuringBreak = await (
+      await fetch(`${ctx.baseUrl}/api/bootstrap?date=${day1}`, { headers: authHeaders(ownerToken) })
+    ).json();
+    const c1Day1Break = bootDay1DuringBreak.employees.find((e) => e.id === cashier1.id);
+    assert.equal(c1Day1Break.currentStatus, 'on_break');
+    assert.equal(c1Day1Break.allowedBreakMinutes, 30);
+
+    // On Day 2 at 01:25 AM, Cashier 1 ends break (25 minutes elapsed)
+    const breakEndRes = await fetch(`${ctx.baseUrl}/api/attendance`, {
+      method: 'POST',
+      headers: authHeaders(ownerToken, true),
+      body: JSON.stringify({
+        employee_id: cashier1.id,
+        action_type: 'break_end',
+        timestamp: '2026-11-01T01:25:00',
+      }),
+    });
+    assert.equal(breakEndRes.status, 201);
+    const breakEndLog = (await breakEndRes.json()).log;
+    assert.equal(breakEndLog.shift_date_key, day1);
+    assert.equal(breakEndLog.break_duration_minutes, 25);
+
+    // On Day 2 at 08:05 AM, Cashier 1 checks out -> syncs to both Day 1 and Day 2!
+    const checkOutRes = await fetch(`${ctx.baseUrl}/api/attendance`, {
+      method: 'POST',
+      headers: authHeaders(ownerToken, true),
+      body: JSON.stringify({
+        employee_id: cashier1.id,
+        action_type: 'check_out',
+        timestamp: '2026-11-01T08:05:00',
+      }),
+    });
+    assert.equal(checkOutRes.status, 201);
+    const checkOutLog = (await checkOutRes.json()).log;
+    assert.equal(checkOutLog.shift_date_key, day1);
+
+    const bootDay1Final = await (
+      await fetch(`${ctx.baseUrl}/api/bootstrap?date=${day1}`, { headers: authHeaders(ownerToken) })
+    ).json();
+    const bootDay2Final = await (
+      await fetch(`${ctx.baseUrl}/api/bootstrap?date=${day2}`, { headers: authHeaders(ownerToken) })
+    ).json();
+    const c1Day1End = bootDay1Final.employees.find((e) => e.id === cashier1.id);
+    const c1Day2End = bootDay2Final.employees.find((e) => e.id === cashier1.id);
+    assert.equal(c1Day1End.currentStatus, 'checked_out', 'Day 1 reflects Day 2 check_out');
+    assert.equal(c1Day2End.currentStatus, 'checked_out', 'Day 2 reflects Day 2 check_out');
+    assert.equal(c1Day1End.totalBreakMinutes, 25);
+    assert.equal(c1Day2End.totalBreakMinutes, 25);
+
+    // 4. Cashier 1 posts a product suggestion (is_suggestion: true), a shortage, a cashier note, and a team chat message
+    const sugRes = await fetch(`${ctx.baseUrl}/api/shortages`, {
+      method: 'POST',
+      headers: authHeaders(c1Token, true),
+      body: JSON.stringify({
+        item_name: 'شوكولاتة دبي فستق',
+        category: 'بقالة جافة',
+        is_suggestion: true,
+        notes: 'العملاء يسألون عنها بكثرة عند الكاشير',
+      }),
+    });
+    assert.equal(sugRes.status, 201);
+    const sugItem = (await sugRes.json()).shortage;
+    assert.equal(sugItem.is_suggestion, 1);
+
+    const c1NoteRes = await fetch(`${ctx.baseUrl}/api/notes`, {
+      method: 'POST',
+      headers: authHeaders(c1Token, true),
+      body: JSON.stringify({
+        location_tag: 'الكاشير',
+        category_tag: 'مشكلة كاشير / أسعار',
+        severity: 'warning',
+        content: 'باركود لبن جهينة 1.5 لتر غير معرف على السيستم',
+      }),
+    });
+    assert.equal(c1NoteRes.status, 201);
+
+    const chatRes = await fetch(`${ctx.baseUrl}/api/team-messages`, {
+      method: 'POST',
+      headers: authHeaders(c1Token, true),
+      body: JSON.stringify({
+        channel: 'cashier',
+        priority: 'urgent',
+        message: 'محتاجة فكة 10 و 20 جنيه على كاشير 1 ضروري',
+      }),
+    });
+    assert.equal(chatRes.status, 201);
+
+    // 5. Cashier 2 sees Cashier 1's suggestion, cashier note, and team chat message
+    const c2Boot = await (
+      await fetch(`${ctx.baseUrl}/api/bootstrap`, { headers: authHeaders(c2Token) })
+    ).json();
+    assert.equal(c2Boot.shortages.length, 1);
+    assert.equal(c2Boot.shortages[0].is_suggestion, 1);
+    assert.equal(c2Boot.notes.length, 1);
+    assert.equal(c2Boot.teamMessages.length, 1);
+    assert.equal(c2Boot.teamMessages[0].sender_name, 'ندى محمود');
+
+    // 6. Individual Person Log (/api/logs/person/:id) & Master Audit Log (/api/audit-logs)
+    const personLogRes = await fetch(`${ctx.baseUrl}/api/logs/person/${cashier1.id}`, {
+      headers: authHeaders(ownerToken),
+    });
+    assert.equal(personLogRes.status, 200);
+    const personLog = await personLogRes.json();
+    assert.equal(personLog.summary.totalAttendanceEvents, 4);
+    assert.equal(personLog.summary.totalBreakMinutes, 25);
+    assert.equal(personLog.summary.shortagesCount, 1);
+    assert.equal(personLog.summary.notesCount, 1);
+    assert.equal(personLog.summary.messagesCount, 1);
+
+    const masterAuditRes = await fetch(`${ctx.baseUrl}/api/audit-logs`, {
+      headers: authHeaders(ownerToken),
+    });
+    assert.equal(masterAuditRes.status, 200);
+    const masterAudit = await masterAuditRes.json();
+    assert.ok(masterAudit.auditLogs.length > 0);
+  } finally {
+    await ctx.close();
   }
 });

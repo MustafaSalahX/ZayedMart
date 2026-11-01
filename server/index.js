@@ -9,16 +9,22 @@ import {
   createStoreDatabase,
   resolveWritableDataDir,
   getLocalDateKey,
+  getPreviousDateKey,
+  getNextDateKey,
   getLocalTimeHMS,
   computeLateMinutes,
   generateNextEmpCode,
   inferDefaultRoleFromDepartment,
   syncEmployeeLoginAccount,
 } from './db.js';
+import { purgeLegacyFakeSeedData } from './seedData.js';
 import {
   getCloudConfig,
   testCloudConnection,
   syncWithCloud,
+  ensureCloudHydratedOnBoot,
+  scheduleAutoCloudSync,
+  deleteCloudRecord,
   exportFullBackup,
   importFullBackup,
 } from './cloudSync.js';
@@ -70,10 +76,22 @@ export function createApp(options = {}) {
   });
 
   const app = express();
+  const dbBootId = crypto.randomUUID();
   app.use(securityHeadersMiddleware);
   app.use(cors());
   app.use(express.json({ limit: '10mb' }));
   app.use('/uploads', express.static(uploadsDir));
+
+  // Auto-hydrate from Supabase on Vercel Cold-Start (or periodic multi-device refresh)
+  app.use('/api', async (req, _res, next) => {
+    if (req.path === '/events' || req.path === '/cloud/test') return next();
+    try {
+      await ensureCloudHydratedOnBoot(db, uploadsDir);
+    } catch {
+      // Non-blocking if cloud unreachable
+    }
+    return next();
+  });
 
   const sseClients = new Set();
 
@@ -191,7 +209,7 @@ export function createApp(options = {}) {
       .get(session.user_id);
     if (!user) return null;
 
-    const permissions = getRolePermissions(db, user.role);
+    const permissions = getRolePermissions(db, user.role, user.custom_permissions_json);
     const roleMeta = ROLES_METADATA[user.role] || { shortLabel: user.role };
     const actorLabel =
       user.role === 'kiosk'
@@ -207,6 +225,7 @@ export function createApp(options = {}) {
         role: user.role,
         role_label: roleMeta.label || user.role,
         avatar_color: user.avatar_color,
+        employee_id: user.employee_id || '',
       },
       permissions,
       actorLabel,
@@ -290,13 +309,67 @@ export function createApp(options = {}) {
         sseClients.delete(res);
       }
     }
-    const cfg = getCloudConfig(db);
-    if (cfg.enabled && cfg.url && cfg.anonKey && reason !== 'cloud_sync') {
-      syncWithCloud(db, uploadsDir).catch(() => {});
+    if (reason !== 'cloud_sync') {
+      scheduleAutoCloudSync(db, uploadsDir);
     }
   }
 
+  // Finds an open 12h shift (checked in or on break within the last 22 hours without a check_out)
+  function findOpenShiftForEmployee(employeeId, refDate = new Date()) {
+    const refIso = refDate.toISOString();
+    const recentLogs = db
+      .prepare(
+        'SELECT * FROM attendance_logs WHERE employee_id = ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 15'
+      )
+      .all(employeeId, refIso);
+
+    if (recentLogs.length === 0) {
+      return {
+        isOpen: false,
+        shiftDateKey: getLocalDateKey(refDate),
+        latestLog: null,
+        checkInLog: null,
+      };
+    }
+
+    const latestLog = recentLogs[0];
+    const elapsedHours =
+      (refDate.getTime() - new Date(latestLog.timestamp).getTime()) / (3600 * 1000);
+
+    if (latestLog.action_type !== 'check_out' && elapsedHours <= 22) {
+      // Find the check_in that opened this shift
+      let checkInLog = null;
+      for (const l of recentLogs) {
+        if (l.action_type === 'check_out') break;
+        if (l.action_type === 'check_in') {
+          checkInLog = l;
+          break;
+        }
+      }
+      const shiftDateKey =
+        checkInLog?.shift_date_key ||
+        checkInLog?.date_key ||
+        latestLog.shift_date_key ||
+        latestLog.date_key ||
+        getLocalDateKey(refDate);
+      return {
+        isOpen: true,
+        shiftDateKey,
+        latestLog,
+        checkInLog,
+      };
+    }
+
+    return {
+      isOpen: false,
+      shiftDateKey: getLocalDateKey(refDate),
+      latestLog,
+      checkInLog: null,
+    };
+  }
+
   function insertAttendanceLog({
+    id: requestedId,
     emp,
     action_type,
     note = '',
@@ -304,51 +377,142 @@ export function createApp(options = {}) {
     recorded_by,
     autoVerified = 0,
     timestamp,
+    allowed_break_minutes = 0,
+    break_reason = '',
+    actorUser = null,
+    ip = '',
   }) {
+    if (requestedId) {
+      const existingById = db
+        .prepare('SELECT * FROM attendance_logs WHERE id = ? LIMIT 1')
+        .get(String(requestedId));
+      if (existingById) return existingById;
+    }
     const eventDate = timestamp ? new Date(timestamp) : new Date();
     const isoTime = eventDate.toISOString();
     const dateKey = getLocalDateKey(eventDate);
+    const openShift = findOpenShiftForEmployee(emp.id, eventDate);
+
+    // Link break_start, break_end, and check_out to the open shift's shift_date_key even after midnight!
+    const shiftDateKey =
+      action_type === 'check_in'
+        ? dateKey
+        : openShift.isOpen
+        ? openShift.shiftDateKey
+        : dateKey;
 
     let lateMinutes = 0;
     if (action_type === 'check_in') {
       const existingCheckIn = db
         .prepare(
-          "SELECT id FROM attendance_logs WHERE employee_id = ? AND date_key = ? AND action_type = 'check_in'"
+          "SELECT id FROM attendance_logs WHERE employee_id = ? AND (date_key = ? OR shift_date_key = ?) AND action_type = 'check_in'"
         )
-        .get(emp.id, dateKey);
+        .get(emp.id, dateKey, shiftDateKey);
       if (!existingCheckIn) {
         lateMinutes = computeLateMinutes(emp.shift_start, eventDate);
       }
     }
 
-    const id = crypto.randomUUID();
+    const defaultMaxBreak = Number(getSettingsMap().max_break_minutes || 30);
+    let finalAllowedBreak = 0;
+    let finalBreakDuration = 0;
+    let finalBreakReason = String(break_reason || '').trim().slice(0, 120);
+
+    if (action_type === 'break_start') {
+      const parsedAllowed = Number(normalizeDigits(String(allowed_break_minutes || '')));
+      finalAllowedBreak =
+        Number.isFinite(parsedAllowed) && parsedAllowed > 0 ? parsedAllowed : defaultMaxBreak;
+    } else if (
+      action_type === 'break_end' ||
+      (action_type === 'check_out' && openShift.latestLog?.action_type === 'break_start')
+    ) {
+      const lastBreakStart = db
+        .prepare(
+          `SELECT * FROM attendance_logs
+           WHERE employee_id = ? AND (shift_date_key = ? OR date_key = ?) AND action_type = 'break_start'
+           ORDER BY timestamp DESC LIMIT 1`
+        )
+        .get(emp.id, shiftDateKey, dateKey);
+
+      if (lastBreakStart) {
+        finalBreakDuration = Math.max(
+          1,
+          Math.round((eventDate.getTime() - new Date(lastBreakStart.timestamp).getTime()) / 60000)
+        );
+        finalAllowedBreak = lastBreakStart.allowed_break_minutes || defaultMaxBreak;
+        if (!finalBreakReason) {
+          finalBreakReason = lastBreakStart.break_reason || '';
+        }
+        db.prepare('UPDATE attendance_logs SET break_duration_minutes = ? WHERE id = ?').run(
+          finalBreakDuration,
+          lastBreakStart.id
+        );
+      }
+    }
+
+    const finalNote =
+      note ||
+      (action_type === 'break_start' && finalBreakReason
+        ? `بريك (${finalAllowedBreak} د) - ${finalBreakReason}`
+        : action_type === 'break_end' && finalBreakDuration > 0
+        ? `عودة من بريك بعد ${finalBreakDuration} دقيقة (المسموح ${finalAllowedBreak} د)`
+        : '');
+
+    const attLogId = requestedId ? String(requestedId) : crypto.randomUUID();
 
     db.prepare(`
       INSERT INTO attendance_logs (
-        id, employee_id, employee_name, department, action_type, timestamp, date_key,
-        late_minutes, note, proof_url, recorded_by, verified_by_cctv, verified_at, synced
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        id, employee_id, employee_name, department, action_type, timestamp, date_key, shift_date_key,
+        late_minutes, allowed_break_minutes, break_duration_minutes, break_reason,
+        note, proof_url, recorded_by, verified_by_cctv, verified_at, synced
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     `).run(
-      id,
+      attLogId,
       emp.id,
       emp.name,
       emp.department,
       action_type,
       isoTime,
       dateKey,
+      shiftDateKey,
       lateMinutes,
-      note,
+      finalAllowedBreak,
+      finalBreakDuration,
+      finalBreakReason,
+      finalNote,
       proof_url,
       recorded_by,
       autoVerified ? 1 : 0,
       autoVerified ? isoTime : ''
     );
 
-    return db.prepare('SELECT * FROM attendance_logs WHERE id = ?').get(id);
+    const actionArabicMap = {
+      check_in: 'حضور',
+      break_start: `بدء استراحة (${finalAllowedBreak} دقيقة)`,
+      break_end: `عودة من استراحة (قضى ${finalBreakDuration} دقيقة)`,
+      check_out: 'انصراف',
+    };
+
+    recordAuditLog(db, {
+      userId: actorUser?.id || emp.id,
+      userName: actorUser?.display_name || recorded_by,
+      role: actorUser?.role || '',
+      action: `حركة موظف: ${actionArabicMap[action_type] || action_type}`,
+      details: `الموظف "${emp.name}" (${emp.department}) — شفت ${shiftDateKey}${dateKey !== shiftDateKey ? ` [ممتد لليوم ${dateKey}]` : ''}${finalNote ? ` — ${finalNote}` : ''}`,
+      ip,
+      severity:
+        action_type === 'break_end' && finalAllowedBreak > 0 && finalBreakDuration > finalAllowedBreak
+          ? 'warning'
+          : 'info',
+    });
+
+    return db.prepare('SELECT * FROM attendance_logs WHERE id = ?').get(attLogId);
   }
 
   function buildBootstrapData(dateKey, auth) {
     const targetDate = dateKey || getLocalDateKey();
+    const prevDate = getPreviousDateKey(targetDate);
+    const todayKey = getLocalDateKey();
     const settings = getSettingsMap();
     const isInternalSnap = !auth;
 
@@ -387,17 +551,74 @@ export function createApp(options = {}) {
       auth.has('handover:manage') ||
       auth.has('reports:view');
 
+    const canChat =
+      isInternalSnap ||
+      auth.has('chat:read') ||
+      auth.has('chat:write');
+
     const employees = canAttendance
       ? db
           .prepare('SELECT * FROM employees WHERE is_active = 1 ORDER BY department, emp_code, name')
           .all()
       : [];
 
-    const attendanceLogs = canAttendance
-      ? db
-          .prepare('SELECT * FROM attendance_logs WHERE date_key = ? ORDER BY timestamp DESC')
-          .all(targetDate)
-      : [];
+    // 12-Hour Cross-Day Shift Synchronization:
+    // 1) Fetch logs directly on targetDate OR whose shift_date_key is targetDate (so Day 1 sees Day 2's check_out/breaks!)
+    // 2) Also fetch yesterday's shift logs if that shift either had activity on targetDate OR is still open right now!
+    let attendanceLogs = [];
+    if (canAttendance) {
+      const directLogs = db
+        .prepare(
+          'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp DESC'
+        )
+        .all(targetDate, targetDate);
+
+      const prevShiftLogs = db
+        .prepare(
+          'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp ASC'
+        )
+        .all(prevDate, prevDate);
+
+      // Group prevShiftLogs by employee_id
+      const prevByEmp = new Map();
+      for (const l of prevShiftLogs) {
+        if (!prevByEmp.has(l.employee_id)) prevByEmp.set(l.employee_id, []);
+        prevByEmp.get(l.employee_id).push(l);
+      }
+
+      const mergedById = new Map();
+      for (const l of directLogs) {
+        mergedById.set(l.id, l);
+      }
+
+      const nowMs = Date.now();
+      for (const [, empPrevLogs] of prevByEmp.entries()) {
+        const lastPrev = empPrevLogs[empPrevLogs.length - 1];
+        if (!lastPrev) continue;
+        const touchedTargetDate = empPrevLogs.some((l) => l.date_key === targetDate);
+        const lastPrevDateObj = new Date(lastPrev.timestamp);
+        const isNightOrEveningOnPrev = lastPrevDateObj.getHours() >= 14;
+        const isStillOpenFromYesterday =
+          lastPrev.action_type !== 'check_out' &&
+          ((targetDate === todayKey &&
+            (nowMs - lastPrevDateObj.getTime()) / (3600 * 1000) <= 22) ||
+            isNightOrEveningOnPrev);
+
+        if (touchedTargetDate || isStillOpenFromYesterday) {
+          // Include only logs belonging to the open/cross-day shift from prevDate
+          const lastShiftKey = lastPrev.shift_date_key || lastPrev.date_key;
+          for (const l of empPrevLogs) {
+            if ((l.shift_date_key || l.date_key) === lastShiftKey) {
+              mergedById.set(l.id, l);
+            }
+          }
+        }
+      }
+
+      attendanceLogs = Array.from(mergedById.values()).sort((a, b) =>
+        b.timestamp.localeCompare(a.timestamp)
+      );
+    }
 
     const logsByEmp = new Map();
     for (let i = attendanceLogs.length - 1; i >= 0; i--) {
@@ -436,10 +657,21 @@ export function createApp(options = {}) {
       }
     }
 
+    const defaultMaxBreak = Number(settings.max_break_minutes || 30);
+
     const enrichedEmployees = employees.map((emp) => {
-      const empLogs = logsByEmp.get(emp.id) || [];
-      const firstCheckIn = empLogs.find((l) => l.action_type === 'check_in');
-      const latestLog = empLogs[empLogs.length - 1] || null;
+      const allEmpLogs = logsByEmp.get(emp.id) || [];
+      const latestLog = allEmpLogs[allEmpLogs.length - 1] || null;
+      const activeShiftKey =
+        latestLog?.shift_date_key || latestLog?.date_key || targetDate;
+
+      // Isolate logs belonging to the latest active shift on this view
+      const empLogs = allEmpLogs.filter(
+        (l) => (l.shift_date_key || l.date_key) === activeShiftKey
+      );
+      const firstCheckIn =
+        empLogs.find((l) => l.action_type === 'check_in') ||
+        allEmpLogs.find((l) => l.action_type === 'check_in');
 
       let currentStatus = 'absent';
       if (latestLog) {
@@ -458,6 +690,38 @@ export function createApp(options = {}) {
       const lateMinutes = firstCheckIn ? firstCheckIn.late_minutes || 0 : 0;
       if (lateMinutes > 0) lateCount += 1;
 
+      const isCrossDayShift = Boolean(
+        (firstCheckIn && firstCheckIn.date_key !== targetDate) ||
+          empLogs.some((l) => l.date_key !== ( l.shift_date_key || l.date_key ))
+      );
+
+      // Calculate total break stats for this shift
+      const breakStarts = empLogs.filter((l) => l.action_type === 'break_start');
+      const breakEnds = empLogs.filter((l) => l.action_type === 'break_end');
+      let totalBreakMinutes = breakEnds.reduce(
+        (sum, l) => sum + (Number(l.break_duration_minutes) || 0),
+        0
+      );
+      if (currentStatus === 'on_break' && latestLog) {
+        const currentBreakElapsed = Math.max(
+          0,
+          Math.round((Date.now() - new Date(latestLog.timestamp).getTime()) / 60000)
+        );
+        totalBreakMinutes += currentBreakElapsed;
+      }
+
+      const checkOutLog = empLogs.filter((l) => l.action_type === 'check_out').pop() || null;
+      const shiftDurationMinutes = firstCheckIn
+        ? Math.max(
+            0,
+            Math.round(
+              ((checkOutLog ? new Date(checkOutLog.timestamp).getTime() : Date.now()) -
+                new Date(firstCheckIn.timestamp).getTime()) /
+                60000
+            )
+          )
+        : 0;
+
       // Data minimization for Kiosk Least-Privilege Role!
       if (auth && !canReadAttendanceLogs && !auth.has('staff:manage')) {
         return {
@@ -467,6 +731,8 @@ export function createApp(options = {}) {
           department: emp.department,
           avatar_color: emp.avatar_color,
           currentStatus,
+          isCrossDayShift,
+          shiftDateKey: activeShiftKey,
         };
       }
 
@@ -483,12 +749,27 @@ export function createApp(options = {}) {
           ? linkedInfo?.password || emp.emp_code || ''
           : undefined,
         currentStatus,
+        isCrossDayShift,
+        shiftDateKey: activeShiftKey,
         checkInTime: firstCheckIn ? firstCheckIn.timestamp : null,
+        checkOutTime: checkOutLog ? checkOutLog.timestamp : null,
+        shiftDurationMinutes,
         latestActionTime: latestLog ? latestLog.timestamp : null,
         latestActionType: latestLog ? latestLog.action_type : null,
         latestRecordedBy: latestLog ? latestLog.recorded_by : null,
         latestLogId: latestLog ? latestLog.id : null,
         latestVerified: latestLog ? Boolean(latestLog.verified_by_cctv) : true,
+        activeBreakStart: currentStatus === 'on_break' && latestLog ? latestLog.timestamp : null,
+        allowedBreakMinutes:
+          currentStatus === 'on_break' && latestLog
+            ? Number(latestLog.allowed_break_minutes) || defaultMaxBreak
+            : defaultMaxBreak,
+        breakReason:
+          currentStatus === 'on_break' && latestLog
+            ? latestLog.break_reason || latestLog.note || ''
+            : '',
+        totalBreakMinutes,
+        breaksCount: breakStarts.length,
         lateMinutes,
         todayLogsCount: empLogs.length,
       };
@@ -525,6 +806,8 @@ export function createApp(options = {}) {
         productCatalog: [],
         notes: [],
         handovers: [],
+        teamMessages: [],
+        myProfile: null,
         pendingHandover: null,
         summary: {
           totalEmployees: employees.length,
@@ -624,6 +907,14 @@ export function createApp(options = {}) {
     ).length;
     const openHandoverNotesCount = notes.filter((n) => n.is_open_handover === 1).length;
 
+    const teamMessages = canChat
+      ? db
+          .prepare(
+            'SELECT * FROM team_messages ORDER BY is_pinned DESC, timestamp DESC LIMIT 120'
+          )
+          .all()
+      : [];
+
     const currentRole = auth?.user?.role || '';
     const currentUserName = (auth?.user?.display_name || '').trim();
     const isAdminOrManager = !auth || currentRole === 'owner' || currentRole === 'manager';
@@ -658,7 +949,7 @@ export function createApp(options = {}) {
       ? handovers.find((h) => h.acknowledged === 0) || null
       : null;
 
-    // Build role-matched colleague list for Shift Handover Dropdown (الأمن للأمن، الكاميرات للكاميرات، المشرف للمشرف، الصالة للصالة)
+    // Build role-matched colleague list for Shift Handover Dropdown
     let roleColleagues = [];
     if (canHandover && auth?.user) {
       const targetRolesSet =
@@ -714,9 +1005,53 @@ export function createApp(options = {}) {
       }
     }
 
+    // Build personal profile for the currently logged-in user (their own password & QR & info)
+    let myProfile = null;
+    if (auth?.user && auth.user.role !== 'kiosk') {
+      const secretHex = getSessionSecret();
+      const userRow = db
+        .prepare('SELECT * FROM system_users WHERE id = ? LIMIT 1')
+        .get(auth.user.id);
+      const empRow = userRow?.employee_id
+        ? db.prepare('SELECT * FROM employees WHERE id = ? LIMIT 1').get(userRow.employee_id)
+        : null;
+      const myPass = userRow
+        ? decryptPasswordForAdmin(userRow.pin_cipher, secretHex) || empRow?.emp_code || ''
+        : '';
+
+      myProfile = {
+        user_id: auth.user.id,
+        username: auth.user.username,
+        display_name: auth.user.display_name,
+        role: auth.user.role,
+        role_label: auth.user.role_label,
+        avatar_color: auth.user.avatar_color,
+        my_password: myPass,
+        employee_id: empRow?.id || '',
+        emp_code: empRow?.emp_code || '',
+        department: empRow?.department || ROLES_METADATA[auth.user.role]?.shortLabel || '',
+        role_title: empRow?.role_title || ROLES_METADATA[auth.user.role]?.label || '',
+        shift_start: empRow?.shift_start || '08:00',
+        shift_end: empRow?.shift_end || '20:00',
+        phone: empRow?.phone || '',
+        qr_payload: empRow ? `ZMART:EMP:${empRow.id}` : '',
+      };
+    }
+
     const canManageSettings = auth?.has('settings:manage');
 
+    const totalDbRecords =
+      db.prepare('SELECT COUNT(*) as c FROM employees').get().c +
+      db.prepare('SELECT COUNT(*) as c FROM suppliers').get().c +
+      db.prepare('SELECT COUNT(*) as c FROM shortages').get().c +
+      db.prepare('SELECT COUNT(*) as c FROM attendance_logs').get().c +
+      db.prepare('SELECT COUNT(*) as c FROM notes').get().c +
+      db.prepare('SELECT COUNT(*) as c FROM truck_logs').get().c +
+      db.prepare('SELECT COUNT(*) as c FROM team_messages').get().c;
+
     return {
+      dbBootId,
+      serverColdEmpty: totalDbRecords === 0,
       dateKey: targetDate,
       serverTime: new Date().toISOString(),
       auth: auth
@@ -725,6 +1060,7 @@ export function createApp(options = {}) {
             permissions: auth.permissions,
           }
         : null,
+      myProfile,
       settings: {
         store_name: settings.store_name || 'زايد مارت',
         branch_name: settings.branch_name || 'الفرع الرئيسي',
@@ -743,6 +1079,7 @@ export function createApp(options = {}) {
       productCatalog,
       notes,
       handovers,
+      teamMessages,
       pendingHandover,
       roleColleagues,
       summary: {
@@ -1048,7 +1385,16 @@ export function createApp(options = {}) {
     requireAnyPermission(['attendance:write', 'attendance:kiosk']),
     (req, res) => {
       try {
-        const { employee_id, action_type, note = '', proof_url = '', timestamp } = req.body || {};
+        const {
+          id: clientId,
+          employee_id,
+          action_type,
+          note = '',
+          proof_url = '',
+          timestamp,
+          allowed_break_minutes = 0,
+          break_reason = '',
+        } = req.body || {};
 
         const validActions = ['check_in', 'break_start', 'break_end', 'check_out'];
         if (!employee_id || !validActions.includes(action_type)) {
@@ -1064,6 +1410,7 @@ export function createApp(options = {}) {
         const autoVerified = req.auth.has('attendance:verify');
 
         const created = insertAttendanceLog({
+          id: clientId,
           emp,
           action_type,
           note: isFullWrite ? String(note || '').slice(0, 300) : '',
@@ -1071,6 +1418,10 @@ export function createApp(options = {}) {
           recorded_by: req.auth.actorLabel,
           autoVerified,
           timestamp: isFullWrite ? timestamp : undefined,
+          allowed_break_minutes: isFullWrite ? allowed_break_minutes : 0,
+          break_reason: isFullWrite ? break_reason : '',
+          actorUser: req.auth.user,
+          ip: getClientIp(req),
         });
 
         broadcastUpdate('attendance');
@@ -1087,7 +1438,12 @@ export function createApp(options = {}) {
     requireAnyPermission(['attendance:kiosk', 'attendance:write']),
     (req, res) => {
       try {
-        const { code_or_qr = '', preferred_action = '' } = req.body || {};
+        const {
+          code_or_qr = '',
+          preferred_action = '',
+          allowed_break_minutes = 0,
+          break_reason = '',
+        } = req.body || {};
 
         const raw = normalizeDigits(String(code_or_qr || '').trim());
         if (!raw) {
@@ -1114,11 +1470,14 @@ export function createApp(options = {}) {
         }
 
         const todayKey = getLocalDateKey();
-        const latestLog = db
-          .prepare(
-            'SELECT * FROM attendance_logs WHERE employee_id = ? AND date_key = ? ORDER BY timestamp DESC LIMIT 1'
-          )
-          .get(emp.id, todayKey);
+        const openShift = findOpenShiftForEmployee(emp.id, new Date());
+        const latestLog = openShift.isOpen
+          ? openShift.latestLog
+          : db
+              .prepare(
+                'SELECT * FROM attendance_logs WHERE employee_id = ? AND date_key = ? ORDER BY timestamp DESC LIMIT 1'
+              )
+              .get(emp.id, todayKey);
 
         if (!preferred_action && latestLog) {
           const elapsedSec = (Date.now() - new Date(latestLog.timestamp).getTime()) / 1000;
@@ -1151,6 +1510,10 @@ export function createApp(options = {}) {
           note: 'تسجيل سريع عبر الكود / QR',
           recorded_by: `${req.auth.actorLabel} [QR]`,
           autoVerified: req.auth.has('attendance:verify'),
+          allowed_break_minutes,
+          break_reason,
+          actorUser: req.auth.user,
+          ip: getClientIp(req),
         });
 
         broadcastUpdate('attendance_qr');
@@ -1251,7 +1614,11 @@ export function createApp(options = {}) {
       const isoTime = now.toISOString();
       const dateKey = getLocalDateKey(now);
       const autoVerified = req.auth.has('attendance:verify') ? 1 : 0;
-      const id = crypto.randomUUID();
+      const id = req.body?.id ? String(req.body.id) : crypto.randomUUID();
+      const existingTrk = db.prepare('SELECT * FROM truck_logs WHERE id = ?').get(id);
+      if (existingTrk) {
+        return res.status(200).json({ ok: true, truck: existingTrk });
+      }
 
       db.prepare(`
         INSERT INTO truck_logs (
@@ -1431,7 +1798,11 @@ export function createApp(options = {}) {
       const isoTime = now.toISOString();
       const dateKey = getLocalDateKey(now);
       const dvrTime = (dvr_timestamp || '').trim() || getLocalTimeHMS(now);
-      const id = crypto.randomUUID();
+      const id = req.body?.id ? String(req.body.id) : crypto.randomUUID();
+      const existingNote = db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
+      if (existingNote) {
+        return res.status(200).json({ ok: true, note: existingNote });
+      }
 
       db.prepare(`
         INSERT INTO notes (
@@ -1527,7 +1898,7 @@ export function createApp(options = {}) {
       ).run(resolvedTargetRole);
 
       const now = new Date();
-      const id = crypto.randomUUID();
+      const id = req.body?.id ? String(req.body.id) : crypto.randomUUID();
       const sender =
         req.auth.user?.display_name || (from_operator || '').trim() || req.auth.actorLabel;
       const defaultReceiverLabel =
@@ -1606,7 +1977,7 @@ export function createApp(options = {}) {
         login_password = '',
         login_enabled = 1,
         shift_start = '08:00',
-        shift_end = '17:00',
+        shift_end = '20:00',
         avatar_color = '#1A73E8',
         phone = '',
       } = req.body || {};
@@ -1614,7 +1985,7 @@ export function createApp(options = {}) {
       if (!name || !name.trim()) {
         return res.status(400).json({ error: 'اسم الموظف مطلوب' });
       }
-      const id = crypto.randomUUID();
+      const id = req.body?.id ? String(req.body.id) : crypto.randomUUID();
       const rawCustomPass = normalizeDigits(String(login_password || '').trim());
       const cleanCode = normalizeDigits(String(emp_code || '').trim());
       const code = cleanCode || rawCustomPass || generateNextEmpCode(db);
@@ -1791,7 +2162,7 @@ export function createApp(options = {}) {
         department = 'منسقي ممرات',
         system_role = '',
         shift_start = '08:00',
-        shift_end = '17:00',
+        shift_end = '20:00',
         avatar_color = '#0B57D0',
       } = req.body || {};
 
@@ -1888,7 +2259,7 @@ export function createApp(options = {}) {
       if (!name || !name.trim()) {
         return res.status(400).json({ error: 'اسم المورد مطلوب' });
       }
-      const id = crypto.randomUUID();
+      const id = req.body?.id ? String(req.body.id) : crypto.randomUUID();
       const now = new Date().toISOString();
       db.prepare(`
         INSERT INTO suppliers (id, name, category, icon, color, has_pending_return, pending_return_note, phone, is_active, updated_at)
@@ -2051,6 +2422,7 @@ export function createApp(options = {}) {
           requested_qty = null,
           unit = '',
           urgency = 'out_of_stock',
+          is_suggestion = false,
           supplier_id = '',
           supplier_name = '',
           notes = '',
@@ -2060,7 +2432,7 @@ export function createApp(options = {}) {
 
         const cleanName = String(item_name || '').trim();
         if (!cleanName) {
-          return res.status(400).json({ error: 'يرجى كتابة أو اختيار اسم الصنف الناقص' });
+          return res.status(400).json({ error: 'يرجى كتابة أو اختيار اسم الصنف الناقص أو المقترح' });
         }
 
         const qtyCheck = normalizeRequestedQty(requested_qty);
@@ -2071,6 +2443,7 @@ export function createApp(options = {}) {
 
         const validUrgencies = ['out_of_stock', 'low_stock'];
         const finalUrgency = validUrgencies.includes(urgency) ? urgency : 'out_of_stock';
+        const finalIsSuggestion = is_suggestion ? 1 : 0;
         const cleanUnit = String(unit || '').trim().slice(0, 40);
         const cleanCategory = String(category || 'بقالة جافة').trim() || 'بقالة جافة';
         const cleanNotes = String(notes || '').trim().slice(0, 400);
@@ -2111,6 +2484,7 @@ export function createApp(options = {}) {
                SET requested_qty = ?,
                    unit = ?,
                    urgency = ?,
+                   is_suggestion = ?,
                    notes = ?,
                    updated_by = ?,
                    updated_at = ?,
@@ -2120,24 +2494,37 @@ export function createApp(options = {}) {
               nextQty,
               nextUnit,
               finalUrgency,
+              finalIsSuggestion || existingOpen.is_suggestion || 0,
               nextNotes,
               req.auth.actorLabel,
               isoNow,
               existingOpen.id
             );
             const updated = db.prepare('SELECT * FROM shortages WHERE id = ?').get(existingOpen.id);
+            recordAuditLog(db, {
+              userId: req.auth.user.id,
+              userName: req.auth.user.display_name,
+              role: req.auth.user.role,
+              action: finalIsSuggestion ? 'تحديث مقترح صنف' : 'تحديث صنف ناقص',
+              details: `تحديث "${cleanName}" (${cleanCategory})`,
+              ip: getClientIp(req),
+            });
             broadcastUpdate('shortage_update');
             return res.status(200).json({ ok: true, shortage: updated, merged: true });
           }
         }
 
-        const id = crypto.randomUUID();
+        const id = req.body?.id ? String(req.body.id) : crypto.randomUUID();
+        const existingShById = db.prepare('SELECT * FROM shortages WHERE id = ?').get(id);
+        if (existingShById) {
+          return res.status(200).json({ ok: true, shortage: existingShById, merged: false });
+        }
         db.prepare(
           `INSERT INTO shortages (
-            id, product_id, item_name, category, requested_qty, unit, urgency, status,
+            id, product_id, item_name, category, requested_qty, unit, urgency, status, is_suggestion,
             supplier_id, supplier_name, notes, recorded_by, recorded_by_role, updated_by,
             resolved_by, resolved_at, timestamp, updated_at, date_key, synced
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, '', '', '', ?, ?, ?, 0)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, ?, 0)`
         ).run(
           id,
           catalogProductId,
@@ -2146,6 +2533,7 @@ export function createApp(options = {}) {
           finalQty,
           cleanUnit,
           finalUrgency,
+          finalIsSuggestion,
           supplier_id || '',
           resolvedSupplierName,
           cleanNotes,
@@ -2155,6 +2543,15 @@ export function createApp(options = {}) {
           isoNow,
           dateKey
         );
+
+        recordAuditLog(db, {
+          userId: req.auth.user.id,
+          userName: req.auth.user.display_name,
+          role: req.auth.user.role,
+          action: finalIsSuggestion ? 'إضافة مقترح صنف جديد' : 'إضافة صنف ناقص',
+          details: `${finalIsSuggestion ? 'اقتراح صنف' : 'نقص صنف'}: "${cleanName}" (${cleanCategory})${finalQty !== null ? ` — الكمية: ${finalQty} ${cleanUnit}` : ''}`,
+          ip: getClientIp(req),
+        });
 
         const created = db.prepare('SELECT * FROM shortages WHERE id = ?').get(id);
         broadcastUpdate('shortage_add');
@@ -2384,6 +2781,7 @@ export function createApp(options = {}) {
           return res.status(404).json({ error: 'الصنف غير موجود' });
         }
         db.prepare('DELETE FROM shortages WHERE id = ?').run(existing.id);
+        deleteCloudRecord(db, 'shortages', existing.id);
 
         recordAuditLog(db, {
           userId: req.auth.user.id,
@@ -2546,10 +2944,30 @@ export function createApp(options = {}) {
           }
         }
 
+        const nextShiftDateKey =
+          req.body?.shift_date_key !== undefined && String(req.body.shift_date_key).trim()
+            ? String(req.body.shift_date_key).trim()
+            : existing.shift_date_key || nextDateKey;
+
         const nextLate =
           req.body?.late_minutes !== undefined
             ? Math.max(0, Number(normalizeDigits(req.body.late_minutes)) || 0)
             : existing.late_minutes;
+
+        const nextAllowedBreak =
+          req.body?.allowed_break_minutes !== undefined
+            ? Math.max(0, Number(normalizeDigits(req.body.allowed_break_minutes)) || 0)
+            : existing.allowed_break_minutes || 0;
+
+        const nextBreakDuration =
+          req.body?.break_duration_minutes !== undefined
+            ? Math.max(0, Number(normalizeDigits(req.body.break_duration_minutes)) || 0)
+            : existing.break_duration_minutes || 0;
+
+        const nextBreakReason =
+          req.body?.break_reason !== undefined
+            ? String(req.body.break_reason || '').slice(0, 120)
+            : existing.break_reason || '';
 
         const nextNote =
           req.body?.note !== undefined
@@ -2565,13 +2983,19 @@ export function createApp(options = {}) {
 
         db.prepare(
           `UPDATE attendance_logs
-           SET action_type = ?, timestamp = ?, date_key = ?, late_minutes = ?, note = ?, verified_by_cctv = ?, synced = 0
+           SET action_type = ?, timestamp = ?, date_key = ?, shift_date_key = ?,
+               late_minutes = ?, allowed_break_minutes = ?, break_duration_minutes = ?, break_reason = ?,
+               note = ?, verified_by_cctv = ?, synced = 0
            WHERE id = ?`
         ).run(
           nextAction,
           nextIso,
           nextDateKey,
+          nextShiftDateKey,
           nextLate,
+          nextAllowedBreak,
+          nextBreakDuration,
+          nextBreakReason,
           nextNote,
           nextVerified,
           existing.id
@@ -2610,6 +3034,7 @@ export function createApp(options = {}) {
           return res.status(404).json({ error: 'سجل الحضور غير موجود' });
         }
         db.prepare('DELETE FROM attendance_logs WHERE id = ?').run(existing.id);
+        deleteCloudRecord(db, 'attendance_logs', existing.id);
 
         recordAuditLog(db, {
           userId: req.auth.user.id,
@@ -2715,6 +3140,7 @@ export function createApp(options = {}) {
         return res.status(404).json({ error: 'سجل العربية غير موجود' });
       }
       db.prepare('DELETE FROM truck_logs WHERE id = ?').run(existing.id);
+      deleteCloudRecord(db, 'truck_logs', existing.id);
 
       recordAuditLog(db, {
         userId: req.auth.user.id,
@@ -2805,6 +3231,7 @@ export function createApp(options = {}) {
         return res.status(404).json({ error: 'الملاحظة غير موجودة' });
       }
       db.prepare('DELETE FROM notes WHERE id = ?').run(existing.id);
+      deleteCloudRecord(db, 'notes', existing.id);
 
       recordAuditLog(db, {
         userId: req.auth.user.id,
@@ -2856,9 +3283,9 @@ export function createApp(options = {}) {
 
       const attendanceLogs = db
         .prepare(
-          'SELECT * FROM attendance_logs WHERE date_key >= ? AND date_key <= ? ORDER BY timestamp DESC'
+          'SELECT * FROM attendance_logs WHERE (date_key >= ? AND date_key <= ?) OR (shift_date_key >= ? AND shift_date_key <= ?) ORDER BY timestamp DESC'
         )
-        .all(fromDate, toDate);
+        .all(fromDate, toDate, fromDate, toDate);
 
       const truckLogs = db
         .prepare(
@@ -2906,6 +3333,7 @@ export function createApp(options = {}) {
           checkIns: 0,
           checkOuts: 0,
           breaks: 0,
+          totalBreakMinutes: 0,
           lateCount: 0,
           totalLateMinutes: 0,
         });
@@ -2922,6 +3350,7 @@ export function createApp(options = {}) {
             checkIns: 0,
             checkOuts: 0,
             breaks: 0,
+            totalBreakMinutes: 0,
             lateCount: 0,
             totalLateMinutes: 0,
           });
@@ -2929,7 +3358,7 @@ export function createApp(options = {}) {
         const st = empMap.get(log.employee_id);
         if (log.action_type === 'check_in') {
           st.checkIns += 1;
-          st.daysSet.add(log.date_key);
+          st.daysSet.add(log.shift_date_key || log.date_key);
           if (log.late_minutes > 0) {
             st.lateCount += 1;
             st.totalLateMinutes += log.late_minutes;
@@ -2938,6 +3367,8 @@ export function createApp(options = {}) {
           st.checkOuts += 1;
         } else if (log.action_type === 'break_start') {
           st.breaks += 1;
+        } else if (log.action_type === 'break_end') {
+          st.totalBreakMinutes += Number(log.break_duration_minutes) || 0;
         }
       }
 
@@ -3049,6 +3480,9 @@ export function createApp(options = {}) {
           totalLateInstances: attendanceLogs.filter((l) => l.late_minutes > 0).length,
           totalLateMinutes: attendanceLogs.reduce((s, l) => s + (l.late_minutes || 0), 0),
           breaksCount: attendanceLogs.filter((l) => l.action_type === 'break_start').length,
+          totalBreakMinutes: attendanceLogs
+            .filter((l) => l.action_type === 'break_end')
+            .reduce((s, l) => s + (Number(l.break_duration_minutes) || 0), 0),
           unverifiedCount: attendanceLogs.filter((l) => !l.verified_by_cctv).length,
           trucksTotal: truckLogs.length,
           trucksCompleted: completedTrucks.length,
@@ -3095,13 +3529,14 @@ export function createApp(options = {}) {
         DELETE FROM shortages;
         DELETE FROM notes;
         DELETE FROM shift_handovers;
+        DELETE FROM team_messages;
       `);
       recordAuditLog(db, {
         userId: req.auth.user.id,
         userName: req.auth.user.display_name,
         role: req.auth.user.role,
         action: 'تصفير سجلات الحركات التجريبية',
-        details: 'تم مسح سجلات الحضور والعربيات والنواقص والملاحظات مع الاحتفاظ بالموظفين والموردين وكتالوج الأصناف وكلمات المرور',
+        details: 'تم مسح سجلات الحضور والعربيات والنواقص والملاحظات ورسائل التيم مع الاحتفاظ بالموظفين والموردين وكتالوج الأصناف وكلمات المرور',
         ip: getClientIp(req),
         severity: 'warning',
       });
@@ -3111,6 +3546,461 @@ export function createApp(options = {}) {
       return res.status(500).json({ error: err.message });
     }
   });
+
+  // Purge any legacy fake seed data on demand
+  app.post('/api/system/purge-fake-data', requireAuth, requirePermission('users:manage'), (req, res) => {
+    try {
+      purgeLegacyFakeSeedData(db);
+      recordAuditLog(db, {
+        userId: req.auth.user.id,
+        userName: req.auth.user.display_name,
+        role: req.auth.user.role,
+        action: 'تنظيف البيانات الوهمية (Fake Data)',
+        details: 'تم حذف أي بيانات تجريبية افتراضية والإبقاء على البيانات الحقيقية فقط',
+        ip: getClientIp(req),
+        severity: 'warning',
+      });
+      broadcastUpdate('fake_data_purged');
+      return res.json({ ok: true });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // =========================================================================
+  // 4D. TEAM & CASHIER REAL-TIME COMMUNICATION (الشات والتنبيهات اللحظية)
+  // =========================================================================
+
+  app.get('/api/team-messages', requireAuth, (req, res) => {
+    try {
+      const channel = String(req.query.channel || '').trim();
+      const rows = channel && channel !== 'all'
+        ? db
+            .prepare(
+              'SELECT * FROM team_messages WHERE channel = ? ORDER BY is_pinned DESC, timestamp DESC LIMIT 150'
+            )
+            .all(channel)
+        : db
+            .prepare(
+              'SELECT * FROM team_messages ORDER BY is_pinned DESC, timestamp DESC LIMIT 150'
+            )
+            .all();
+      return res.json({ ok: true, messages: rows });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/team-messages', requireAuth, (req, res) => {
+    try {
+      if (req.auth.user?.role === 'kiosk') {
+        return res.status(403).json({ error: 'غير مسموح في وضع الكشك' });
+      }
+      const {
+        channel = 'general',
+        content = '',
+        message = '',
+        is_urgent = false,
+        priority = 'normal',
+        is_pinned = false,
+      } = req.body || {};
+
+      const cleanContent = String(content || message || '').trim().slice(0, 600);
+      if (!cleanContent) {
+        return res.status(400).json({ error: 'يرجى كتابة نص الرسالة أو اختيار تنبيه سريع' });
+      }
+
+      const validChannels = ['cashier', 'general', 'security'];
+      const finalChannel = validChannels.includes(channel) ? channel : 'general';
+      const finalUrgent = Boolean(is_urgent || priority === 'urgent');
+      const now = new Date();
+      const isoNow = now.toISOString();
+      const dateKey = getLocalDateKey(now);
+      const id = req.body?.id ? String(req.body.id) : crypto.randomUUID();
+
+      const existingMsg = db.prepare('SELECT * FROM team_messages WHERE id = ?').get(id);
+      if (existingMsg) {
+        return res.status(200).json({ ok: true, message: existingMsg });
+      }
+
+      db.prepare(`
+        INSERT INTO team_messages (
+          id, channel, sender_id, sender_name, sender_role, content, is_urgent, is_pinned, timestamp, date_key, synced
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+      `).run(
+        id,
+        finalChannel,
+        req.auth.user.id,
+        req.auth.user.display_name,
+        req.auth.user.role,
+        cleanContent,
+        finalUrgent ? 1 : 0,
+        is_pinned ? 1 : 0,
+        isoNow,
+        dateKey
+      );
+
+      const channelArabic =
+        finalChannel === 'cashier'
+          ? 'قناة الكاشيرية'
+          : finalChannel === 'security'
+          ? 'قناة الأمن والبوابة'
+          : 'قناة التيم العام';
+
+      recordAuditLog(db, {
+        userId: req.auth.user.id,
+        userName: req.auth.user.display_name,
+        role: req.auth.user.role,
+        action: `رسالة تواصل (${channelArabic})`,
+        details: cleanContent,
+        ip: getClientIp(req),
+        severity: is_urgent ? 'warning' : 'info',
+      });
+
+      const created = db.prepare('SELECT * FROM team_messages WHERE id = ?').get(id);
+      broadcastUpdate('team_message');
+      return res.status(201).json({ ok: true, message: created });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/team-messages/:id/pin', requireAuth, (req, res) => {
+    try {
+      const existing = db.prepare('SELECT * FROM team_messages WHERE id = ?').get(req.params.id);
+      if (!existing) return res.status(404).json({ error: 'الرسالة غير موجودة' });
+      const nextPin = existing.is_pinned ? 0 : 1;
+      db.prepare('UPDATE team_messages SET is_pinned = ?, synced = 0 WHERE id = ?').run(
+        nextPin,
+        existing.id
+      );
+      broadcastUpdate('team_message_pin');
+      return res.json({ ok: true, is_pinned: Boolean(nextPin) });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/team-messages/:id', requireAuth, (req, res) => {
+    try {
+      const existing = db.prepare('SELECT * FROM team_messages WHERE id = ?').get(req.params.id);
+      if (!existing) return res.status(404).json({ error: 'الرسالة غير موجودة' });
+      const canDelete =
+        req.auth.has('records:manage') ||
+        req.auth.has('users:manage') ||
+        existing.sender_id === req.auth.user.id;
+      if (!canDelete) {
+        return res.status(403).json({ error: 'غير مصرح بحذف هذه الرسالة' });
+      }
+      db.prepare('DELETE FROM team_messages WHERE id = ?').run(existing.id);
+      deleteCloudRecord(db, 'team_messages', existing.id);
+      broadcastUpdate('team_message_delete');
+      return res.json({ ok: true });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // =========================================================================
+  // 4E. PERSONAL PROFILE & INDIVIDUAL / MASTER LOGS
+  // =========================================================================
+
+  app.get('/api/profile/me', requireAuth, (req, res) => {
+    try {
+      const secretHex = getSessionSecret();
+      const userRow = db
+        .prepare('SELECT * FROM system_users WHERE id = ? LIMIT 1')
+        .get(req.auth.user.id);
+      const empRow = userRow?.employee_id
+        ? db.prepare('SELECT * FROM employees WHERE id = ? LIMIT 1').get(userRow.employee_id)
+        : null;
+      const myPass = userRow
+        ? decryptPasswordForAdmin(userRow.pin_cipher, secretHex) || empRow?.emp_code || ''
+        : '';
+
+      const empId = empRow?.id || '';
+      const myAttendanceLogs = empId
+        ? db
+            .prepare(
+              'SELECT * FROM attendance_logs WHERE employee_id = ? ORDER BY timestamp DESC LIMIT 80'
+            )
+            .all(empId)
+        : [];
+
+      const myNamePattern = `%${req.auth.user.display_name}%`;
+      const myShortages = db
+        .prepare(
+          'SELECT * FROM shortages WHERE recorded_by LIKE ? ORDER BY timestamp DESC LIMIT 50'
+        )
+        .all(myNamePattern);
+
+      const myNotes = db
+        .prepare('SELECT * FROM notes WHERE recorded_by LIKE ? ORDER BY timestamp DESC LIMIT 50')
+        .all(myNamePattern);
+
+      const myAuditLogs = db
+        .prepare(
+          'SELECT * FROM audit_logs WHERE user_id = ? OR user_id = ? OR user_name LIKE ? ORDER BY timestamp DESC LIMIT 80'
+        )
+        .all(req.auth.user.id, empId, myNamePattern);
+
+      const checkInsCount = myAttendanceLogs.filter((l) => l.action_type === 'check_in').length;
+      const breaksCount = myAttendanceLogs.filter((l) => l.action_type === 'break_start').length;
+      const totalBreakMinutes = myAttendanceLogs
+        .filter((l) => l.action_type === 'break_end')
+        .reduce((sum, l) => sum + (Number(l.break_duration_minutes) || 0), 0);
+      const totalLateMinutes = myAttendanceLogs.reduce(
+        (sum, l) => sum + (Number(l.late_minutes) || 0),
+        0
+      );
+
+      return res.json({
+        ok: true,
+        profile: {
+          user_id: req.auth.user.id,
+          username: req.auth.user.username,
+          display_name: req.auth.user.display_name,
+          role: req.auth.user.role,
+          role_label: req.auth.user.role_label,
+          avatar_color: req.auth.user.avatar_color,
+          my_password: req.auth.user.role === 'kiosk' ? '' : myPass,
+          employee_id: empId,
+          emp_code: empRow?.emp_code || '',
+          department: empRow?.department || ROLES_METADATA[req.auth.user.role]?.shortLabel || '',
+          role_title: empRow?.role_title || ROLES_METADATA[req.auth.user.role]?.label || '',
+          shift_start: empRow?.shift_start || '08:00',
+          shift_end: empRow?.shift_end || '20:00',
+          phone: empRow?.phone || '',
+          qr_payload: empRow ? `ZMART:EMP:${empRow.id}` : '',
+        },
+        stats: {
+          checkInsCount,
+          breaksCount,
+          totalBreakMinutes,
+          totalLateMinutes,
+          shortagesReportedCount: myShortages.length,
+          notesReportedCount: myNotes.length,
+        },
+        myAttendanceLogs,
+        myShortages,
+        myNotes,
+        myAuditLogs,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Per-Employee / Per-User Complete Individual Log
+  app.get('/api/logs/person/:id', requireAuth, (req, res) => {
+    try {
+      const targetId = String(req.params.id || '').trim();
+      const canSeeAnyone =
+        req.auth.has('audit:view') ||
+        req.auth.has('reports:view') ||
+        req.auth.has('staff:manage') ||
+        req.auth.has('users:manage') ||
+        req.auth.has('attendance:read');
+
+      const isSelf =
+        targetId === req.auth.user.id ||
+        (req.auth.user.employee_id && targetId === req.auth.user.employee_id);
+
+      if (!canSeeAnyone && !isSelf) {
+        return res.status(403).json({ error: 'غير مصرح بعرض سجل موظف آخر' });
+      }
+
+      let empRow = db.prepare('SELECT * FROM employees WHERE id = ? LIMIT 1').get(targetId);
+      let userRow = db.prepare('SELECT * FROM system_users WHERE id = ? LIMIT 1').get(targetId);
+
+      if (empRow && !userRow) {
+        userRow = db
+          .prepare('SELECT * FROM system_users WHERE employee_id = ? LIMIT 1')
+          .get(empRow.id);
+      } else if (userRow && !empRow && userRow.employee_id) {
+        empRow = db
+          .prepare('SELECT * FROM employees WHERE id = ? LIMIT 1')
+          .get(userRow.employee_id);
+      }
+
+      if (!empRow && !userRow) {
+        return res.status(404).json({ error: 'لم يتم العثور على الموظف أو المستخدم' });
+      }
+
+      const personName = empRow?.name || userRow?.display_name || '';
+      const empId = empRow?.id || '__NO_EMP__';
+      const userId = userRow?.id || '__NO_USER__';
+      const namePattern = `%${personName}%`;
+
+      const attendanceLogs = db
+        .prepare(
+          'SELECT * FROM attendance_logs WHERE employee_id = ? ORDER BY timestamp DESC LIMIT 250'
+        )
+        .all(empId);
+
+      const shortages = db
+        .prepare(
+          'SELECT * FROM shortages WHERE recorded_by LIKE ? OR updated_by LIKE ? ORDER BY timestamp DESC LIMIT 150'
+        )
+        .all(namePattern, namePattern);
+
+      const notes = db
+        .prepare(
+          'SELECT * FROM notes WHERE recorded_by LIKE ? ORDER BY timestamp DESC LIMIT 150'
+        )
+        .all(namePattern);
+
+      const truckLogs = db
+        .prepare(
+          'SELECT * FROM truck_logs WHERE recorded_by LIKE ? ORDER BY arrival_time DESC LIMIT 100'
+        )
+        .all(namePattern);
+
+      const teamMessages = db
+        .prepare(
+          'SELECT * FROM team_messages WHERE sender_id = ? OR sender_name LIKE ? ORDER BY timestamp DESC LIMIT 100'
+        )
+        .all(userId, namePattern);
+
+      const auditLogs = db
+        .prepare(
+          'SELECT * FROM audit_logs WHERE user_id = ? OR user_id = ? OR user_name LIKE ? OR details LIKE ? ORDER BY timestamp DESC LIMIT 250'
+        )
+        .all(userId, empId, namePattern, namePattern);
+
+      const daysSet = new Set(
+        attendanceLogs
+          .filter((l) => l.action_type === 'check_in')
+          .map((l) => l.shift_date_key || l.date_key)
+      );
+      const totalBreakCount = attendanceLogs.filter((l) => l.action_type === 'break_start').length;
+      const totalBreakMinutes = attendanceLogs
+        .filter((l) => l.action_type === 'break_end')
+        .reduce((sum, l) => sum + (Number(l.break_duration_minutes) || 0), 0);
+      const overBreakCount = attendanceLogs.filter(
+        (l) =>
+          l.action_type === 'break_end' &&
+          Number(l.allowed_break_minutes) > 0 &&
+          Number(l.break_duration_minutes) > Number(l.allowed_break_minutes)
+      ).length;
+      const totalLateMinutes = attendanceLogs.reduce(
+        (sum, l) => sum + (Number(l.late_minutes) || 0),
+        0
+      );
+
+      const canSeePassword =
+        isSelf || req.auth.has('users:manage') || req.auth.has('staff:manage');
+      const secretHex = getSessionSecret();
+      const passwordValue =
+        canSeePassword && userRow
+          ? decryptPasswordForAdmin(userRow.pin_cipher, secretHex) || empRow?.emp_code || ''
+          : undefined;
+
+      const resolvedRole =
+        userRow?.role ||
+        empRow?.system_role ||
+        inferDefaultRoleFromDepartment(empRow?.department, empRow?.role_title);
+
+      return res.json({
+        ok: true,
+        person: {
+          id: empRow?.id || userRow?.id,
+          employee_id: empRow?.id || '',
+          user_id: userRow?.id || '',
+          emp_code: empRow?.emp_code || '',
+          name: personName,
+          department: empRow?.department || ROLES_METADATA[resolvedRole]?.shortLabel || '',
+          role_title: empRow?.role_title || ROLES_METADATA[resolvedRole]?.label || '',
+          role: resolvedRole,
+          role_label: ROLES_METADATA[resolvedRole]?.label || resolvedRole,
+          shift_start: empRow?.shift_start || '08:00',
+          shift_end: empRow?.shift_end || '20:00',
+          phone: empRow?.phone || '',
+          password_value: passwordValue,
+        },
+        summary: {
+          daysPresent: daysSet.size,
+          totalAttendanceEvents: attendanceLogs.length,
+          totalBreakCount,
+          totalBreakMinutes,
+          overBreakCount,
+          totalLateMinutes,
+          shortagesCount: shortages.length,
+          notesCount: notes.length,
+          trucksCount: truckLogs.length,
+          messagesCount: teamMessages.length,
+          auditCount: auditLogs.length,
+        },
+        attendanceLogs,
+        shortages,
+        notes,
+        truckLogs,
+        teamMessages,
+        auditLogs,
+      });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Master Full System Audit Log for Admin
+  app.get(
+    '/api/audit-logs',
+    requireAuth,
+    requireAnyPermission(['audit:view', 'users:manage', 'reports:view']),
+    (req, res) => {
+      try {
+        const limit = Math.min(2000, Math.max(50, Number(req.query.limit) || 500));
+        const search = String(req.query.search || '').trim();
+        const roleFilter = String(req.query.role || '').trim();
+
+        let logs = db
+          .prepare(`SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT ${limit}`)
+          .all();
+
+        if (roleFilter && roleFilter !== 'all') {
+          logs = logs.filter((l) => l.role === roleFilter);
+        }
+        if (search) {
+          const q = search.toLowerCase();
+          logs = logs.filter(
+            (l) =>
+              (l.user_name || '').toLowerCase().includes(q) ||
+              (l.action || '').toLowerCase().includes(q) ||
+              (l.details || '').toLowerCase().includes(q)
+          );
+        }
+
+        return res.json({ ok: true, auditLogs: logs });
+      } catch (err) {
+        return res.status(500).json({ error: err.message });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/audit-logs',
+    requireAuth,
+    requirePermission('users:manage'),
+    (req, res) => {
+      try {
+        db.exec('DELETE FROM audit_logs;');
+        recordAuditLog(db, {
+          userId: req.auth.user.id,
+          userName: req.auth.user.display_name,
+          role: req.auth.user.role,
+          action: 'تصفير سجل التدقيق الشامل (Master Log)',
+          details: 'تم مسح سجل التدقيق القديم بواسطة الأدمن',
+          ip: getClientIp(req),
+          severity: 'warning',
+        });
+        broadcastUpdate('audit_cleared');
+        return res.json({ ok: true });
+      } catch (err) {
+        return res.status(500).json({ error: err.message });
+      }
+    }
+  );
 
   app.put('/api/settings', requireAuth, requirePermission('settings:manage'), (req, res) => {
     try {
@@ -3213,6 +4103,48 @@ export function createApp(options = {}) {
     res.json(exportFullBackup(db));
   });
 
+  // Automatic Client-to-Server Cold-Start Rehydration (Keeps Vercel alive before Supabase is linked!)
+  app.post('/api/sync/rehydrate', requireAuth, (req, res) => {
+    try {
+      const canRehydrateAll =
+        req.auth.has('staff:manage') ||
+        req.auth.has('backup:manage') ||
+        req.auth.has('records:manage') ||
+        req.auth.user?.role === 'owner' ||
+        req.auth.user?.role === 'manager' ||
+        req.auth.user?.role === 'supervisor';
+
+      const body = req.body || {};
+      const tables = body.tables || body;
+
+      // Only allow non-admin operational roles to rehydrate when server DB is genuinely cold-empty
+      const currentCount =
+        db.prepare('SELECT COUNT(*) as c FROM employees').get().c +
+        db.prepare('SELECT COUNT(*) as c FROM shortages').get().c +
+        db.prepare('SELECT COUNT(*) as c FROM attendance_logs').get().c;
+
+      if (!canRehydrateAll && currentCount > 0) {
+        return res.json({ ok: true, skipped: true });
+      }
+
+      importFullBackup(db, { tables });
+
+      recordAuditLog(db, {
+        userId: req.auth.user.id,
+        userName: req.auth.user.display_name,
+        role: req.auth.user.role,
+        action: 'مزامنة تلقائية من ذاكرة الهاتف (Auto-Rehydrate)',
+        details: 'استعادة البيانات المحلية المحفوظة على الجهاز بعد إعادة تشغيل الخادم السحابي',
+        ip: getClientIp(req),
+      });
+
+      broadcastUpdate('client_rehydrate');
+      return res.json({ ok: true, restored: true });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message });
+    }
+  });
+
   app.post('/api/backup/import', requireAuth, requirePermission('backup:manage'), (req, res) => {
     try {
       importFullBackup(db, req.body);
@@ -3246,15 +4178,22 @@ export function createApp(options = {}) {
       const users = canManageUsers
         ? db
             .prepare(
-              `SELECT id, username, display_name, role, pin_cipher, avatar_color, is_active, employee_id, last_login_at, created_at
+              `SELECT id, username, display_name, role, pin_cipher, avatar_color, is_active, employee_id, custom_permissions_json, last_login_at, created_at
                FROM system_users
                ORDER BY is_active DESC, created_at ASC`
             )
             .all()
             .map((u) => {
-              const { pin_cipher, ...rest } = u;
+              const { pin_cipher, custom_permissions_json, ...rest } = u;
+              let customPerms = [];
+              try {
+                customPerms = JSON.parse(custom_permissions_json || '[]');
+              } catch {
+                customPerms = [];
+              }
               return {
                 ...rest,
+                custom_permissions: Array.isArray(customPerms) ? customPerms : [],
                 password_value: decryptPasswordForAdmin(pin_cipher, secretHex),
               };
             })
@@ -3278,7 +4217,7 @@ export function createApp(options = {}) {
         .get(new Date().toISOString()).c;
 
       const auditLogs = db
-        .prepare('SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 100')
+        .prepare('SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 500')
         .all();
 
       res.json({
@@ -3301,6 +4240,7 @@ export function createApp(options = {}) {
         password,
         pin,
         avatar_color = '#0B57D0',
+        custom_permissions = [],
       } = req.body || {};
 
       const rawPass = normalizeDigits(String(password ?? pin ?? '').trim());
@@ -3333,15 +4273,20 @@ export function createApp(options = {}) {
         return res.status(400).json({ error: 'المعرف مستخدم بالفعل' });
       }
 
+      const validPermIds = new Set(ALL_PERMISSIONS.map((p) => p.id));
+      const cleanCustomPerms = Array.isArray(custom_permissions)
+        ? custom_permissions.filter((p) => validPermIds.has(p))
+        : [];
+
       const { saltHex, hashHex } = hashPin(rawPass);
       const cipher = encryptPasswordForAdmin(rawPass, getSessionSecret());
-      const id = crypto.randomUUID();
+      const id = req.body?.id ? String(req.body.id) : crypto.randomUUID();
       const now = new Date().toISOString();
 
       db.prepare(`
         INSERT INTO system_users (
-          id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, is_active, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+          id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, is_active, custom_permissions_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
       `).run(
         id,
         cleanUsername,
@@ -3351,6 +4296,7 @@ export function createApp(options = {}) {
         hashHex,
         cipher,
         avatar_color,
+        JSON.stringify(cleanCustomPerms),
         now,
         now
       );
@@ -3385,6 +4331,7 @@ export function createApp(options = {}) {
         pin,
         is_active = target.is_active,
         avatar_color = target.avatar_color,
+        custom_permissions,
       } = req.body || {};
 
       if (!ROLES_METADATA[role]) {
@@ -3421,9 +4368,17 @@ export function createApp(options = {}) {
         cipher = encryptPasswordForAdmin(rawPass, getSessionSecret());
       }
 
+      let nextCustomPermsJson = target.custom_permissions_json || '[]';
+      if (Array.isArray(custom_permissions)) {
+        const validPermIds = new Set(ALL_PERMISSIONS.map((p) => p.id));
+        nextCustomPermsJson = JSON.stringify(
+          custom_permissions.filter((p) => validPermIds.has(p))
+        );
+      }
+
       db.prepare(`
         UPDATE system_users
-        SET display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?, avatar_color = ?, is_active = ?, updated_at = ?
+        SET display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?, avatar_color = ?, is_active = ?, custom_permissions_json = ?, updated_at = ?
         WHERE id = ?
       `).run(
         display_name.trim(),
@@ -3433,6 +4388,7 @@ export function createApp(options = {}) {
         cipher,
         avatar_color,
         is_active ? 1 : 0,
+        nextCustomPermsJson,
         new Date().toISOString(),
         target.id
       );
@@ -3502,6 +4458,7 @@ export function createApp(options = {}) {
 
       db.prepare('UPDATE user_sessions SET revoked = 1 WHERE user_id = ?').run(target.id);
       db.prepare('DELETE FROM system_users WHERE id = ?').run(target.id);
+      deleteCloudRecord(db, 'system_users', target.id);
       if (target.employee_id) {
         db.prepare('UPDATE employees SET login_enabled = 0 WHERE id = ?').run(target.employee_id);
       }

@@ -3,7 +3,9 @@ import { apiRequest, formatRequestedQty } from '../lib/api.js';
 import {
   buildShortagesWhatsAppText,
   exportRangeReportCsv,
+  exportRangeReportWord,
   exportShortagesCsv,
+  exportShortagesWord,
   formatTimeArabic,
 } from '../lib/exportUtils.js';
 
@@ -19,6 +21,8 @@ function shiftDateKey(baseDateKey, offsetDays) {
 export default function AdminReportsPanel({
   data,
   canExportReports = false,
+  isOwner = false,
+  onOpenPersonLog,
   onToast,
 }) {
   const todayKey = data?.dateKey || shiftDateKey(null, 0);
@@ -136,7 +140,15 @@ export default function AdminReportsPanel({
                 className="min-h-[44px] px-4 py-2 rounded-xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-xs sm:text-sm font-black flex items-center gap-1.5 shadow-sm active:scale-95"
               >
                 <span className="ms-icon text-lg">download</span>
-                <span>تصدير التقرير الكامل Excel</span>
+                <span>تصدير Excel</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => exportRangeReportWord(report)}
+                className="min-h-[44px] px-4 py-2 rounded-xl bg-[var(--g-primary)] text-white text-xs sm:text-sm font-black flex items-center gap-1.5 shadow-sm active:scale-95"
+              >
+                <span className="ms-icon text-lg">description</span>
+                <span>تصدير Word (.doc)</span>
               </button>
               <button
                 type="button"
@@ -325,18 +337,33 @@ export default function AdminReportsPanel({
                       الأصناف الأكثر طلباً ونفاداً خلال الفترة
                     </h4>
                     {canExportReports && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          exportShortagesCsv(
-                            report.shortagesList || [],
-                            `${fromDate}_${toDate}`
-                          )
-                        }
-                        className="min-h-[40px] px-3.5 py-1.5 rounded-xl bg-[var(--g-surface)] hover:bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-[var(--g-text)] text-xs font-extrabold"
-                      >
-                        تصدير شيت النواقص Excel
-                      </button>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            exportShortagesCsv(
+                              report.shortagesList || [],
+                              `${fromDate}_${toDate}`
+                            )
+                          }
+                          className="min-h-[40px] px-3.5 py-1.5 rounded-xl bg-[var(--g-surface)] hover:bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-[var(--g-text)] text-xs font-extrabold"
+                        >
+                          شيت النواقص Excel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            exportShortagesWord(
+                              report.shortagesList || [],
+                              `${fromDate}_${toDate}`,
+                              storeName
+                            )
+                          }
+                          className="min-h-[40px] px-3.5 py-1.5 rounded-xl bg-[var(--g-surface)] hover:bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-[var(--g-text)] text-xs font-extrabold"
+                        >
+                          ملف النواقص Word
+                        </button>
+                      </div>
                     )}
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -431,16 +458,25 @@ export default function AdminReportsPanel({
                       className="p-3.5 rounded-2xl bg-[var(--g-surface-2)] border border-[var(--g-border)] flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                     >
                       <div>
-                        <div className="font-extrabold text-sm sm:text-base text-[var(--g-text)]">
-                          {emp.name}{' '}
-                          {emp.emp_code && (
+                        <div className="font-extrabold text-sm sm:text-base text-[var(--g-text)] flex items-center gap-2">
+                          <span>{emp.name}</span>
+                          {isOwner && emp.emp_code && (
                             <span className="text-xs text-[var(--g-primary)] num-ltr">
-                              #{emp.emp_code}
+                              🔑 #{emp.emp_code}
                             </span>
+                          )}
+                          {onOpenPersonLog && (
+                            <button
+                              type="button"
+                              onClick={() => onOpenPersonLog(emp.id, emp.name)}
+                              className="px-2.5 py-0.5 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-[11px] font-extrabold"
+                            >
+                              سجل الموظف الكامل 📋
+                            </button>
                           )}
                         </div>
                         <div className="text-xs text-[var(--g-text-muted)]">
-                          {emp.department} • مواعيد الشفت: {emp.shift_start}
+                          {emp.department} • مواعيد الشفت (12 ساعة): {emp.shift_start || '08:00'} → {emp.shift_end || '20:00'}
                         </div>
                       </div>
 

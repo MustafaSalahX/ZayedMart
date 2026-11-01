@@ -6,9 +6,9 @@ import { playSuccessChime } from '../lib/audio.js';
 import { formatTimeArabic, formatTimeWithSeconds } from '../lib/exportUtils.js';
 
 const LOCATION_TAGS = [
+  'منطقة الكاشير',
   'البوابة الرئيسية',
   'رصيف استلام البضاعة',
-  'منطقة الكاشير',
   'الممرات والصالة',
   'الثلاجات والأجبان',
   'المخزن',
@@ -16,14 +16,17 @@ const LOCATION_TAGS = [
 ];
 
 const CATEGORY_TAGS = [
+  'ملاحظات ومشاكل الكاشيرية',
+  'زحام على الكاشير',
+  'فرق حساب أو عهدة درج',
+  'عطل باركود أو سيستم كاشير',
+  'مرتجع أو موقف مع عميل',
   'ملاحظة عامة',
   'تأخير أو ترك مكان العمل',
-  'زحام على الكاشير',
   'عجز أو تالف بضاعة',
   'ثلاجة مفتوحة أو عطل',
   'اشتباه أو ملاحظة أمنية',
   'نظافة وترتيب ممر',
-  'موقف مع عميل',
 ];
 
 const SEVERITIES = [
@@ -73,7 +76,9 @@ export default function CctvNotesView({
   onPreviewImage,
 }) {
   const handoverCardTitle =
-    actorRole === 'security'
+    actorRole === 'cashier'
+      ? 'تسليم واستلام وردية الكاشيرية'
+      : actorRole === 'security'
       ? 'تسليم واستلام وردية الأمن'
       : actorRole === 'supervisor'
       ? 'تسليم واستلام وردية مشرف الصالة'
@@ -82,15 +87,22 @@ export default function CctvNotesView({
       : 'تسليم واستلام وردية مراقب الكاميرات';
 
   const handoverButtonLabel =
-    actorRole === 'security'
+    actorRole === 'cashier'
+      ? 'تسليم وردية الكاشير للكاشير التالي'
+      : actorRole === 'security'
       ? 'تسليم الوردية لفرد الأمن التالي'
       : actorRole === 'supervisor'
       ? 'تسليم الوردية للمشرف التالي'
       : actorRole === 'manager' || actorRole === 'owner'
       ? 'تسليم الوردية للمسؤول التالي'
       : 'تسليم الوردية لمراقب الكاميرات التالي';
-  const [locationTag, setLocationTag] = useState(LOCATION_TAGS[0]);
-  const [categoryTag, setCategoryTag] = useState(CATEGORY_TAGS[0]);
+  const [locationTag, setLocationTag] = useState(
+    actorRole === 'cashier' ? 'منطقة الكاشير' : LOCATION_TAGS[0]
+  );
+  const [categoryTag, setCategoryTag] = useState(
+    actorRole === 'cashier' ? 'ملاحظات ومشاكل الكاشيرية' : CATEGORY_TAGS[0]
+  );
+  const [notesFilter, setNotesFilter] = useState('all');
   const [severity, setSeverity] = useState('normal');
   const [dvrTimestamp, setDvrTimestamp] = useState(() => nowHMS());
   const [content, setContent] = useState('');
@@ -185,6 +197,21 @@ export default function CctvNotesView({
   }
 
   const openHandoverNotes = notes.filter((n) => n.is_open_handover === 1);
+
+  const filteredNotes = notes.filter((n) => {
+    if (notesFilter === 'cashier') {
+      return (
+        (n.location_tag || '').includes('الكاشير') ||
+        (n.category_tag || '').includes('الكاشير') ||
+        (n.category_tag || '').includes('درج') ||
+        (n.category_tag || '').includes('باركود')
+      );
+    }
+    if (notesFilter === 'open') {
+      return Number(n.is_open_handover) === 1;
+    }
+    return true;
+  });
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
@@ -402,20 +429,43 @@ export default function CctvNotesView({
 
         {/* Notes Feed */}
         <section className="g-card p-4 sm:p-5">
-          <div className="flex items-center gap-2 mb-4">
-            <span className="ms-icon filled text-[var(--g-primary)]">feed</span>
-            <h3 className="text-base sm:text-lg font-extrabold m-0">
-              سجل الملاحظات والوقائع ({notes.length})
-            </h3>
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+            <div className="flex items-center gap-2">
+              <span className="ms-icon filled text-[var(--g-primary)]">feed</span>
+              <h3 className="text-base sm:text-lg font-extrabold m-0">
+                سجل ملاحظات الكاشيرية والأمن والكاميرات ({filteredNotes.length})
+              </h3>
+            </div>
+
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+              {[
+                { id: 'all', label: `الكل (${notes.length})` },
+                { id: 'cashier', label: '🛒 ملاحظات الكاشيرية' },
+                { id: 'open', label: `⏳ للمتابعة (${openHandoverNotes.length})` },
+              ].map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  onClick={() => setNotesFilter(f.id)}
+                  className={`px-3 py-1 rounded-full text-xs font-extrabold whitespace-nowrap transition-all ${
+                    notesFilter === f.id
+                      ? 'bg-[var(--g-primary)] text-white'
+                      : 'bg-[var(--g-surface-variant)] text-[var(--g-muted)]'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
           </div>
 
-          {notes.length === 0 ? (
+          {filteredNotes.length === 0 ? (
             <div className="text-center py-10 text-[var(--g-muted)] text-sm">
-              لا توجد ملاحظات مسجلة لهذا اليوم حتى الآن.
+              لا توجد ملاحظات مسجلة في هذا التصنيف حتى الآن.
             </div>
           ) : (
             <div className="space-y-3">
-              {notes.map((n) => {
+              {filteredNotes.map((n) => {
                 const sev = SEVERITIES.find((s) => s.id === n.severity) || SEVERITIES[0];
                 return (
                   <div

@@ -1,6 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { apiRequest } from '../lib/api.js';
-import { formatTimeWithSeconds } from '../lib/exportUtils.js';
+import { apiRequest, clearMasterAuditLogs } from '../lib/api.js';
+import {
+  buildAuditLogsWhatsAppText,
+  exportAuditLogsCsv,
+  exportAuditLogsWord,
+  formatTimeWithSeconds,
+  openWhatsAppShare,
+} from '../lib/exportUtils.js';
 
 const AVATAR_COLORS = [
   '#7627BB',
@@ -13,10 +19,13 @@ const AVATAR_COLORS = [
 ];
 
 const QUICK_ROLE_PRESETS = [
+  { role: 'cashier', label: 'الكاشير / الكاشيرية', color: '#E37400', icon: 'point_of_sale' },
   { role: 'hall', label: 'عمال الصالة (النواقص)', color: '#007B83', icon: 'shopping_basket' },
-  { role: 'cctv', label: 'مراقب الكاميرات', color: '#185ABC', icon: 'desktop_windows' },
   { role: 'security', label: 'الأمن واستلام البضاعة', color: '#146C2E', icon: 'shield_person' },
+  { role: 'cctv', label: 'مراقب الكاميرات', color: '#185ABC', icon: 'desktop_windows' },
   { role: 'supervisor', label: 'مشرف الصالة والفرع', color: '#0B57D0', icon: 'manage_accounts' },
+  { role: 'warehouse', label: 'أمين المخزن والاستلام', color: '#007B83', icon: 'warehouse' },
+  { role: 'delivery', label: 'الدليفري والتوصيل', color: '#146C2E', icon: 'two_wheeler' },
   { role: 'kiosk', label: 'شاشة كشك العمال', color: '#E37400', icon: 'touch_app' },
 ];
 
@@ -24,6 +33,7 @@ export default function RbacSecurityPanel({
   canManageUsers = false,
   canViewAudit = false,
   currentUserId = '',
+  onOpenPersonLog,
   onRefreshParent,
   onToast,
 }) {
@@ -40,26 +50,27 @@ export default function RbacSecurityPanel({
   const [section, setSection] = useState(canManageUsers ? 'users' : 'audit');
   const [revealedIds, setRevealedIds] = useState({});
 
-  // New Password + Role form (No English username needed!)
-  const [newDisplayName, setNewDisplayName] = useState('مراقب الكاميرات');
-  const [newRole, setNewRole] = useState('cctv');
+  // New Password + Role form
+  const [newDisplayName, setNewDisplayName] = useState('كاشير الشفت');
+  const [newRole, setNewRole] = useState('cashier');
   const [newPassword, setNewPassword] = useState('');
-  const [newColor, setNewColor] = useState('#185ABC');
+  const [newColor, setNewColor] = useState('#E37400');
 
-  // Edit Password / Role modal
+  // Edit Password / Role / Custom Permissions modal
   const [editingUser, setEditingUser] = useState(null);
   const [editName, setEditName] = useState('');
-  const [editRole, setEditRole] = useState('security');
+  const [editRole, setEditRole] = useState('cashier');
   const [editPassword, setEditPassword] = useState('');
   const [editActive, setEditActive] = useState(true);
+  const [editCustomPerms, setEditCustomPerms] = useState([]);
 
   // Role Matrix editor
-  const [selectedMatrixRole, setSelectedMatrixRole] = useState('security');
+  const [selectedMatrixRole, setSelectedMatrixRole] = useState('cashier');
   const [draftPerms, setDraftPerms] = useState([]);
   const [savingPolicy, setSavingPolicy] = useState(false);
 
   // Audit filter
-  const [auditSeverityFilter, setAuditSeverityFilter] = useState('all');
+  const [auditRoleFilter, setAuditRoleFilter] = useState('all');
   const [auditSearch, setAuditSearch] = useState('');
 
   const loadRbac = useCallback(async () => {
@@ -141,6 +152,13 @@ export default function RbacSecurityPanel({
     setEditRole(u.role);
     setEditPassword('');
     setEditActive(Boolean(u.is_active));
+    setEditCustomPerms(Array.isArray(u.custom_permissions) ? u.custom_permissions : []);
+  }
+
+  function toggleUserCustomPerm(permId) {
+    setEditCustomPerms((prev) =>
+      prev.includes(permId) ? prev.filter((p) => p !== permId) : [...prev, permId]
+    );
   }
 
   async function handleSaveUserEdit(e) {
@@ -153,9 +171,10 @@ export default function RbacSecurityPanel({
         password: editPassword.trim() || undefined,
         is_active: editActive,
         avatar_color: editingUser.avatar_color,
+        custom_permissions: editCustomPerms,
       });
       setEditingUser(null);
-      onToast?.('تم تحديث كلمة المرور والصلاحية بنجاح ✓');
+      onToast?.('تم تحديث كلمة المرور والصلاحيات المخصصة بنجاح ✓');
       await loadRbac();
       onRefreshParent?.();
     } catch (err) {
@@ -189,6 +208,17 @@ export default function RbacSecurityPanel({
     }
   }
 
+  async function handleClearAuditLogs() {
+    if (!window.confirm('هل تريد أرشفة ومسح السجل الرقابي الحالي؟')) return;
+    try {
+      await clearMasterAuditLogs();
+      onToast?.('تم مسح السجل الرقابي بنجاح ✓');
+      await loadRbac();
+    } catch (err) {
+      onToast?.(err.message, 'error');
+    }
+  }
+
   const groupedPermissions = useMemo(() => {
     const groups = {};
     for (const p of overview.permissionsCatalog || []) {
@@ -201,20 +231,20 @@ export default function RbacSecurityPanel({
   const filteredAuditLogs = useMemo(() => {
     const q = auditSearch.trim().toLowerCase();
     return (overview.auditLogs || []).filter((log) => {
-      if (auditSeverityFilter === 'warnings' && log.severity === 'info') return false;
-      if (auditSeverityFilter === 'critical' && log.severity !== 'critical') return false;
+      const actorRole = log.actor_role || log.role || '';
+      if (auditRoleFilter !== 'all' && actorRole !== auditRoleFilter) return false;
       if (q) {
-        const hay = `${log.user_name} ${log.action} ${log.details} ${log.role}`.toLowerCase();
+        const hay = `${log.actor_name || log.user_name || ''} ${log.action || ''} ${log.target_label || ''} ${log.details || ''} ${actorRole}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [overview.auditLogs, auditSeverityFilter, auditSearch]);
+  }, [overview.auditLogs, auditRoleFilter, auditSearch]);
 
   if (loading) {
     return (
       <div className="g-card p-8 text-center text-sm font-bold text-[var(--g-muted)]">
-        جاري تحميل لوحة إدارة كلمات المرور والصلاحيات...
+        جاري تحميل لوحة إدارة كلمات المرور والصلاحيات والسجل الشامل...
       </div>
     );
   }
@@ -229,10 +259,10 @@ export default function RbacSecurityPanel({
           </div>
           <div>
             <h3 className="text-base sm:text-lg font-extrabold m-0">
-              إدارة جميع كلمات المرور وتوجيه الصلاحيات التلقائي (RBAC)
+              إدارة كلمات المرور، الأدوار، والصلاحيات المخصصة (RBAC)
             </h3>
             <p className="text-xs text-[var(--g-muted)] m-0 mt-0.5">
-              كل كلمة مرور تحدد الدور والواجهة تلقائياً عند الدخول • أجهزة مسجلة حالياً:{' '}
+              تحكم كامل للأدمن في كل مستخدم، كل دور، وكل صلاحية • أجهزة متصلة حالياً:{' '}
               <strong className="num-ltr text-[var(--g-primary)]">
                 {overview.activeSessionsCount}
               </strong>
@@ -252,7 +282,7 @@ export default function RbacSecurityPanel({
         )}
       </div>
 
-      {/* Section Switcher Pills — Responsive Grid on Mobile */}
+      {/* Section Switcher Pills */}
       <div className="grid grid-cols-1 sm:flex sm:flex-wrap items-center gap-2">
         {canManageUsers && (
           <>
@@ -266,7 +296,7 @@ export default function RbacSecurityPanel({
               }`}
             >
               <span className="ms-icon text-base">key</span>
-              <span>كلمات المرور والأدوار ({overview.users?.length || 0})</span>
+              <span>كلمات المرور والمستخدمون ({overview.users?.length || 0})</span>
             </button>
 
             <button
@@ -295,7 +325,7 @@ export default function RbacSecurityPanel({
             }`}
           >
             <span className="ms-icon text-base">policy</span>
-            <span>سجل الأمان ({overview.auditLogs?.length || 0})</span>
+            <span>السجل الرقابي الشامل للنظام ({overview.auditLogs?.length || 0})</span>
           </button>
         )}
       </div>
@@ -310,13 +340,13 @@ export default function RbacSecurityPanel({
           >
             <h4 className="text-sm sm:text-base font-extrabold m-0 flex items-center gap-2">
               <span className="ms-icon filled text-[var(--g-primary)]">add_moderator</span>
-              <span>إنشاء كلمة مرور جديدة بصلاحية مخصصة</span>
+              <span>إنشاء حساب / كلمة مرور جديدة بصلاحية محددة</span>
             </h4>
 
             {/* 1-Tap Role Presets */}
             <div>
               <span className="block text-[11px] font-bold text-[var(--g-muted)] mb-1.5">
-                اختيار سريع لنوع الوظيفة:
+                اختيار سريع لنوع الوظيفة (بما فيها الكاشير والمخزن والدليفري):
               </span>
               <div className="flex flex-wrap gap-1.5">
                 {QUICK_ROLE_PRESETS.map((p) => (
@@ -325,7 +355,7 @@ export default function RbacSecurityPanel({
                     type="button"
                     onClick={() => applyQuickPreset(p)}
                     className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1 border transition-all ${
-                      newRole === p.role && newDisplayName === p.label
+                      newRole === p.role
                         ? 'g-pill-active border-transparent'
                         : 'bg-[var(--g-surface-variant)] border-[var(--g-border)]'
                     }`}
@@ -339,12 +369,12 @@ export default function RbacSecurityPanel({
 
             <div>
               <label className="block text-xs font-bold mb-1">
-                الدور الذي يفتحه النظام تلقائياً بهذه الكلمة *
+                الدور الوظيفي (Role) الذي يفتحه النظام تلقائياً *
               </label>
               <select
                 value={newRole}
                 onChange={(e) => setNewRole(e.target.value)}
-                className="g-input w-full"
+                className="g-input w-full font-bold"
               >
                 {Object.values(overview.rolesMeta || {}).map((r) => (
                   <option key={r.id} value={r.id}>
@@ -356,28 +386,28 @@ export default function RbacSecurityPanel({
 
             <div>
               <label className="block text-xs font-bold mb-1">
-                الاسم الظاهر في السجلات (لمعرفة من سجّل الحركة) *
+                الاسم الظاهر في السجلات والبروفايل *
               </label>
               <input
                 type="text"
                 required
                 value={newDisplayName}
                 onChange={(e) => setNewDisplayName(e.target.value)}
-                placeholder="مثال: مراقب الكاميرات - شيفت صباحي"
+                placeholder="مثال: كاشير شيفت صباحي - أحمد"
                 className="g-input w-full"
               />
             </div>
 
             <div>
               <label className="block text-xs font-bold mb-1">
-                كلمة المرور المخصصة له (أرقام أو حروف مميزة) *
+                كلمة المرور الخاصة به (يرى كل موظف باسورده فقط في بروفايله) *
               </label>
               <input
                 type="text"
                 required
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="مثال: 456 أو 2026 أو cctv1"
+                placeholder="مثال: 205 أو cash1"
                 className="g-input w-full num-ltr text-lg font-extrabold"
               />
             </div>
@@ -401,7 +431,7 @@ export default function RbacSecurityPanel({
                 className="w-full sm:w-auto px-5 py-2.5 rounded-full bg-[var(--g-primary)] text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5"
               >
                 <span className="ms-icon text-base">add</span>
-                <span>إنشاء كلمة المرور</span>
+                <span>إنشاء الحساب وكلمة المرور</span>
               </button>
             </div>
           </form>
@@ -409,13 +439,16 @@ export default function RbacSecurityPanel({
           {/* All Created Passwords List */}
           <div className="lg:col-span-7 g-card p-4 sm:p-5 space-y-3">
             <h4 className="text-sm sm:text-base font-extrabold m-0">
-              جميع كلمات المرور الفعالة في زايد مارت ({overview.users?.length || 0})
+              جميع الحسابات وكلمات المرور الفعالة في زايد مارت ({overview.users?.length || 0})
             </h4>
 
             <div className="space-y-2.5">
               {(overview.users || []).map((u) => {
                 const roleMeta = overview.rolesMeta?.[u.role] || { label: u.role, icon: 'person' };
                 const isRevealed = Boolean(revealedIds[u.id]);
+                const customCount = Array.isArray(u.custom_permissions)
+                  ? u.custom_permissions.length
+                  : 0;
 
                 return (
                   <div
@@ -441,6 +474,11 @@ export default function RbacSecurityPanel({
                           <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] font-extrabold">
                             {roleMeta.shortLabel || roleMeta.label}
                           </span>
+                          {customCount > 0 && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--g-purple-bg)] text-[var(--g-purple)] font-extrabold">
+                              +{customCount} صلاحية إضافية
+                            </span>
+                          )}
                           {u.id === currentUserId && (
                             <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--g-green-bg)] text-[var(--g-green)] font-extrabold">
                               أنت الآن
@@ -487,14 +525,26 @@ export default function RbacSecurityPanel({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5 self-end sm:self-auto shrink-0">
+                    <div className="flex items-center gap-1.5 self-end sm:self-auto shrink-0 flex-wrap">
+                      {onOpenPersonLog && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenPersonLog(u.id, u.display_name)}
+                          className="px-3 py-1.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] hover:border-[var(--g-primary)] text-xs font-extrabold flex items-center gap-1"
+                          title="عرض السجل الفردي الكامل"
+                        >
+                          <span className="ms-icon text-sm text-[var(--g-primary)]">assignment_ind</span>
+                          <span>سجله</span>
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         onClick={() => openEditUserModal(u)}
                         className="px-3 py-1.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] hover:border-[var(--g-primary)] text-xs font-extrabold flex items-center gap-1"
                       >
                         <span className="ms-icon text-base text-[var(--g-primary)]">edit</span>
-                        <span>تعديل</span>
+                        <span>تعديل وصلاحيات</span>
                       </button>
 
                       {u.id !== currentUserId && (
@@ -525,7 +575,7 @@ export default function RbacSecurityPanel({
                 تخصيص صلاحيات كل دور وظيفي (Dynamic RBAC Policy Matrix)
               </h4>
               <p className="text-xs text-[var(--g-muted)] m-0 mt-0.5">
-                تحكّم بدقة في الأزرار والبيانات المسموحة لكل وظيفة داخل الماركت
+                تحكّم بدقة في الأزرار والبيانات المسموحة لكل وظيفة (الكاشير، الأمن، المراقب، المشرف، المخزن، الصالة)
               </p>
             </div>
 
@@ -604,9 +654,57 @@ export default function RbacSecurityPanel({
         </section>
       )}
 
-      {/* SECTION 3: SECURITY AUDIT LOG */}
+      {/* SECTION 3: MASTER SYSTEM AUDIT LOG + MULTI-FORMAT EXPORT */}
       {canViewAudit && section === 'audit' && (
         <section className="g-card p-4 sm:p-5 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--g-border)] pb-3">
+            <div>
+              <h4 className="text-base font-extrabold m-0">
+                السجل الرقابي الشامل لكل حركات النظام ({filteredAuditLogs.length})
+              </h4>
+              <p className="text-xs text-[var(--g-muted)] m-0">
+                يسجل كل حضور، انصراف، استراحة، نقص، ملاحظة، تعديل أو دخول في النظام مع التصدير لـ Excel و Word وواتساب
+              </p>
+            </div>
+
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <button
+                type="button"
+                onClick={() => exportAuditLogsCsv(filteredAuditLogs)}
+                className="px-3.5 py-2 rounded-full bg-[var(--g-green-bg)] text-[var(--g-green)] text-xs font-extrabold flex items-center gap-1"
+              >
+                <span className="ms-icon text-sm">table_view</span>
+                <span>تصدير Excel</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => exportAuditLogsWord(filteredAuditLogs)}
+                className="px-3.5 py-2 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-extrabold flex items-center gap-1"
+              >
+                <span className="ms-icon text-sm">description</span>
+                <span>تصدير Word</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => openWhatsAppShare(buildAuditLogsWhatsAppText(filteredAuditLogs))}
+                className="px-3.5 py-2 rounded-full bg-[#25D366]/15 text-[#128C7E] dark:text-[#4ADE80] text-xs font-extrabold flex items-center gap-1"
+              >
+                <span className="ms-icon text-sm">share</span>
+                <span>واتساب</span>
+              </button>
+              {canManageUsers && filteredAuditLogs.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearAuditLogs}
+                  className="px-3 py-2 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] text-xs font-extrabold flex items-center gap-1"
+                >
+                  <span className="ms-icon text-sm">delete_sweep</span>
+                  <span>مسح السجل</span>
+                </button>
+              )}
+            </div>
+          </div>
+
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="g-search-bar flex-1 flex items-center gap-2 px-3.5 py-2">
               <span className="ms-icon text-[var(--g-muted)] text-lg">search</span>
@@ -614,23 +712,26 @@ export default function RbacSecurityPanel({
                 type="text"
                 value={auditSearch}
                 onChange={(e) => setAuditSearch(e.target.value)}
-                placeholder="ابحث في سجل الأمان بالاسم أو العملية..."
+                placeholder="ابحث في السجل بالاسم أو نوع العملية أو التفاصيل..."
                 className="bg-transparent border-none outline-none w-full text-xs sm:text-sm"
               />
             </div>
 
             <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
               {[
-                { id: 'all', label: 'الكل' },
-                { id: 'warnings', label: 'التحذيرات ورفض الصلاحيات' },
-                { id: 'critical', label: 'حرج / حظر محاولات' },
+                { id: 'all', label: 'كل الأدوار' },
+                { id: 'owner', label: 'الإدارة' },
+                { id: 'cashier', label: 'الكاشيرية' },
+                { id: 'security', label: 'الأمن' },
+                { id: 'supervisor', label: 'المشرفين' },
+                { id: 'cctv', label: 'الكاميرات' },
               ].map((f) => (
                 <button
                   key={f.id}
                   type="button"
-                  onClick={() => setAuditSeverityFilter(f.id)}
+                  onClick={() => setAuditRoleFilter(f.id)}
                   className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap border ${
-                    auditSeverityFilter === f.id
+                    auditRoleFilter === f.id
                       ? 'g-pill-active border-transparent'
                       : 'bg-[var(--g-surface)] border-[var(--g-border)]'
                   }`}
@@ -643,18 +744,13 @@ export default function RbacSecurityPanel({
 
           {filteredAuditLogs.length === 0 ? (
             <p className="text-center py-8 text-xs text-[var(--g-muted)]">
-              لا توجد أحداث مطابقة في سجل التدقيق الأمني.
+              لا توجد أحداث مطابقة في السجل الرقابي الشامل.
             </p>
           ) : (
             <div className="space-y-2 max-h-[55vh] overflow-y-auto">
               {filteredAuditLogs.map((log) => {
-                const badgeTone =
-                  log.severity === 'critical'
-                    ? 'bg-[var(--g-red-bg)] text-[var(--g-red)]'
-                    : log.severity === 'warning'
-                    ? 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]'
-                    : 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]';
-
+                const actorName = log.actor_name || log.user_name || 'النظام';
+                const actorRole = log.actor_role || log.role || '';
                 return (
                   <div
                     key={log.id}
@@ -662,13 +758,18 @@ export default function RbacSecurityPanel({
                   >
                     <div className="space-y-0.5 min-w-0">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <span className={`text-[11px] px-2.5 py-0.5 rounded-full font-extrabold ${badgeTone}`}>
+                        <span className="text-[11px] px-2.5 py-0.5 rounded-full font-extrabold bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]">
                           {log.action}
                         </span>
-                        <span className="text-xs font-extrabold">{log.user_name}</span>
-                        {log.role && (
+                        <span className="text-xs font-extrabold">{actorName}</span>
+                        {actorRole && (
                           <span className="text-[11px] text-[var(--g-muted)]">
-                            ({overview.rolesMeta?.[log.role]?.shortLabel || log.role})
+                            ({overview.rolesMeta?.[actorRole]?.shortLabel || actorRole})
+                          </span>
+                        )}
+                        {log.target_label && (
+                          <span className="text-xs font-bold text-[var(--g-primary)]">
+                            ← {log.target_label}
                           </span>
                         )}
                       </div>
@@ -680,7 +781,7 @@ export default function RbacSecurityPanel({
                     <div className="text-[11px] text-[var(--g-muted)] flex items-center gap-2 self-end sm:self-auto shrink-0 num-ltr">
                       {log.ip_address && <span>IP: {log.ip_address}</span>}
                       <strong className="text-[var(--g-text)]">
-                        {formatTimeWithSeconds(log.timestamp)}
+                        {log.timestamp ? new Date(log.timestamp).toLocaleString('ar-EG') : formatTimeWithSeconds(log.timestamp)}
                       </strong>
                     </div>
                   </div>
@@ -691,18 +792,18 @@ export default function RbacSecurityPanel({
         </section>
       )}
 
-      {/* Edit Password / Role Modal */}
+      {/* Edit Password / Role / Custom Per-User Permissions Modal */}
       {editingUser && (
         <div onClick={() => setEditingUser(null)} className="g-modal-overlay">
           <form
             onClick={(e) => e.stopPropagation()}
             onSubmit={handleSaveUserEdit}
-            className="g-dialog-sheet max-w-md space-y-4 animate-pop"
+            className="g-dialog-sheet max-w-xl space-y-4 animate-pop"
           >
             <div className="g-sheet-handle" />
             <div className="flex items-center justify-between border-b border-[var(--g-border)] pb-3">
               <h3 className="text-base font-extrabold m-0">
-                تعديل كلمة المرور والصلاحية: {editingUser.display_name}
+                تعديل الحساب والصلاحيات المخصصة: {editingUser.display_name}
               </h3>
               <button
                 type="button"
@@ -713,30 +814,32 @@ export default function RbacSecurityPanel({
               </button>
             </div>
 
-            <div>
-              <label className="block text-xs font-bold mb-1">الاسم الظاهر في السجلات</label>
-              <input
-                type="text"
-                required
-                value={editName}
-                onChange={(e) => setEditName(e.target.value)}
-                className="g-input w-full"
-              />
-            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-bold mb-1">الاسم الظاهر في السجلات</label>
+                <input
+                  type="text"
+                  required
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="g-input w-full"
+                />
+              </div>
 
-            <div>
-              <label className="block text-xs font-bold mb-1">الدور الوظيفي التلقائي (Role)</label>
-              <select
-                value={editRole}
-                onChange={(e) => setEditRole(e.target.value)}
-                className="g-input w-full"
-              >
-                {Object.values(overview.rolesMeta || {}).map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.label}
-                  </option>
-                ))}
-              </select>
+              <div>
+                <label className="block text-xs font-bold mb-1">الدور الوظيفي الأساسي (Role)</label>
+                <select
+                  value={editRole}
+                  onChange={(e) => setEditRole(e.target.value)}
+                  className="g-input w-full font-bold"
+                >
+                  {Object.values(overview.rolesMeta || {}).map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div>
@@ -752,6 +855,49 @@ export default function RbacSecurityPanel({
               />
             </div>
 
+            {/* Per-User Custom Extra Permissions */}
+            {editRole !== 'owner' && (
+              <div className="p-3.5 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-extrabold text-[var(--g-primary)]">
+                    ⚡ صلاحيات إضافية خاصة بهذا المستخدم فقط (فوق صلاحيات دوره):
+                  </span>
+                  <span className="text-[11px] font-bold text-[var(--g-muted)]">
+                    محدد: {editCustomPerms.length}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-44 overflow-y-auto p-1">
+                  {(overview.permissionsCatalog || []).map((perm) => {
+                    const roleHasIt = (overview.policies?.[editRole] || []).includes(perm.id);
+                    const userHasExtra = editCustomPerms.includes(perm.id);
+                    return (
+                      <label
+                        key={perm.id}
+                        className={`flex items-center justify-between gap-2 p-2 rounded-xl text-xs font-bold cursor-pointer ${
+                          roleHasIt
+                            ? 'bg-[var(--g-surface)]/60 opacity-75'
+                            : userHasExtra
+                              ? 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]'
+                              : 'bg-[var(--g-surface)]'
+                        }`}
+                      >
+                        <span className="truncate">
+                          {perm.label} {roleHasIt ? '(ضمن الدور)' : ''}
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={roleHasIt || userHasExtra}
+                          disabled={roleHasIt}
+                          onChange={() => toggleUserCustomPerm(perm.id)}
+                          className="w-4 h-4 accent-[#0B57D0] shrink-0"
+                        />
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             <label className="flex items-center gap-2 p-3 rounded-2xl bg-[var(--g-surface-variant)] text-xs font-extrabold cursor-pointer">
               <input
                 type="checkbox"
@@ -759,14 +905,14 @@ export default function RbacSecurityPanel({
                 onChange={(e) => setEditActive(e.target.checked)}
                 className="w-4 h-4 accent-[#0B57D0]"
               />
-              <span>كلمة المرور مفعلة ومسموح بالدخول بها</span>
+              <span>الحساب مفعل ومسموح بالدخول به</span>
             </label>
 
             <button
               type="submit"
               className="w-full py-3.5 rounded-full bg-[var(--g-primary)] text-white font-extrabold text-sm"
             >
-              حفظ التعديلات ✓
+              حفظ التعديلات والصلاحيات ✓
             </button>
           </form>
         </div>
