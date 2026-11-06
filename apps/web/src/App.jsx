@@ -238,25 +238,71 @@ export default function App() {
 
     const pollInterval = setInterval(() => {
       loadData();
-    }, 20000);
+    }, 15000);
+
+    // Fast 5-second auto-reconnect probe whenever Phone is in Offline Mode or has pending offline items to upload
+    const fastRecoveryInterval = setInterval(async () => {
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      const pendingCount = getOfflineQueue().length;
+      if (liveConnectionMode === 'offline_cached' || pendingCount > 0) {
+        try {
+          const flushed = await flushOfflineQueue();
+          await loadData();
+          if (flushed > 0) {
+            showToast(`تم استعادة الاتصال — تم رفع (${flushed}) حركات وتحديث البيانات تلقائياً ✓`);
+          } else if (liveConnectionMode === 'offline_cached') {
+            showToast('تم استعادة الاتصال وتحديث البيانات من السيرفر تلقائياً ✓');
+          }
+        } catch {
+          // Still offline
+        }
+      }
+    }, 5000);
 
     const handleOnline = async () => {
-      const flushed = await flushOfflineQueue();
-      if (flushed > 0) {
-        showToast(`تمت مزامنة (${flushed}) حركات محفوظة على الهاتف مع السيرفر تلقائياً ✓`);
+      try {
+        const flushed = await flushOfflineQueue();
+        await loadData();
+        if (flushed > 0) {
+          showToast(`تم استعادة الاتصال — تم رفع (${flushed}) حركات وتحديث البيانات تلقائياً ✓`);
+        } else {
+          showToast('تم استعادة الاتصال وتحديث أحدث البيانات تلقائياً ✓');
+        }
+      } catch {
+        // ignore
       }
-      loadData();
     };
+
+    const handleVisibilityOrFocus = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      flushOfflineQueue()
+        .then((flushed) => {
+          if (flushed > 0) {
+            showToast(`تمت مزامنة (${flushed}) حركات محفوظة على الهاتف تلقائياً ✓`);
+          }
+          loadData();
+        })
+        .catch(() => {
+          loadData();
+        });
+    };
+
     window.addEventListener('online', handleOnline);
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
 
     return () => {
       es?.close();
       if (cloudSyncDebounce) clearTimeout(cloudSyncDebounce);
       unsubscribeGlobalCloudSync();
       clearInterval(pollInterval);
+      clearInterval(fastRecoveryInterval);
       window.removeEventListener('online', handleOnline);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
     };
-  }, [authSession?.token, loadData, showToast]);
+  }, [authSession?.token, liveConnectionMode, loadData, showToast]);
 
   const handleManualFlushSync = useCallback(async () => {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {

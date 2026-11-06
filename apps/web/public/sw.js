@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'zayed-mart-shell-v4.0';
+const CACHE_VERSION = 'zayed-mart-shell-v5.0';
 const FONT_CACHE = 'zayed-mart-fonts-v1';
 
 const CORE_SHELL_URLS = [

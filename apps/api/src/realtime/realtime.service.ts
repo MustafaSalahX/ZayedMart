@@ -6,6 +6,7 @@ import {
 } from '@zayed-mart/shared';
 import type { Response } from 'express';
 import { AuthContext } from '../common/decorators';
+import { postSupabaseJson } from '../common/supabase-http.util';
 
 interface SseClientEntry {
   res: Response;
@@ -74,14 +75,10 @@ export class RealtimeService {
     }
     try {
       const endpoint = `${this.supabaseUrl.replace(/\/+$/, '')}/realtime/v1/api/broadcast`;
-      await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          apikey: this.supabaseKey,
-          Authorization: `Bearer ${this.supabaseKey}`,
-        },
-        body: JSON.stringify({
+      await postSupabaseJson({
+        fullUrl: endpoint,
+        apiKey: this.supabaseKey,
+        body: {
           messages: [
             {
               topic,
@@ -89,7 +86,8 @@ export class RealtimeService {
               payload,
             },
           ],
-        }),
+        },
+        timeoutMs: 4000,
       });
     } catch {
       // Non-blocking if offline

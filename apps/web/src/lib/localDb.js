@@ -180,8 +180,13 @@ export function initPwaAndServiceWorker(onSwFlushRequested) {
     window.addEventListener('load', () => {
       navigator.serviceWorker
         .register('/sw.js', { scope: '/' })
-        .then(() => {
+        .then((reg) => {
           ensurePersistentStorage();
+          try {
+            reg.update();
+          } catch {
+            // ignore
+          }
         })
         .catch(() => {
           // ignore SW registration failure in non-HTTPS dev if any
@@ -313,6 +318,34 @@ export async function saveBootstrapToLocalDb(snapshot) {
   const dateKey = snapshot.dateKey || new Date().toISOString().slice(0, 10);
   const nowIso = new Date().toISOString();
 
+  const existingMaster = (await idbGet('kv', 'master_entities'))?.value || {};
+  const isAuthoritativeServerSnap =
+    snapshot.connectionMode === 'cloud_postgres' ||
+    snapshot.connectionMode === 'local_server' ||
+    snapshot.connectionMode === 'direct_cloud';
+
+  // If the server's cacheEpoch changed (e.g. after clearing logs or deleting fake data),
+  // wipe all stale daily_snapshots in IndexedDB so deleted records never reappear!
+  if (
+    isAuthoritativeServerSnap &&
+    snapshot.cacheEpoch &&
+    existingMaster.cacheEpoch !== snapshot.cacheEpoch
+  ) {
+    const db = await openLocalDb();
+    if (db) {
+      await new Promise((resolve) => {
+        try {
+          const tx = db.transaction('daily_snapshots', 'readwrite');
+          tx.objectStore('daily_snapshots').clear();
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = () => resolve(false);
+        } catch {
+          resolve(false);
+        }
+      });
+    }
+  }
+
   // Save compact mirror in localStorage for synchronous boot fallback
   if (typeof localStorage !== 'undefined') {
     try {
@@ -334,24 +367,32 @@ export async function saveBootstrapToLocalDb(snapshot) {
     savedAt: nowIso,
   });
 
-  // Only update master_entities when snapshot actually contains real master records
-  // (Prevents an empty cold-started server or restricted role from wiping cached master entities)
-  const existingMaster = (await idbGet('kv', 'master_entities'))?.value || {};
+  // When online, server arrays are authoritative (even when empty [] after deleting the last record!)
   const nextMaster = {
-    employees:
-      Array.isArray(snapshot.employees) && snapshot.employees.length > 0
+    employees: isAuthoritativeServerSnap
+      ? Array.isArray(snapshot.employees)
+        ? snapshot.employees
+        : []
+      : Array.isArray(snapshot.employees) && snapshot.employees.length > 0
         ? snapshot.employees
         : existingMaster.employees || [],
-    suppliers:
-      Array.isArray(snapshot.suppliers) && snapshot.suppliers.length > 0
+    suppliers: isAuthoritativeServerSnap
+      ? Array.isArray(snapshot.suppliers)
+        ? snapshot.suppliers
+        : []
+      : Array.isArray(snapshot.suppliers) && snapshot.suppliers.length > 0
         ? snapshot.suppliers
         : existingMaster.suppliers || [],
-    productCatalog:
-      Array.isArray(snapshot.productCatalog) && snapshot.productCatalog.length > 0
+    productCatalog: isAuthoritativeServerSnap
+      ? Array.isArray(snapshot.productCatalog)
+        ? snapshot.productCatalog
+        : []
+      : Array.isArray(snapshot.productCatalog) && snapshot.productCatalog.length > 0
         ? snapshot.productCatalog
         : existingMaster.productCatalog || [],
     settings: snapshot.settings || existingMaster.settings || {},
     dbBootId: snapshot.dbBootId || existingMaster.dbBootId || '',
+    cacheEpoch: snapshot.cacheEpoch || existingMaster.cacheEpoch || '',
     updatedAt: nowIso,
   };
 
@@ -607,7 +648,7 @@ export function applyOptimisticOutboxToSnapshot(baseSnapshot, outboxItems = []) 
     const role = actorRole || snap.auth?.user?.role || '';
     const dateKey = (queuedAt || new Date().toISOString()).slice(0, 10);
 
-    // 1. Attendance check-in / break / check-out
+    // 1. Attendance check-in / break / check-out / verify / delete
     if (endpoint === '/api/attendance' && method === 'POST') {
       if (!snap.attendanceLogs.some((l) => l.id === body.id)) {
         const emp = snap.employees.find((e) => e.id === body.employee_id);
@@ -648,12 +689,26 @@ export function applyOptimisticOutboxToSnapshot(baseSnapshot, outboxItems = []) 
           }
           emp.latestActionTime = logRow.timestamp;
           emp.latestActionType = body.action_type;
-          emp. _pendingSync = true;
+          emp._pendingSync = true;
         }
       }
+    } else if (
+      endpoint.startsWith('/api/attendance/') &&
+      endpoint.endsWith('/verify') &&
+      method === 'POST'
+    ) {
+      const logId = decodeURIComponent(endpoint.split('/')[3] || '');
+      const targetLog = snap.attendanceLogs.find((l) => l.id === logId);
+      if (targetLog) {
+        targetLog.verified_by_cctv = 1;
+        targetLog._pendingSync = true;
+      }
+    } else if (endpoint.startsWith('/api/attendance/') && method === 'DELETE') {
+      const logId = decodeURIComponent(endpoint.split('/')[3] || '');
+      snap.attendanceLogs = snap.attendanceLogs.filter((l) => l.id !== logId);
     }
 
-    // 2. Shortages create / update / status
+    // 2. Shortages create / update / status / delete / clear-resolved
     if (endpoint === '/api/shortages' && method === 'POST') {
       if (!snap.shortages.some((s) => s.id === body.id)) {
         snap.shortages.unshift({
@@ -676,16 +731,21 @@ export function applyOptimisticOutboxToSnapshot(baseSnapshot, outboxItems = []) 
           _pendingSync: true,
         });
       }
+    } else if (endpoint === '/api/shortages/clear-resolved' && method === 'POST') {
+      snap.shortages = snap.shortages.filter((s) => s.status !== 'resolved');
+    } else if (endpoint.startsWith('/api/shortages/') && method === 'DELETE') {
+      const shId = decodeURIComponent(endpoint.split('/')[3] || '');
+      snap.shortages = snap.shortages.filter((s) => s.id !== shId);
     } else if (endpoint.startsWith('/api/shortages/') && (method === 'PUT' || method === 'POST')) {
       const parts = endpoint.split('/');
-      const shId = parts[3];
+      const shId = decodeURIComponent(parts[3] || '');
       const target = snap.shortages.find((s) => s.id === shId);
       if (target) {
         Object.assign(target, body, { updated_at: queuedAt, _pendingSync: true });
       }
     }
 
-    // 3. CCTV / Cashier Notes
+    // 3. CCTV / Cashier Notes & Shift Handovers
     if (endpoint === '/api/notes' && method === 'POST') {
       if (!snap.notes.some((n) => n.id === body.id)) {
         snap.notes.unshift({
@@ -703,6 +763,22 @@ export function applyOptimisticOutboxToSnapshot(baseSnapshot, outboxItems = []) 
           _pendingSync: true,
         });
       }
+    } else if (
+      endpoint.startsWith('/api/notes/') &&
+      endpoint.endsWith('/resolve') &&
+      method === 'POST'
+    ) {
+      const noteId = decodeURIComponent(endpoint.split('/')[3] || '');
+      const note = snap.notes.find((n) => n.id === noteId);
+      if (note) {
+        note.is_open_handover = 0;
+        note.resolved_by = actor;
+        note.resolved_at = queuedAt;
+        note._pendingSync = true;
+      }
+    } else if (endpoint.startsWith('/api/notes/') && method === 'DELETE') {
+      const noteId = decodeURIComponent(endpoint.split('/')[3] || '');
+      snap.notes = snap.notes.filter((n) => n.id !== noteId);
     }
 
     // 4. Supplier Trucks
@@ -725,7 +801,7 @@ export function applyOptimisticOutboxToSnapshot(baseSnapshot, outboxItems = []) 
         });
       }
     } else if (endpoint.startsWith('/api/trucks/') && endpoint.endsWith('/complete')) {
-      const trkId = endpoint.split('/')[3];
+      const trkId = decodeURIComponent(endpoint.split('/')[3] || '');
       const trk = snap.truckLogs.find((t) => t.id === trkId);
       if (trk) {
         trk.status = 'completed';
@@ -733,6 +809,9 @@ export function applyOptimisticOutboxToSnapshot(baseSnapshot, outboxItems = []) 
         trk.delivery_condition = body.delivery_condition || 'complete';
         trk._pendingSync = true;
       }
+    } else if (endpoint.startsWith('/api/trucks/') && method === 'DELETE') {
+      const trkId = decodeURIComponent(endpoint.split('/')[3] || '');
+      snap.truckLogs = snap.truckLogs.filter((t) => t.id !== trkId);
     }
 
     // 5. Team Chat Messages
@@ -751,9 +830,23 @@ export function applyOptimisticOutboxToSnapshot(baseSnapshot, outboxItems = []) 
           _pendingSync: true,
         });
       }
+    } else if (
+      endpoint.startsWith('/api/team-messages/') &&
+      endpoint.endsWith('/pin') &&
+      method === 'POST'
+    ) {
+      const msgId = decodeURIComponent(endpoint.split('/')[3] || '');
+      const msg = snap.teamMessages.find((m) => m.id === msgId);
+      if (msg) {
+        msg.is_pinned = msg.is_pinned ? 0 : 1;
+        msg._pendingSync = true;
+      }
+    } else if (endpoint.startsWith('/api/team-messages/') && method === 'DELETE') {
+      const msgId = decodeURIComponent(endpoint.split('/')[3] || '');
+      snap.teamMessages = snap.teamMessages.filter((m) => m.id !== msgId);
     }
 
-    // 6. Employees & Suppliers added while offline
+    // 6. Employees & Suppliers added / edited / deleted while offline
     if (endpoint === '/api/employees' && method === 'POST') {
       if (!snap.employees.some((e) => e.id === body.id)) {
         snap.employees.push({
@@ -770,6 +863,15 @@ export function applyOptimisticOutboxToSnapshot(baseSnapshot, outboxItems = []) 
           _pendingSync: true,
         });
       }
+    } else if (endpoint.startsWith('/api/employees/') && method === 'PUT') {
+      const empId = decodeURIComponent(endpoint.split('/')[3] || '');
+      const emp = snap.employees.find((e) => e.id === empId);
+      if (emp) {
+        Object.assign(emp, body, { _pendingSync: true });
+      }
+    } else if (endpoint.startsWith('/api/employees/') && method === 'DELETE') {
+      const empId = decodeURIComponent(endpoint.split('/')[3] || '');
+      snap.employees = snap.employees.filter((e) => e.id !== empId);
     }
 
     if (endpoint === '/api/suppliers' && method === 'POST') {
@@ -784,6 +886,27 @@ export function applyOptimisticOutboxToSnapshot(baseSnapshot, outboxItems = []) 
           _pendingSync: true,
         });
       }
+    } else if (endpoint.startsWith('/api/suppliers/') && method === 'PUT') {
+      const supId = decodeURIComponent(endpoint.split('/')[3] || '');
+      const sup = snap.suppliers.find((s) => s.id === supId);
+      if (sup) {
+        Object.assign(sup, body, { _pendingSync: true });
+      }
+    } else if (
+      endpoint.startsWith('/api/suppliers/') &&
+      endpoint.endsWith('/clear-return') &&
+      method === 'POST'
+    ) {
+      const supId = decodeURIComponent(endpoint.split('/')[3] || '');
+      const sup = snap.suppliers.find((s) => s.id === supId);
+      if (sup) {
+        sup.has_pending_return = 0;
+        sup.pending_return_note = '';
+        sup._pendingSync = true;
+      }
+    } else if (endpoint.startsWith('/api/suppliers/') && method === 'DELETE') {
+      const supId = decodeURIComponent(endpoint.split('/')[3] || '');
+      snap.suppliers = snap.suppliers.filter((s) => s.id !== supId);
     }
   }
 

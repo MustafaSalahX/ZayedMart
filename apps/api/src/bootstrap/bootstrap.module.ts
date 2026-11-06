@@ -214,6 +214,7 @@ export class BootstrapController {
         await this.db.execute('DELETE FROM walkie_calls');
         await this.db.execute('DELETE FROM walkie_presence');
       });
+      await this.db.upsertSetting('cache_epoch', new Date().toISOString());
       await this.db.recordAuditLog({
         userId: auth.user.id,
         userName: auth.user.display_name,
@@ -240,6 +241,7 @@ export class BootstrapController {
   ) {
     try {
       await this.db.purgeLegacyFakeSeedData();
+      await this.db.upsertSetting('cache_epoch', new Date().toISOString());
       await this.db.recordAuditLog({
         userId: auth.user.id,
         userName: auth.user.display_name,
@@ -342,60 +344,14 @@ export class BootstrapController {
   }
 
   @Post('sync/rehydrate')
-  async rehydrate(
-    @Body() body: any,
-    @CurrentAuth() auth: AuthContext,
-    @Req() req: Request,
-    @Res() res: Response
-  ) {
+  async rehydrate(@Res() res: Response) {
     // CRITICAL CONFLICT PREVENTION:
-    // Never overwrite authoritative Supabase PostgreSQL with stale browser IndexedDB snapshots!
-    if (this.db.storageMode === 'supabase_postgres') {
-      return res.json({
-        ok: true,
-        skipped: true,
-        storageMode: 'supabase_postgres',
-      });
-    }
-
-    try {
-      const canRehydrateAll =
-        auth.has('staff:manage') ||
-        auth.has('backup:manage') ||
-        auth.has('records:manage') ||
-        auth.user?.role === 'owner' ||
-        auth.user?.role === 'manager' ||
-        auth.user?.role === 'supervisor';
-
-      const empCount = Number(
-        (await this.db.queryOne<{ c: any }>('SELECT COUNT(*) as c FROM employees'))?.c || 0
-      );
-      const shCount = Number(
-        (await this.db.queryOne<{ c: any }>('SELECT COUNT(*) as c FROM shortages'))?.c || 0
-      );
-      const attCount = Number(
-        (await this.db.queryOne<{ c: any }>('SELECT COUNT(*) as c FROM attendance_logs'))?.c || 0
-      );
-
-      if (!canRehydrateAll && empCount + shCount + attCount > 0) {
-        return res.json({ ok: true, skipped: true });
-      }
-
-      const tables = body?.tables || body;
-      await this.db.importFullBackup({ tables });
-      await this.db.recordAuditLog({
-        userId: auth.user.id,
-        userName: auth.user.display_name,
-        role: auth.user.role,
-        action: 'مزامنة تلقائية من ذاكرة الهاتف (Auto-Rehydrate)',
-        details: 'استعادة البيانات المحلية المحفوظة على الجهاز',
-        ip: getClientIp(req),
-      });
-      await this.realtime.broadcastStoreUpdate('client_rehydrate');
-      return res.json({ ok: true, restored: true });
-    } catch (err: any) {
-      return res.status(400).json({ ok: false, error: err.message });
-    }
+    // Never overwrite authoritative server state with stale browser IndexedDB snapshots!
+    return res.json({
+      ok: true,
+      skipped: true,
+      storageMode: this.db.storageMode,
+    });
   }
 
   @Get('reports/range')

@@ -177,6 +177,22 @@ function buildHeaders(includeJson = false) {
   return headers;
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 5500) {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    throw new Error('Device is currently offline');
+  }
+  if (typeof AbortController === 'undefined') {
+    return fetch(url, options);
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function fetchStorePublicInfo() {
   try {
     const res = await fetch('/api/auth/store-info');
@@ -575,6 +591,9 @@ export async function flushOfflineQueue() {
       pendingCount: remaining.length,
       lastSyncedAt: flushed > 0 ? new Date().toISOString() : undefined,
     });
+    if (flushed > 0) {
+      broadcastGlobalStoreChange('offline_flush');
+    }
     return flushed;
   })();
 
@@ -587,13 +606,21 @@ export async function flushOfflineQueue() {
 
 export async function fetchBootstrap(dateKey) {
   try {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Offline mode active');
+    }
+
     // 1. Flush any offline mutations first when online
     await flushOfflineQueue();
 
     const qs = dateKey ? `?date=${encodeURIComponent(dateKey)}` : '';
-    const res = await fetch(`/api/bootstrap${qs}`, {
-      headers: buildHeaders(false),
-    });
+    const res = await fetchWithTimeout(
+      `/api/bootstrap${qs}`,
+      {
+        headers: buildHeaders(false),
+      },
+      6000
+    );
     const contentType = res.headers.get('content-type') || '';
 
     if (res.status === 401 && contentType.includes('application/json')) {
@@ -606,37 +633,12 @@ export async function fetchBootstrap(dateKey) {
     }
 
     if (res.ok && contentType.includes('application/json')) {
-      let json = await res.json();
+      const json = await res.json();
       if (json.auth?.user) {
         setAuthSession(getAuthToken(), json.auth.user, json.auth.permissions || []);
       }
       if (json.cloudRealtime) {
         configureCloudRealtimeFromBootstrap(json.cloudRealtime);
-      }
-
-      // 2. ZERO-CONFLICT CLOUD MODE:
-      // When connected to authoritative Supabase PostgreSQL, NEVER overwrite server state with stale device IndexedDB!
-      if (json.serverColdEmpty && json.storageMode !== 'supabase_postgres') {
-        const { payload, totalCount } = await loadFullLocalDatasetForRehydrate();
-        if (totalCount > 0) {
-          try {
-            const rehydRes = await fetch('/api/sync/rehydrate', {
-              method: 'POST',
-              headers: buildHeaders(true),
-              body: JSON.stringify(payload),
-            });
-            if (rehydRes.ok) {
-              const refreshed = await fetch(`/api/bootstrap${qs}`, {
-                headers: buildHeaders(false),
-              });
-              if (refreshed.ok) {
-                json = await refreshed.json();
-              }
-            }
-          } catch {
-            // If rehydrate fails transiently, merge local cached snapshot below
-          }
-        }
       }
 
       const resolvedConnMode =
@@ -789,15 +791,45 @@ const OFFLINE_QUEUEABLE_ENDPOINTS = [
   '/api/trucks/arrive',
   '/api/notes',
   '/api/shortages',
+  '/api/shortages/clear-resolved',
   '/api/team-messages',
   '/api/employees',
   '/api/suppliers',
+  '/api/handovers',
 ];
 
 function isEndpointQueueableOffline(endpoint, method = 'POST') {
   if (OFFLINE_QUEUEABLE_ENDPOINTS.includes(endpoint) && method === 'POST') return true;
-  if (endpoint.startsWith('/api/shortages/') && (method === 'PUT' || method === 'POST')) return true;
-  if (endpoint.startsWith('/api/trucks/') && endpoint.endsWith('/complete') && method === 'POST') return true;
+  if (endpoint.startsWith('/api/attendance/') && (method === 'POST' || method === 'DELETE'))
+    return true;
+  if (
+    endpoint.startsWith('/api/shortages/') &&
+    (method === 'PUT' || method === 'POST' || method === 'DELETE')
+  )
+    return true;
+  if (
+    endpoint.startsWith('/api/trucks/') &&
+    (method === 'POST' || method === 'DELETE')
+  )
+    return true;
+  if (endpoint.startsWith('/api/notes/') && (method === 'POST' || method === 'DELETE'))
+    return true;
+  if (
+    endpoint.startsWith('/api/employees/') &&
+    (method === 'PUT' || method === 'DELETE')
+  )
+    return true;
+  if (
+    endpoint.startsWith('/api/suppliers/') &&
+    (method === 'PUT' || method === 'POST' || method === 'DELETE')
+  )
+    return true;
+  if (endpoint.startsWith('/api/handovers/') && method === 'POST') return true;
+  if (
+    endpoint.startsWith('/api/team-messages/') &&
+    (method === 'POST' || method === 'DELETE')
+  )
+    return true;
   return false;
 }
 
@@ -806,16 +838,24 @@ export async function postActionWithOfflineSupport(endpoint, body, options = {})
   const recordId = body?.id || makeClientUuid();
 
   try {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Device is currently offline');
+    }
+
     let finalBody = { ...body, id: recordId };
     if (rawDataUrl && proofField) {
       finalBody[proofField] = await uploadProofImage(rawDataUrl, proofField);
     }
 
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: buildHeaders(true),
-      body: JSON.stringify(finalBody),
-    });
+    const res = await fetchWithTimeout(
+      endpoint,
+      {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify(finalBody),
+      },
+      5500
+    );
 
     const contentType = res.headers.get('content-type') || '';
     if (res.ok && contentType.includes('application/json')) {
@@ -1003,11 +1043,19 @@ async function executeDirectCloudMutation(endpoint, body) {
 
 export async function apiRequest(endpoint, method = 'GET', body) {
   try {
-    const res = await fetch(endpoint, {
-      method,
-      headers: buildHeaders(Boolean(body)),
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Device is currently offline');
+    }
+
+    const res = await fetchWithTimeout(
+      endpoint,
+      {
+        method,
+        headers: buildHeaders(Boolean(body)),
+        body: body ? JSON.stringify(body) : undefined,
+      },
+      5500
+    );
     const contentType = res.headers.get('content-type') || '';
     const json = contentType.includes('application/json') ? await res.json() : {};
     if (!res.ok) {

@@ -28,6 +28,7 @@ import {
   verifySignedTokenFormat,
 } from '../common/crypto.util';
 import { AuthContext } from '../common/decorators';
+import { execSupabaseRpcBatch, execSupabaseRpcSql } from '../common/supabase-http.util';
 
 const LEGACY_FAKE_USER_IDS = [
   '34cfe3c6-ebd0-4a8a-82e8-5eec90d82753',
@@ -77,10 +78,13 @@ function convertPlaceholdersToPg(sql: string): string {
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private pgPool: Pool | null = null;
   private sqliteDb: DatabaseSync | null = null;
+  private useSupabaseRpc = false;
   private initialized = false;
   private initPromise: Promise<void> | null = null;
+  private cachedSessionSecret = '';
+  private readonly authCache = new Map<string, { auth: AuthContext; expiresAt: number }>();
 
-  public readonly storageMode: 'supabase_postgres' | 'sqlite_local';
+  public storageMode: 'supabase_postgres' | 'sqlite_local';
   public readonly dbBootId: string = crypto.randomUUID();
   public readonly isServerless: boolean;
 
@@ -90,15 +94,17 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     );
 
     const testDbPath = (process.env.ZAYED_TEST_DB_PATH || '').trim();
-    const pgUrl = testDbPath
-      ? ''
-      : (
-          process.env.DATABASE_URL ||
-          process.env.POSTGRES_URL ||
-          process.env.POSTGRES_PRISMA_URL ||
-          process.env.POSTGRES_URL_NON_POOLING ||
-          ''
-        ).trim();
+    const forceLocalSqlite = process.env.ZAYED_FORCE_LOCAL_SQLITE === 'true';
+    const pgUrl =
+      testDbPath || forceLocalSqlite
+        ? ''
+        : (
+            process.env.DATABASE_URL ||
+            process.env.POSTGRES_URL ||
+            process.env.POSTGRES_PRISMA_URL ||
+            process.env.POSTGRES_URL_NON_POOLING ||
+            ''
+          ).trim();
 
     if (pgUrl) {
       this.storageMode = 'supabase_postgres';
@@ -111,12 +117,21 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         max: this.isServerless ? 3 : 10,
         idleTimeoutMillis: 20000,
         connectionTimeoutMillis: 10000,
-        ssl: cleanPgUrl.includes('localhost') || cleanPgUrl.includes('127.0.0.1')
-          ? undefined
-          : { rejectUnauthorized: false },
+        ssl:
+          cleanPgUrl.includes('localhost') || cleanPgUrl.includes('127.0.0.1')
+            ? undefined
+            : { rejectUnauthorized: false },
       });
+    } else if (!testDbPath && !forceLocalSqlite) {
+      // Automatic Cloud PostgreSQL via Supabase HTTPS RPC Bridge (works on Vercel & Local PC with zero extra env config!)
+      this.useSupabaseRpc = true;
+      this.storageMode = 'supabase_postgres';
     } else {
       this.storageMode = 'sqlite_local';
+    }
+
+    // Always initialize local SQLite either as primary (in test/offline mode) or as local LAN fallback
+    if (!this.pgPool) {
       const sqlitePath = testDbPath || this.resolveDefaultSqlitePath();
       this.sqliteDb = new DatabaseSync(sqlitePath);
       if (sqlitePath !== ':memory:') {
@@ -176,12 +191,30 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return this.initPromise;
   }
 
+  public invalidateAuthCache(): void {
+    this.authCache.clear();
+  }
+
   async queryAll<T = any>(sql: string, params: any[] = [], client?: PoolClient): Promise<T[]> {
     if (this.pgPool) {
       const pgSql = convertPlaceholdersToPg(sql);
       const runner = client || this.pgPool;
       const res = await runner.query(pgSql, params);
       return res.rows as T[];
+    }
+    if (this.useSupabaseRpc) {
+      try {
+        const res = await execSupabaseRpcSql<T>(sql, params);
+        this.storageMode = 'supabase_postgres';
+        return res.rows;
+      } catch (err) {
+        if (!this.isServerless && this.sqliteDb) {
+          this.storageMode = 'sqlite_local';
+          const stmt = this.sqliteDb.prepare(sql);
+          return stmt.all(...params) as T[];
+        }
+        throw err;
+      }
     }
     const stmt = this.sqliteDb!.prepare(sql);
     return stmt.all(...params) as T[];
@@ -201,11 +234,42 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     params: any[] = [],
     client?: PoolClient
   ): Promise<{ changes: number }> {
+    const upper = sql.toUpperCase();
+    if (
+      upper.includes('SYSTEM_USERS') ||
+      upper.includes('USER_SESSIONS') ||
+      upper.includes('ROLE_POLICIES') ||
+      upper.includes('SETTINGS')
+    ) {
+      this.authCache.clear();
+    }
+
     if (this.pgPool) {
       const pgSql = convertPlaceholdersToPg(sql);
       const runner = client || this.pgPool;
       const res = await runner.query(pgSql, params);
       return { changes: res.rowCount || 0 };
+    }
+    if (this.useSupabaseRpc) {
+      try {
+        const res = await execSupabaseRpcSql(sql, params);
+        this.storageMode = 'supabase_postgres';
+        if (!this.isServerless && this.sqliteDb) {
+          try {
+            this.sqliteDb.prepare(sql).run(...params);
+          } catch {
+            // Best-effort local SQLite mirror
+          }
+        }
+        return { changes: res.changes };
+      } catch (err) {
+        if (!this.isServerless && this.sqliteDb) {
+          this.storageMode = 'sqlite_local';
+          const info = this.sqliteDb.prepare(sql).run(...params);
+          return { changes: Number(info.changes || 0) };
+        }
+        throw err;
+      }
     }
     const stmt = this.sqliteDb!.prepare(sql);
     const info = stmt.run(...params);
@@ -226,6 +290,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       } finally {
         client.release();
       }
+    }
+
+    if (this.useSupabaseRpc) {
+      return await fn(undefined);
     }
 
     this.sqliteDb!.exec('BEGIN TRANSACTION');
@@ -465,8 +533,38 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       )`,
     ];
 
-    for (const stmt of ddlStatements) {
-      await this.execute(stmt);
+    if (this.sqliteDb) {
+      for (const stmt of ddlStatements) {
+        try {
+          this.sqliteDb.exec(stmt);
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    if (this.useSupabaseRpc) {
+      try {
+        const res = await execSupabaseRpcSql<{ value: string }>(
+          'SELECT value FROM settings WHERE key = ?',
+          ['session_hmac_secret']
+        );
+        if (res.rows[0]?.value) {
+          this.cachedSessionSecret = res.rows[0].value;
+          this.storageMode = 'supabase_postgres';
+          return;
+        }
+      } catch {
+        if (!this.isServerless && this.sqliteDb) {
+          this.storageMode = 'sqlite_local';
+        }
+      }
+    }
+
+    if (this.pgPool) {
+      for (const stmt of ddlStatements) {
+        await this.execute(stmt);
+      }
     }
 
     const defaultSessionSecret = crypto
@@ -594,9 +692,13 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getSessionSecret(): Promise<string> {
+    if (this.cachedSessionSecret) return this.cachedSessionSecret;
     const row = await this.queryOne<{ value: string }>(
       "SELECT value FROM settings WHERE key = 'session_hmac_secret'"
     );
+    if (row?.value) {
+      this.cachedSessionSecret = row.value;
+    }
     return row?.value || '';
   }
 
@@ -692,6 +794,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   async resolveAuthFromToken(rawToken: string): Promise<AuthContext | null> {
+    if (!rawToken) return null;
+    const cached = this.authCache.get(rawToken);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.auth;
+    }
+
     await this.ensureInitialized();
     const secret = await this.getSessionSecret();
     const sessionId = verifySignedTokenFormat(rawToken, secret);
@@ -733,7 +841,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
     if (session.user_id === '__DEVICE_KIOSK__') {
       const permissions = await this.getRolePermissions('kiosk');
-      return {
+      const kioskAuth: AuthContext = {
         sessionId: session.id,
         user: {
           id: '__DEVICE_KIOSK__',
@@ -749,6 +857,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           return permissions.includes(perm);
         },
       };
+      this.authCache.set(rawToken, { auth: kioskAuth, expiresAt: Date.now() + 10000 });
+      return kioskAuth;
     }
 
     const user = await this.queryOne<any>(
@@ -764,7 +874,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         ? 'كشك العمال'
         : `${user.display_name} (${roleMeta.shortLabel})`;
 
-    return {
+    const resolvedAuth: AuthContext = {
       sessionId: session.id,
       user: {
         id: user.id,
@@ -781,6 +891,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         return user.role === 'owner' || permissions.includes(perm);
       },
     };
+    this.authCache.set(rawToken, { auth: resolvedAuth, expiresAt: Date.now() + 10000 });
+    return resolvedAuth;
   }
 
   async findPasswordConflict(rawPassword: string, excludeUserId = ''): Promise<any | null> {
@@ -1209,7 +1321,6 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     const targetDate = dateKey || getLocalDateKey();
     const prevDate = getPreviousDateKey(targetDate);
     const todayKey = getLocalDateKey();
-    const settings = await this.getSettingsMap();
     const isInternalSnap = !auth;
 
     const canAttendance =
@@ -1246,24 +1357,172 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       isInternalSnap || auth!.has('handover:manage') || auth!.has('reports:view');
 
     const canChat = isInternalSnap || auth!.has('chat:read') || auth!.has('chat:write');
+    const canSeeSupplierDirectory = Boolean(
+      canTrucks || (auth && auth.has('shortages:manage'))
+    );
+    const canManageStaffOrUsers =
+      isInternalSnap || Boolean(auth && (auth.has('staff:manage') || auth.has('users:manage')));
 
-    const employees = canAttendance
-      ? await this.queryAll<any>(
-          'SELECT * FROM employees WHERE is_active = 1 ORDER BY department, emp_code, name'
-        )
-      : [];
+    let settings: Record<string, string> = {};
+    let employees: any[] = [];
+    let directLogs: any[] = [];
+    let prevShiftLogs: any[] = [];
+    let activeSysUsersAll: any[] = [];
+    let suppliers: any[] = [];
+    let truckLogs: any[] = [];
+    let shortages: any[] = [];
+    let productCatalog: any[] = [];
+    let notes: any[] = [];
+    let teamMessages: any[] = [];
+    let rawHandovers: any[] = [];
+
+    if (this.useSupabaseRpc) {
+      try {
+        const batchResults = await execSupabaseRpcBatch([
+          { sql: 'SELECT key, value FROM settings' },
+          {
+            sql: 'SELECT * FROM employees WHERE is_active = 1 ORDER BY department, emp_code, name',
+          },
+          {
+            sql: 'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp DESC',
+            params: [targetDate, targetDate],
+          },
+          {
+            sql: 'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp ASC',
+            params: [prevDate, prevDate],
+          },
+          {
+            sql: 'SELECT * FROM system_users WHERE is_active = 1 ORDER BY display_name',
+          },
+          {
+            sql: 'SELECT * FROM suppliers WHERE is_active = 1 ORDER BY has_pending_return DESC, name',
+          },
+          {
+            sql: `SELECT * FROM truck_logs
+                  WHERE status = 'unloading' OR date_key = ?
+                  ORDER BY CASE WHEN status = 'unloading' THEN 0 ELSE 1 END, arrival_time DESC`,
+            params: [targetDate],
+          },
+          {
+            sql: `SELECT * FROM shortages
+                  WHERE status IN ('open', 'ordered') OR date_key = ?
+                  ORDER BY
+                    CASE status WHEN 'open' THEN 0 WHEN 'ordered' THEN 1 ELSE 2 END,
+                    CASE urgency WHEN 'out_of_stock' THEN 0 ELSE 1 END,
+                    updated_at DESC`,
+            params: [targetDate],
+          },
+          {
+            sql: 'SELECT * FROM product_catalog WHERE is_active = 1 ORDER BY usage_count DESC, name ASC',
+          },
+          {
+            sql: `SELECT * FROM notes
+                  WHERE is_open_handover = 1 OR date_key = ?
+                  ORDER BY is_open_handover DESC, timestamp DESC`,
+            params: [targetDate],
+          },
+          {
+            sql: 'SELECT * FROM team_messages ORDER BY is_pinned DESC, timestamp DESC LIMIT 120',
+          },
+          {
+            sql: 'SELECT * FROM shift_handovers ORDER BY timestamp DESC LIMIT 40',
+          },
+        ]);
+
+        this.storageMode = 'supabase_postgres';
+        const settingsRows = batchResults[0]?.rows || [];
+        settings = Object.fromEntries(settingsRows.map((r: any) => [r.key, r.value]));
+        if (settings.session_hmac_secret) {
+          this.cachedSessionSecret = settings.session_hmac_secret;
+        }
+        employees = canAttendance ? batchResults[1]?.rows || [] : [];
+        directLogs = canAttendance ? batchResults[2]?.rows || [] : [];
+        prevShiftLogs = canAttendance ? batchResults[3]?.rows || [] : [];
+        activeSysUsersAll = batchResults[4]?.rows || [];
+        suppliers = canSeeSupplierDirectory ? batchResults[5]?.rows || [] : [];
+        truckLogs = canTrucks ? batchResults[6]?.rows || [] : [];
+        shortages = canShortages ? batchResults[7]?.rows || [] : [];
+        productCatalog = canShortages ? batchResults[8]?.rows || [] : [];
+        notes = canNotes ? batchResults[9]?.rows || [] : [];
+        teamMessages = canChat ? batchResults[10]?.rows || [] : [];
+        rawHandovers = canHandover ? batchResults[11]?.rows || [] : [];
+      } catch (err) {
+        if (this.isServerless) throw err;
+        this.storageMode = 'sqlite_local';
+      }
+    }
+
+    if (!this.useSupabaseRpc || this.storageMode === 'sqlite_local') {
+      settings = await this.getSettingsMap();
+      employees = canAttendance
+        ? await this.queryAll<any>(
+            'SELECT * FROM employees WHERE is_active = 1 ORDER BY department, emp_code, name'
+          )
+        : [];
+      if (canAttendance) {
+        directLogs = await this.queryAll<any>(
+          'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp DESC',
+          [targetDate, targetDate]
+        );
+        prevShiftLogs = await this.queryAll<any>(
+          'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp ASC',
+          [prevDate, prevDate]
+        );
+      }
+      activeSysUsersAll = await this.queryAll<any>(
+        'SELECT * FROM system_users WHERE is_active = 1 ORDER BY display_name'
+      );
+      suppliers = canSeeSupplierDirectory
+        ? await this.queryAll<any>(
+            'SELECT * FROM suppliers WHERE is_active = 1 ORDER BY has_pending_return DESC, name'
+          )
+        : [];
+      truckLogs = canTrucks
+        ? await this.queryAll<any>(
+            `SELECT * FROM truck_logs
+             WHERE status = 'unloading' OR date_key = ?
+             ORDER BY CASE WHEN status = 'unloading' THEN 0 ELSE 1 END, arrival_time DESC`,
+            [targetDate]
+          )
+        : [];
+      shortages = canShortages
+        ? await this.queryAll<any>(
+            `SELECT * FROM shortages
+             WHERE status IN ('open', 'ordered') OR date_key = ?
+             ORDER BY
+               CASE status WHEN 'open' THEN 0 WHEN 'ordered' THEN 1 ELSE 2 END,
+               CASE urgency WHEN 'out_of_stock' THEN 0 ELSE 1 END,
+               updated_at DESC`,
+            [targetDate]
+          )
+        : [];
+      productCatalog = canShortages
+        ? await this.queryAll<any>(
+            'SELECT * FROM product_catalog WHERE is_active = 1 ORDER BY usage_count DESC, name ASC'
+          )
+        : [];
+      notes = canNotes
+        ? await this.queryAll<any>(
+            `SELECT * FROM notes
+             WHERE is_open_handover = 1 OR date_key = ?
+             ORDER BY is_open_handover DESC, timestamp DESC`,
+            [targetDate]
+          )
+        : [];
+      teamMessages = canChat
+        ? await this.queryAll<any>(
+            'SELECT * FROM team_messages ORDER BY is_pinned DESC, timestamp DESC LIMIT 120'
+          )
+        : [];
+      rawHandovers = canHandover
+        ? await this.queryAll<any>(
+            'SELECT * FROM shift_handovers ORDER BY timestamp DESC LIMIT 40'
+          )
+        : [];
+    }
 
     let attendanceLogs: any[] = [];
     if (canAttendance) {
-      const directLogs = await this.queryAll<any>(
-        'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp DESC',
-        [targetDate, targetDate]
-      );
-      const prevShiftLogs = await this.queryAll<any>(
-        'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp ASC',
-        [prevDate, prevDate]
-      );
-
       const prevByEmp = new Map<string, any[]>();
       for (const l of prevShiftLogs) {
         if (!prevByEmp.has(l.employee_id)) prevByEmp.set(l.employee_id, []);
@@ -1322,15 +1581,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    const canManageStaffOrUsers =
-      isInternalSnap || Boolean(auth && (auth.has('staff:manage') || auth.has('users:manage')));
     const linkedUsersByEmpId = new Map<string, { role: string; password: string }>();
     if (canManageStaffOrUsers && employees.length > 0) {
-      const secretHex = await this.getSessionSecret();
-      const linkedRows = await this.queryAll<any>(
-        "SELECT * FROM system_users WHERE employee_id != '' AND is_active = 1"
-      );
-      for (const u of linkedRows) {
+      const secretHex = settings.session_hmac_secret || (await this.getSessionSecret());
+      for (const u of activeSysUsersAll) {
+        if (!u.employee_id) continue;
         linkedUsersByEmpId.set(u.employee_id, {
           role: u.role,
           password: decryptPasswordForAdmin(u.pin_cipher, secretHex) || '',
@@ -1509,25 +1764,6 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
-    const canSeeSupplierDirectory = Boolean(
-      canTrucks || (auth && auth.has('shortages:manage'))
-    );
-
-    const suppliers = canSeeSupplierDirectory
-      ? await this.queryAll<any>(
-          'SELECT * FROM suppliers WHERE is_active = 1 ORDER BY has_pending_return DESC, name'
-        )
-      : [];
-
-    const truckLogs = canTrucks
-      ? await this.queryAll<any>(
-          `SELECT * FROM truck_logs
-           WHERE status = 'unloading' OR date_key = ?
-           ORDER BY CASE WHEN status = 'unloading' THEN 0 ELSE 1 END, arrival_time DESC`,
-          [targetDate]
-        )
-      : [];
-
     const unloadingTrucksCount = truckLogs.filter((t) => t.status === 'unloading').length;
     const completedTrucksCount = truckLogs.filter(
       (t) => t.status === 'completed' && t.date_key === targetDate
@@ -1538,24 +1774,6 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         (t.delivery_condition === 'shortage' || t.delivery_condition === 'return_damaged')
     ).length;
 
-    const shortages = canShortages
-      ? await this.queryAll<any>(
-          `SELECT * FROM shortages
-           WHERE status IN ('open', 'ordered') OR date_key = ?
-           ORDER BY
-             CASE status WHEN 'open' THEN 0 WHEN 'ordered' THEN 1 ELSE 2 END,
-             CASE urgency WHEN 'out_of_stock' THEN 0 ELSE 1 END,
-             updated_at DESC`,
-          [targetDate]
-        )
-      : [];
-
-    const productCatalog = canShortages
-      ? await this.queryAll<any>(
-          'SELECT * FROM product_catalog WHERE is_active = 1 ORDER BY usage_count DESC, name ASC'
-        )
-      : [];
-
     const openShortagesCount = shortages.filter((s) => s.status === 'open').length;
     const orderedShortagesCount = shortages.filter((s) => s.status === 'ordered').length;
     const urgentShortagesCount = shortages.filter(
@@ -1565,35 +1783,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       (s) => s.status === 'resolved' && s.date_key === targetDate
     ).length;
 
-    const notes = canNotes
-      ? await this.queryAll<any>(
-          `SELECT * FROM notes
-           WHERE is_open_handover = 1 OR date_key = ?
-           ORDER BY is_open_handover DESC, timestamp DESC`,
-          [targetDate]
-        )
-      : [];
-
     const urgentNotesCount = notes.filter(
       (n) => n.severity === 'urgent' && n.date_key === targetDate
     ).length;
     const openHandoverNotesCount = notes.filter((n) => Number(n.is_open_handover) === 1).length;
 
-    const teamMessages = canChat
-      ? await this.queryAll<any>(
-          'SELECT * FROM team_messages ORDER BY is_pinned DESC, timestamp DESC LIMIT 120'
-        )
-      : [];
-
     const currentRole = auth?.user?.role || '';
     const currentUserName = (auth?.user?.display_name || '').trim();
     const isAdminOrManager = !auth || currentRole === 'owner' || currentRole === 'manager';
-
-    const rawHandovers = canHandover
-      ? await this.queryAll<any>(
-          'SELECT * FROM shift_handovers ORDER BY timestamp DESC LIMIT 40'
-        )
-      : [];
 
     const allHandovers = rawHandovers.map((h) => {
       let openItems = [];
@@ -1630,10 +1827,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       const seenNames = new Set<string>();
       if (currentUserName) seenNames.add(currentUserName.toLowerCase());
 
-      const activeEmpRows = await this.queryAll<any>(
-        'SELECT id, name, department, role_title, system_role FROM employees WHERE is_active = 1 ORDER BY name'
-      );
-      for (const emp of activeEmpRows) {
+      for (const emp of employees) {
         const effRole =
           emp.system_role || inferDefaultRoleFromDepartment(emp.department, emp.role_title);
         const cleanName = (emp.name || '').trim();
@@ -1650,10 +1844,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         }
       }
 
-      const activeSysUsers = await this.queryAll<any>(
-        'SELECT id, display_name, role FROM system_users WHERE is_active = 1 ORDER BY display_name'
-      );
-      for (const u of activeSysUsers) {
+      for (const u of activeSysUsersAll) {
         const cleanName = (u.display_name || '').trim();
         if (!cleanName || seenNames.has(cleanName.toLowerCase())) continue;
         if (targetRolesSet.has(u.role)) {
@@ -1671,15 +1862,17 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
     let myProfile: any = null;
     if (auth?.user && auth.user.role !== 'kiosk') {
-      const secretHex = await this.getSessionSecret();
-      const userRow = await this.queryOne<any>(
-        'SELECT * FROM system_users WHERE id = ? LIMIT 1',
-        [auth.user.id]
-      );
+      const secretHex = settings.session_hmac_secret || (await this.getSessionSecret());
+      const userRow =
+        activeSysUsersAll.find((u) => u.id === auth.user.id) ||
+        (await this.queryOne<any>('SELECT * FROM system_users WHERE id = ? LIMIT 1', [
+          auth.user.id,
+        ]));
       const empRow = userRow?.employee_id
-        ? await this.queryOne<any>('SELECT * FROM employees WHERE id = ? LIMIT 1', [
+        ? employees.find((e) => e.id === userRow.employee_id) ||
+          (await this.queryOne<any>('SELECT * FROM employees WHERE id = ? LIMIT 1', [
             userRow.employee_id,
-          ])
+          ]))
         : null;
       const myPass = userRow
         ? decryptPasswordForAdmin(userRow.pin_cipher, secretHex) || empRow?.emp_code || ''
@@ -1707,22 +1900,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     const canManageSettings = auth?.has('settings:manage');
 
     // Never trigger legacy client rehydration when connected to authoritative Supabase PostgreSQL!
-    let serverColdEmpty = false;
-    if (this.storageMode === 'sqlite_local') {
-      const empCount = Number(
-        (await this.queryOne<{ c: any }>('SELECT COUNT(*) as c FROM employees'))?.c || 0
-      );
-      const shCount = Number(
-        (await this.queryOne<{ c: any }>('SELECT COUNT(*) as c FROM shortages'))?.c || 0
-      );
-      const attCount = Number(
-        (await this.queryOne<{ c: any }>('SELECT COUNT(*) as c FROM attendance_logs'))?.c || 0
-      );
-      serverColdEmpty = empCount + shCount + attCount === 0;
-    }
+    const serverColdEmpty = false;
 
     return {
       dbBootId: this.dbBootId,
+      cacheEpoch: settings.cache_epoch || '2026-11-06-clean-v2',
       storageMode: this.storageMode,
       cloudRealtime: cloudRealtimeConfig || null,
       serverColdEmpty,
