@@ -1,7 +1,14 @@
 node_modules/
 dist/
+apps/*/dist/
+packages/*/dist/
+.turbo/
+.vercel/
 data/
 *.db
 *.db-journal
 *.db-wal
+*.tsbuildinfo
 .env
+.env.*
+!.env.example

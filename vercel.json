@@ -1,6 +1,12 @@
 {
-  "buildCommand": "npm run build",
-  "outputDirectory": "dist",
+  "buildCommand": "npx turbo run build",
+  "outputDirectory": "apps/web/dist",
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 30,
+      "includeFiles": "{apps/api/dist/**,packages/shared/dist/**,supabase/schema.sql}"
+    }
+  },
   "headers": [
     {
       "source": "/sw.js",
@@ -27,7 +33,7 @@
       "destination": "/api/index.js"
     },
     {
-      "source": "/((?!api/|uploads/|sw\\.js|manifest\\.json|pwa-.*\\.png|logo\\.jpeg|assets/).*)",
+      "source": "/((?!api/|uploads/|sw\\.js|manifest\\.json|pwa-.*\\.png|Logo\\.png|logo\\.png|logo\\.jpeg|apple-touch-icon\\.png|assets/).*)",
       "destination": "/index.html"
     }
   ]

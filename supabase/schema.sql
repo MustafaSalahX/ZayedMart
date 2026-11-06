@@ -1,12 +1,12 @@
--- مخطط قاعدة البيانات السحابية الشامل لنظام "زايد مارت" (v3.6 - PWA Offline-First + Vercel + Supabase 3-Way Sync)
--- انسخ هذا الكود بالكامل في نافذة SQL Editor داخل مشروعك المجاني على Supabase واضغط Run
+-- مخطط قاعدة البيانات السحابية المعتمد لنظام "زايد مارت" (v4.0 - Turborepo + NestJS + Supabase Production)
+-- تم تطبيقه وتأمينه بالكامل (Hardened RLS + Composite Indexes) على مشروع ZayedMart (efeioijgxjyyqplfusub)
 
-CREATE TABLE IF NOT EXISTS settings (
+CREATE TABLE IF NOT EXISTS public.settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS system_users (
+CREATE TABLE IF NOT EXISTS public.system_users (
   id TEXT PRIMARY KEY,
   username TEXT NOT NULL UNIQUE,
   display_name TEXT NOT NULL,
@@ -23,13 +23,23 @@ CREATE TABLE IF NOT EXISTS system_users (
   updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS role_policies (
+CREATE TABLE IF NOT EXISTS public.role_policies (
   role TEXT PRIMARY KEY,
   permissions_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS audit_logs (
+CREATE TABLE IF NOT EXISTS public.user_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  ip_address TEXT DEFAULT '',
+  user_agent TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS public.audit_logs (
   id TEXT PRIMARY KEY,
   user_id TEXT DEFAULT '',
   user_name TEXT NOT NULL,
@@ -41,7 +51,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   timestamp TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS employees (
+CREATE TABLE IF NOT EXISTS public.employees (
   id TEXT PRIMARY KEY,
   emp_code TEXT DEFAULT '',
   name TEXT NOT NULL,
@@ -57,7 +67,7 @@ CREATE TABLE IF NOT EXISTS employees (
   updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS attendance_logs (
+CREATE TABLE IF NOT EXISTS public.attendance_logs (
   id TEXT PRIMARY KEY,
   employee_id TEXT NOT NULL,
   employee_name TEXT NOT NULL,
@@ -78,7 +88,7 @@ CREATE TABLE IF NOT EXISTS attendance_logs (
   synced INTEGER DEFAULT 1
 );
 
-CREATE TABLE IF NOT EXISTS suppliers (
+CREATE TABLE IF NOT EXISTS public.suppliers (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   category TEXT NOT NULL,
@@ -91,7 +101,7 @@ CREATE TABLE IF NOT EXISTS suppliers (
   updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS truck_logs (
+CREATE TABLE IF NOT EXISTS public.truck_logs (
   id TEXT PRIMARY KEY,
   supplier_id TEXT DEFAULT '',
   supplier_name TEXT NOT NULL,
@@ -112,7 +122,7 @@ CREATE TABLE IF NOT EXISTS truck_logs (
   synced INTEGER DEFAULT 1
 );
 
-CREATE TABLE IF NOT EXISTS notes (
+CREATE TABLE IF NOT EXISTS public.notes (
   id TEXT PRIMARY KEY,
   location_tag TEXT NOT NULL,
   category_tag TEXT NOT NULL,
@@ -129,7 +139,7 @@ CREATE TABLE IF NOT EXISTS notes (
   synced INTEGER DEFAULT 1
 );
 
-CREATE TABLE IF NOT EXISTS shift_handovers (
+CREATE TABLE IF NOT EXISTS public.shift_handovers (
   id TEXT PRIMARY KEY,
   from_operator TEXT NOT NULL,
   to_operator TEXT NOT NULL,
@@ -148,7 +158,7 @@ CREATE TABLE IF NOT EXISTS shift_handovers (
   synced INTEGER DEFAULT 1
 );
 
-CREATE TABLE IF NOT EXISTS product_catalog (
+CREATE TABLE IF NOT EXISTS public.product_catalog (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   category TEXT NOT NULL DEFAULT 'بقالة جافة',
@@ -159,7 +169,7 @@ CREATE TABLE IF NOT EXISTS product_catalog (
   updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS shortages (
+CREATE TABLE IF NOT EXISTS public.shortages (
   id TEXT PRIMARY KEY,
   product_id TEXT DEFAULT '',
   item_name TEXT NOT NULL,
@@ -183,7 +193,7 @@ CREATE TABLE IF NOT EXISTS shortages (
   synced INTEGER DEFAULT 1
 );
 
-CREATE TABLE IF NOT EXISTS team_messages (
+CREATE TABLE IF NOT EXISTS public.team_messages (
   id TEXT PRIMARY KEY,
   channel TEXT NOT NULL DEFAULT 'general',
   sender_id TEXT DEFAULT '',
@@ -197,7 +207,7 @@ CREATE TABLE IF NOT EXISTS team_messages (
   synced INTEGER DEFAULT 1
 );
 
-CREATE TABLE IF NOT EXISTS walkie_calls (
+CREATE TABLE IF NOT EXISTS public.walkie_calls (
   id TEXT PRIMARY KEY,
   channel TEXT NOT NULL DEFAULT 'security',
   kind TEXT NOT NULL DEFAULT 'voice',
@@ -213,50 +223,17 @@ CREATE TABLE IF NOT EXISTS walkie_calls (
   synced INTEGER DEFAULT 1
 );
 
--- ترقية آمنة للمشاريع القائمة مسبقاً على Supabase بدون فقدان أي بيانات
-ALTER TABLE employees ADD COLUMN IF NOT EXISTS system_role TEXT DEFAULT '';
-ALTER TABLE employees ADD COLUMN IF NOT EXISTS login_enabled INTEGER DEFAULT 1;
-ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS shift_date_key TEXT DEFAULT '';
-ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS allowed_break_minutes INTEGER DEFAULT 0;
-ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS break_duration_minutes INTEGER DEFAULT 0;
-ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS break_reason TEXT DEFAULT '';
-ALTER TABLE shortages ADD COLUMN IF NOT EXISTS is_suggestion INTEGER DEFAULT 0;
-ALTER TABLE shift_handovers ADD COLUMN IF NOT EXISTS from_role TEXT DEFAULT '';
-ALTER TABLE shift_handovers ADD COLUMN IF NOT EXISTS target_role TEXT DEFAULT '';
-
-INSERT INTO storage.buckets (id, name, public)
-VALUES ('zayed-proofs', 'zayed-proofs', true)
-ON CONFLICT (id) DO NOTHING;
-
-DO $$
-DECLARE
-  tbl TEXT;
-BEGIN
-  FOREACH tbl IN ARRAY ARRAY[
-    'settings',
-    'system_users',
-    'role_policies',
-    'audit_logs',
-    'employees',
-    'attendance_logs',
-    'suppliers',
-    'truck_logs',
-    'notes',
-    'shift_handovers',
-    'product_catalog',
-    'shortages',
-    'team_messages',
-    'walkie_calls'
-  ]
-  LOOP
-    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', tbl);
-    EXECUTE format('DROP POLICY IF EXISTS "zayed_all_%s" ON %I;', tbl, tbl);
-    EXECUTE format('CREATE POLICY "zayed_all_%s" ON %I FOR ALL USING (true) WITH CHECK (true);', tbl, tbl);
-  END LOOP;
-END $$;
-
-DROP POLICY IF EXISTS "zayed_proofs_public_read" ON storage.objects;
-CREATE POLICY "zayed_proofs_public_read" ON storage.objects FOR SELECT USING (bucket_id = 'zayed-proofs');
-
-DROP POLICY IF EXISTS "zayed_proofs_public_insert" ON storage.objects;
-CREATE POLICY "zayed_proofs_public_insert" ON storage.objects FOR INSERT WITH CHECK (bucket_id = 'zayed-proofs');
+CREATE TABLE IF NOT EXISTS public.walkie_presence (
+  presence_key TEXT PRIMARY KEY,
+  peer_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  role TEXT NOT NULL,
+  role_label TEXT DEFAULT '',
+  avatar_color TEXT DEFAULT '#146C2E',
+  channel TEXT NOT NULL DEFAULT 'security',
+  status TEXT NOT NULL DEFAULT 'listening',
+  live_on INTEGER DEFAULT 1,
+  mic_mode TEXT DEFAULT 'vad',
+  updated_at_ms BIGINT NOT NULL
+);

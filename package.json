@@ -1,35 +1,27 @@
 {
-  "name": "zayed-mart-ops",
-  "version": "1.0.0",
+  "name": "zayed-mart-monorepo",
+  "version": "4.0.0",
   "private": true,
-  "type": "module",
+  "description": "نظام تشغيل ومراقبة زايد مارت — Turborepo Monorepo (NestJS API + React Vite PWA + Supabase Cloud)",
   "engines": {
     "node": ">=22.0.0"
   },
-  "description": "نظام تشغيل ومراقبة زايد مارت - الحضور والانصراف، عربيات البضاعة، وملاحظات مراقب الكاميرات",
+  "packageManager": "npm@10.9.2",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
-    "dev:server": "node --watch server/index.js",
-    "dev:client": "vite",
-    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
-    "build": "vite build",
-    "generate:icons": "node scripts/generate-pwa-icons.js",
-    "start": "node server/index.js",
-    "test": "node --test tests/api.test.js"
-  },
-  "dependencies": {
-    "@supabase/supabase-js": "^2.49.1",
-    "cors": "^2.8.5",
-    "express": "^4.21.2",
-    "jsqr": "^1.4.0",
-    "qrcode": "^1.5.4",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "dev": "turbo run dev --parallel",
+    "dev:api": "npm run dev --workspace=@zayed-mart/api",
+    "dev:web": "npm run dev --workspace=@zayed-mart/web",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "start": "npm run start --workspace=@zayed-mart/api"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.0.9",
-    "@vitejs/plugin-react": "^4.3.4",
-    "concurrently": "^9.1.2",
-    "tailwindcss": "^4.0.9",
-    "vite": "^6.2.0"
+    "turbo": "^2.4.4",
+    "typescript": "^5.8.2"
   }
 }
