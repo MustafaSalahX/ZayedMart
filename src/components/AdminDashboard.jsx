@@ -6,6 +6,7 @@ import {
   saveDirectCloudCredentials,
   hasPermission,
   formatRequestedQty,
+  purgeFakeData,
 } from '../lib/api.js';
 import {
   exportDailyReportCsv,
@@ -516,6 +517,23 @@ export default function AdminDashboard({
     try {
       await apiRequest('/api/system/clear-logs', 'POST');
       onToast?.('تم تصفير سجلات التجربة بنجاح مع بقاء الموظفين والموردين ✓');
+      onRefresh?.();
+    } catch (err) {
+      onToast?.(err.message, 'error');
+    }
+  }
+
+  async function handlePurgeFakeData() {
+    if (
+      !window.confirm(
+        'هل تريد التأكيد على تنظيف وإزالة أي بيانات وهمية أو تجريبية من النظام؟ سيتم الاحتفاظ بحساب الإدارة فقط لتتمكن من إدخال كافة بيانات الماركت الحقيقية.'
+      )
+    ) {
+      return;
+    }
+    try {
+      await purgeFakeData();
+      onToast?.('تم تنظيف كافة البيانات الوهمية والتجريبية بنجاح ✓ النظام نظيف 100% للبيانات الحقيقية');
       onRefresh?.();
     } catch (err) {
       onToast?.(err.message, 'error');
@@ -1534,18 +1552,32 @@ export default function AdminDashboard({
                     <span>استعادة نسخة</span>
                   </button>
                   {canManageUsers && data.connectionMode === 'local_server' && (
-                    <button
-                      type="button"
-                      onClick={handleClearOperationalLogs}
-                      className="px-4 py-2.5 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] text-xs font-extrabold flex items-center gap-1.5"
-                    >
-                      <span className="ms-icon text-base">cleaning_services</span>
-                      <span>تصفير حركات التجربة فقط</span>
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleClearOperationalLogs}
+                        className="px-4 py-2.5 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] text-xs font-extrabold flex items-center gap-1.5 active:scale-95 transition-all"
+                        title="يمسح سجلات الحضور والعربيات التجريبية مع بقاء الموظفين والموردين"
+                      >
+                        <span className="ms-icon text-base">cleaning_services</span>
+                        <span>تصفير حركات اليوم فقط</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handlePurgeFakeData}
+                        className="px-4 py-2.5 rounded-full bg-[#B3261E] text-white text-xs font-extrabold flex items-center gap-1.5 shadow-2xs hover:opacity-95 active:scale-95 transition-all"
+                        title="تنظيف شامل لأي بيانات وهمية أو تجريبية والبدء ببيانات حقيقية 100%"
+                      >
+                        <span className="ms-icon filled text-base">auto_delete</span>
+                        <span>تنظيف البيانات الوهمية (تجهيز للبيانات الحقيقية)</span>
+                      </button>
+                    </>
                   )}
                 </div>
-                <p className="text-[11px] text-[var(--g-muted)] m-0">
-                  زر "تصفير حركات التجربة" يمسح سجلات الحضور والعربيات التجريبية فقط ويحتفظ بأسماء الموظفين والموردين الحقيقيين وكلمات المرور.
+                <p className="text-[11px] text-[var(--g-muted)] m-0 leading-relaxed">
+                  • <strong>تصفير حركات اليوم:</strong> يمسح سجلات الحضور والعربيات لليوم فقط ويحتفظ بجميع الموظفين والموردين.<br />
+                  • <strong>تنظيف البيانات الوهمية:</strong> يفرغ أي بيانات تجريبية أو وهمية متبقية للإبقاء على النظام نظيفاً 100% لإدخال الموظفين والموردين الحقيقيين.
                 </p>
               </section>
             )}

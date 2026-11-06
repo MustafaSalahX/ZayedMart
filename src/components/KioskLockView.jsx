@@ -79,7 +79,12 @@ export default function KioskLockView({
         <div className="bg-white border border-[#DEE3EB] rounded-3xl p-4 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
           <div className="flex items-center gap-3">
             <img
-              src="/logo.jpeg"
+              src="/Logo.png"
+              onError={(e) => {
+                if (e.currentTarget.src.endsWith('/Logo.png')) {
+                  e.currentTarget.src = '/logo.jpeg';
+                }
+              }}
               alt={storeName || 'زايد مارت'}
               className="w-12 h-12 rounded-2xl object-cover border border-[#DEE3EB] shrink-0 bg-white"
             />

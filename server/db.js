@@ -509,6 +509,24 @@ export function createStoreDatabase(customDbPath, options = {}) {
     );
 
     CREATE INDEX IF NOT EXISTS idx_team_messages_date ON team_messages(date_key, channel);
+
+    CREATE TABLE IF NOT EXISTS walkie_calls (
+      id TEXT PRIMARY KEY,
+      channel TEXT NOT NULL DEFAULT 'security',
+      kind TEXT NOT NULL DEFAULT 'voice',
+      sender_id TEXT DEFAULT '',
+      sender_name TEXT NOT NULL,
+      sender_role TEXT DEFAULT '',
+      audio_data TEXT DEFAULT '',
+      mime_type TEXT DEFAULT 'audio/webm',
+      duration_sec REAL DEFAULT 0,
+      is_emergency INTEGER DEFAULT 0,
+      timestamp TEXT NOT NULL,
+      date_key TEXT NOT NULL,
+      synced INTEGER DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_walkie_channel_time ON walkie_calls(channel, timestamp DESC);
   `);
 
   safeAddColumn(db, 'system_users', "pin_cipher TEXT DEFAULT ''");
@@ -601,6 +619,41 @@ export function createStoreDatabase(customDbPath, options = {}) {
     }
     db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
       'migration_purge_fake_v35',
+      'done'
+    );
+  }
+
+  // Migration v3.7: Seed walkie:use & walkie:all_channels into existing role_policies once
+  const migratedWalkieV37 = db
+    .prepare("SELECT value FROM settings WHERE key = 'migration_walkie_v37'")
+    .get()?.value;
+  if (!migratedWalkieV37) {
+    const walkieRoleAdditions = {
+      manager: ['walkie:use', 'walkie:all_channels'],
+      supervisor: ['walkie:use', 'walkie:all_channels'],
+      cctv: ['walkie:use', 'walkie:all_channels'],
+      security: ['walkie:use'],
+    };
+    for (const [roleId, extraPerms] of Object.entries(walkieRoleAdditions)) {
+      const existingRow = db
+        .prepare('SELECT permissions_json FROM role_policies WHERE role = ?')
+        .get(roleId);
+      if (existingRow?.permissions_json) {
+        try {
+          const parsed = JSON.parse(existingRow.permissions_json);
+          if (Array.isArray(parsed)) {
+            const merged = Array.from(new Set([...parsed, ...extraPerms]));
+            db.prepare(
+              'UPDATE role_policies SET permissions_json = ?, updated_at = ? WHERE role = ?'
+            ).run(JSON.stringify(merged), nowIso, roleId);
+          }
+        } catch {
+          // ignore malformed legacy policy
+        }
+      }
+    }
+    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
+      'migration_walkie_v37',
       'done'
     );
   }

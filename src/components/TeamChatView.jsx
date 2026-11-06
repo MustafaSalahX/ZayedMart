@@ -26,6 +26,7 @@ export default function TeamChatView({
   teamMessages = [],
   authUser,
   permissions = [],
+  walkie,
   onRefresh,
   onToast,
 }) {
@@ -104,6 +105,61 @@ export default function TeamChatView({
 
   return (
     <div className="space-y-4">
+      {/* Tactical Walkie-Talkie Hero Strip for Security & Permitted Staff */}
+      {walkie?.canUseWalkie && (
+        <div className="rounded-3xl bg-[#0D1117] text-[#E6EDF3] border border-[#262E3B] p-4 sm:p-5 flex flex-wrap items-center justify-between gap-3 shadow-md">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-12 h-12 rounded-2xl bg-[#16202E] border border-[#00E676]/50 text-[#00E676] flex items-center justify-center shrink-0">
+              <span className="ms-icon filled text-2xl">podcasts</span>
+            </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="num-ltr text-[11px] font-black px-2 py-0.5 rounded-md bg-[#00E676]/15 text-[#00E676] border border-[#00E676]/30">
+                  {walkie.currentChannelMeta?.code || 'CH-01'} • {walkie.currentChannelMeta?.freq || '101.5 MHz'}
+                </span>
+                <h3 className="text-sm sm:text-base font-black text-white m-0">
+                  لاسلكي {walkie.currentChannelMeta?.shortLabel || 'الأمن والبوابة'} المباشر
+                </h3>
+              </div>
+              <p className="text-xs text-[#9BA5B4] m-0 mt-0.5">
+                اضغط (تشغيل الخط الحي ON) لفتح اتصال صوتي مباشر متزامن مع كل أفراد الأمن ومراقب الكاميرات — يعمل في الخلفية وبمجرد الكلام يسمعك الجميع في نفس اللحظة
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto justify-end flex-wrap">
+            <button
+              type="button"
+              onClick={() => walkie.toggleLivePower?.()}
+              className={`min-h-[44px] px-4 py-2 rounded-full text-xs font-black flex items-center gap-1.5 transition-colors duration-150 cursor-pointer shadow-sm ${
+                walkie.liveOn
+                  ? 'bg-[#FF3B30] hover:bg-[#D93025] text-white'
+                  : 'bg-[#00E676] hover:bg-[#00C853] text-[#041E0F]'
+              }`}
+            >
+              <span className="ms-icon filled text-base">power_settings_new</span>
+              <span>{walkie.liveOn ? 'إيقاف الخط الحي (OFF)' : 'تشغيل الخط الحي (ON)'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => walkie.setConsoleOpen?.(true)}
+              className="min-h-[44px] px-3.5 py-2 rounded-full bg-white/10 hover:bg-white/18 text-white border border-white/15 text-xs font-extrabold flex items-center gap-1.5 transition-colors duration-150 cursor-pointer"
+            >
+              <span className="ms-icon text-base">tune</span>
+              <span>لوحة اللاسلكي</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => walkie.sendAlertPing?.()}
+              className="min-h-[44px] px-3.5 py-2 rounded-full bg-[#FF3B30]/15 hover:bg-[#FF3B30]/25 text-[#FF8A80] border border-[#FF3B30]/40 text-xs font-extrabold flex items-center gap-1.5 transition-colors duration-150 cursor-pointer"
+            >
+              <span className="ms-icon filled text-base">notifications_active</span>
+              <span>جرس انتباه</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header Card */}
       <div className="g-card p-4 sm:p-5 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">

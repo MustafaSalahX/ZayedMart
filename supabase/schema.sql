@@ -197,6 +197,22 @@ CREATE TABLE IF NOT EXISTS team_messages (
   synced INTEGER DEFAULT 1
 );
 
+CREATE TABLE IF NOT EXISTS walkie_calls (
+  id TEXT PRIMARY KEY,
+  channel TEXT NOT NULL DEFAULT 'security',
+  kind TEXT NOT NULL DEFAULT 'voice',
+  sender_id TEXT DEFAULT '',
+  sender_name TEXT NOT NULL,
+  sender_role TEXT DEFAULT '',
+  audio_data TEXT DEFAULT '',
+  mime_type TEXT DEFAULT 'audio/webm',
+  duration_sec DOUBLE PRECISION DEFAULT 0,
+  is_emergency INTEGER DEFAULT 0,
+  timestamp TEXT NOT NULL,
+  date_key TEXT NOT NULL,
+  synced INTEGER DEFAULT 1
+);
+
 -- ترقية آمنة للمشاريع القائمة مسبقاً على Supabase بدون فقدان أي بيانات
 ALTER TABLE employees ADD COLUMN IF NOT EXISTS system_role TEXT DEFAULT '';
 ALTER TABLE employees ADD COLUMN IF NOT EXISTS login_enabled INTEGER DEFAULT 1;
@@ -229,7 +245,8 @@ BEGIN
     'shift_handovers',
     'product_catalog',
     'shortages',
-    'team_messages'
+    'team_messages',
+    'walkie_calls'
   ]
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', tbl);

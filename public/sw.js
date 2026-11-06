@@ -1,14 +1,17 @@
-const CACHE_VERSION = 'zayed-mart-shell-v3.6';
+const CACHE_VERSION = 'zayed-mart-shell-v3.8';
 const FONT_CACHE = 'zayed-mart-fonts-v1';
 
 const CORE_SHELL_URLS = [
   '/',
   '/index.html',
   '/manifest.json',
+  '/Logo.png',
+  '/logo.png',
+  '/logo.jpeg',
   '/pwa-192.png',
   '/pwa-512.png',
   '/pwa-maskable-512.png',
-  '/logo.jpeg',
+  '/apple-touch-icon.png',
 ];
 
 self.addEventListener('install', (event) => {
@@ -38,7 +41,43 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
+    return;
   }
+  if (event.data && event.data.type === 'ZAYED_WALKIE_NOTIFY') {
+    const title = event.data.title || 'نداء لاسلكي حي — زايد مارت';
+    const body = event.data.body || 'يوجد اتصال على قناة اللاسلكي الآن';
+    if (self.registration && typeof self.registration.showNotification === 'function') {
+      event.waitUntil(
+        self.registration
+          .showNotification(title, {
+            body,
+            icon: '/pwa-192.png',
+            badge: '/pwa-192.png',
+            tag: 'zayed-walkie-live',
+            renotify: true,
+            vibrate: [120, 60, 120, 60, 160],
+          })
+          .catch(() => {})
+      );
+    }
+  }
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
+      for (const client of windowClients) {
+        if ('focus' in client) {
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow('/');
+      }
+      return undefined;
+    })
+  );
 });
 
 // Background Sync API on Android Chrome: notify open client tabs to flush IndexedDB outbox

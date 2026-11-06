@@ -418,6 +418,25 @@ export async function syncWithCloud(db, uploadsDir) {
       // Optional table
     }
 
+    try {
+      const unsyncedWalkie = db
+        .prepare('SELECT * FROM walkie_calls WHERE synced = 0 ORDER BY timestamp DESC LIMIT 20')
+        .all();
+      if (unsyncedWalkie.length > 0) {
+        const payload = unsyncedWalkie.map((r) => ({ ...r, synced: 1 }));
+        const { error } = await supabase
+          .from('walkie_calls')
+          .upsert(payload, { onConflict: 'id' });
+        if (!error) {
+          const markStmt = db.prepare('UPDATE walkie_calls SET synced = 1 WHERE id = ?');
+          for (const r of unsyncedWalkie) markStmt.run(r.id);
+          stats.pushed += unsyncedWalkie.length;
+        }
+      }
+    } catch {
+      // Optional table if older schema
+    }
+
     // -----------------------------------------------------------------------
     // C. PULL REMOTE UPDATES FROM SUPABASE INTO LOCAL SQLITE
     // -----------------------------------------------------------------------
@@ -697,6 +716,43 @@ export async function syncWithCloud(db, uploadsDir) {
             m.timestamp || new Date().toISOString(),
             m.date_key || new Date().toISOString().slice(0, 10)
           );
+        }
+      }
+    } catch {
+      // Optional table
+    }
+
+    try {
+      const cutoffIso = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+      const { data: remoteWalkie } = await supabase
+        .from('walkie_calls')
+        .select('*')
+        .gte('timestamp', cutoffIso)
+        .order('timestamp', { ascending: false })
+        .limit(30);
+      if (Array.isArray(remoteWalkie)) {
+        const upsertWalkie = db.prepare(`
+          INSERT OR IGNORE INTO walkie_calls (
+            id, channel, kind, sender_id, sender_name, sender_role,
+            audio_data, mime_type, duration_sec, is_emergency, timestamp, date_key, synced
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        `);
+        for (const w of remoteWalkie) {
+          const res = upsertWalkie.run(
+            w.id,
+            w.channel || 'security',
+            w.kind || 'voice',
+            w.sender_id || '',
+            w.sender_name || 'الأمن',
+            w.sender_role || 'security',
+            w.audio_data || '',
+            w.mime_type || 'audio/webm',
+            Number(w.duration_sec) || 0,
+            w.is_emergency ? 1 : 0,
+            w.timestamp || new Date().toISOString(),
+            w.date_key || new Date().toISOString().slice(0, 10)
+          );
+          if (res.changes > 0) stats.pulled += 1;
         }
       }
     } catch {

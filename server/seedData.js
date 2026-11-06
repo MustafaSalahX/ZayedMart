@@ -123,6 +123,19 @@ export function purgeLegacyFakeSeedData(db) {
   delById('attendance_logs', LEGACY_FAKE_ATTENDANCE_IDS);
   delById('truck_logs', LEGACY_FAKE_TRUCK_IDS);
   delById('notes', LEGACY_FAKE_NOTE_IDS);
+
+  // Clean any test/dummy leftovers so 100% real data remains
+  try {
+    db.exec(`
+      DELETE FROM system_users WHERE employee_id IN (SELECT id FROM employees WHERE name LIKE '%test%' OR name LIKE '%تجربة%' OR emp_code = '123123');
+      DELETE FROM attendance_logs WHERE employee_id IN (SELECT id FROM employees WHERE name LIKE '%test%' OR name LIKE '%تجربة%' OR emp_code = '123123');
+      DELETE FROM employees WHERE name LIKE '%test%' OR name LIKE '%تجربة%' OR emp_code = '123123';
+      DELETE FROM product_catalog WHERE name LIKE '%اختبار%' OR name LIKE '%تجربة%' OR name LIKE '%test%';
+      DELETE FROM notes WHERE (content LIKE '%ممنوع%' AND recorded_by LIKE '%عم رجب%') OR content LIKE '%تجربة%' OR content LIKE '%اختبار%';
+    `);
+  } catch {
+    // Ignore if table doesn't exist yet
+  }
 }
 
 export function seedInitialStoreData(db, secretHex) {

@@ -84,7 +84,9 @@ export function createApp(options = {}) {
 
   // Auto-hydrate from Supabase on Vercel Cold-Start (or periodic multi-device refresh)
   app.use('/api', async (req, _res, next) => {
-    if (req.path === '/events' || req.path === '/cloud/test') return next();
+    if (req.path === '/events' || req.path === '/cloud/test' || req.path === '/walkie/presence') {
+      return next();
+    }
     try {
       await ensureCloudHydratedOnBoot(db, uploadsDir);
     } catch {
@@ -94,6 +96,116 @@ export function createApp(options = {}) {
   });
 
   const sseClients = new Set();
+  const walkiePresenceMap = new Map();
+  const walkieSignalInboxMap = new Map();
+  const walkieLiveFramesRing = [];
+  let walkieLiveSeqCounter = 0;
+  const WALKIE_PRESENCE_TTL_MS = 45000;
+  const WALKIE_SIGNAL_TTL_MS = 20000;
+  const WALKIE_LIVE_FRAME_TTL_MS = 6000;
+  const VALID_WALKIE_CHANNELS = ['security', 'warehouse', 'floor', 'emergency'];
+
+  function enqueueWalkieSignalForPeer(targetPeerId, envelope) {
+    if (!targetPeerId) return;
+    const now = Date.now();
+    const existing = walkieSignalInboxMap.get(targetPeerId) || [];
+    const fresh = existing.filter((item) => now - item.ts_ms < WALKIE_SIGNAL_TTL_MS);
+    fresh.push(envelope);
+    if (fresh.length > 60) {
+      fresh.splice(0, fresh.length - 60);
+    }
+    walkieSignalInboxMap.set(targetPeerId, fresh);
+  }
+
+  function drainWalkieSignalsForPeer(peerId) {
+    if (!peerId) return [];
+    const list = walkieSignalInboxMap.get(peerId) || [];
+    walkieSignalInboxMap.delete(peerId);
+    const now = Date.now();
+    return list.filter((item) => now - item.ts_ms < WALKIE_SIGNAL_TTL_MS);
+  }
+
+  function pruneWalkieLiveFrames() {
+    const cutoff = Date.now() - WALKIE_LIVE_FRAME_TTL_MS;
+    while (walkieLiveFramesRing.length > 0 && walkieLiveFramesRing[0].ts_ms < cutoff) {
+      walkieLiveFramesRing.shift();
+    }
+    if (walkieLiveFramesRing.length > 80) {
+      walkieLiveFramesRing.splice(0, walkieLiveFramesRing.length - 80);
+    }
+  }
+
+  function getAllowedWalkieChannels(auth) {
+    if (!auth || !auth.has('walkie:use') || auth.user?.role === 'kiosk') {
+      return [];
+    }
+    if (auth.has('walkie:all_channels') || auth.user?.role === 'owner') {
+      return [...VALID_WALKIE_CHANNELS];
+    }
+    if (auth.user?.role === 'security') {
+      return ['security'];
+    }
+    if (auth.user?.role === 'warehouse') {
+      return ['warehouse'];
+    }
+    return ['floor'];
+  }
+
+  function canTransmitOnWalkieChannel(auth, channel) {
+    const allowed = getAllowedWalkieChannels(auth);
+    return allowed.includes(channel);
+  }
+
+  function canReceiveWalkieChannel(auth, channel) {
+    const allowed = getAllowedWalkieChannels(auth);
+    if (allowed.length === 0) return false;
+    if (channel === 'emergency') return true;
+    return allowed.includes(channel);
+  }
+
+  function getActiveWalkieUnits(filterChannel = null) {
+    const now = Date.now();
+    const list = [];
+    for (const [key, entry] of walkiePresenceMap.entries()) {
+      if (now - entry.updated_at_ms > WALKIE_PRESENCE_TTL_MS) {
+        walkiePresenceMap.delete(key);
+        continue;
+      }
+      // Auto-expire stuck 'talking' states after 15s of no frame/status update
+      const effectiveStatus =
+        entry.status === 'talking' && now - entry.updated_at_ms > 15000
+          ? 'listening'
+          : entry.status;
+      if (!filterChannel || entry.channel === filterChannel || entry.channel === 'emergency') {
+        list.push({
+          peer_id: entry.peer_id || entry.user_id,
+          user_id: entry.user_id,
+          display_name: entry.display_name,
+          role: entry.role,
+          role_label: entry.role_label,
+          avatar_color: entry.avatar_color,
+          channel: entry.channel,
+          status: effectiveStatus,
+          live_on: Boolean(entry.live_on),
+          mic_mode: entry.mic_mode || 'vad',
+          updated_at: new Date(entry.updated_at_ms).toISOString(),
+        });
+      }
+    }
+    return list;
+  }
+
+  function broadcastWalkieEvent(eventName, payloadObj, targetChannel) {
+    const serialized = JSON.stringify(payloadObj);
+    for (const res of sseClients) {
+      try {
+        if (!canReceiveWalkieChannel(res._zayedAuth, targetChannel)) continue;
+        res.write(`event: ${eventName}\ndata: ${serialized}\n\n`);
+      } catch {
+        sseClients.delete(res);
+      }
+    }
+  }
 
   function getSettingsMap() {
     const rows = db.prepare('SELECT key, value FROM settings').all();
@@ -1321,6 +1433,7 @@ export function createApp(options = {}) {
     if (isServerless) {
       return res.end();
     }
+    res._zayedAuth = req.auth;
     sseClients.add(res);
     req.on('close', () => {
       sseClients.delete(res);
@@ -3530,7 +3643,9 @@ export function createApp(options = {}) {
         DELETE FROM notes;
         DELETE FROM shift_handovers;
         DELETE FROM team_messages;
+        DELETE FROM walkie_calls;
       `);
+      walkiePresenceMap.clear();
       recordAuditLog(db, {
         userId: req.auth.user.id,
         userName: req.auth.user.display_name,
@@ -3700,6 +3815,561 @@ export function createApp(options = {}) {
       return res.status(500).json({ error: err.message });
     }
   });
+
+  // =========================================================================
+  // 4D-2. TACTICAL WALKIE-TALKIE (PUSH-TO-TALK RADIO ENGINE)
+  // =========================================================================
+
+  const WALKIE_CHANNEL_LABELS = {
+    security: 'قناة الأمن والبوابة (CH-01)',
+    warehouse: 'قناة المخزن والرصيف (CH-02)',
+    floor: 'قناة الصالة والكاشير (CH-03)',
+    emergency: 'قناة الطوارئ العامة (CH-09)',
+  };
+
+  app.post(
+    '/api/walkie/presence',
+    requireAuth,
+    requirePermission('walkie:use'),
+    (req, res) => {
+      try {
+        const allowedChannels = getAllowedWalkieChannels(req.auth);
+        if (allowedChannels.length === 0) {
+          return res.status(403).json({ ok: false, code: 'FORBIDDEN', error: 'اللاسلكي غير مفعّل لهذا الحساب' });
+        }
+
+        const rawChannel = String(req.body?.channel || allowedChannels[0] || 'security').trim();
+        const status = String(req.body?.status || 'listening').trim();
+        const peerId = String(req.body?.peer_id || '').trim().slice(0, 80);
+        const liveOn = req.body?.live_on !== undefined ? Boolean(req.body.live_on) : true;
+        const rawMicMode = String(req.body?.mic_mode || 'vad').trim();
+        const cleanMicMode = ['vad', 'open', 'muted'].includes(rawMicMode) ? rawMicMode : 'vad';
+        const presenceKey = peerId ? `${req.auth.user.id}::${peerId}` : req.auth.user.id;
+
+        if (status === 'offline') {
+          let notifyCh = rawChannel;
+          if (peerId) {
+            const prev = walkiePresenceMap.get(presenceKey);
+            if (prev?.channel) notifyCh = prev.channel;
+            walkiePresenceMap.delete(presenceKey);
+            walkieSignalInboxMap.delete(peerId);
+          } else {
+            for (const [k, entry] of walkiePresenceMap.entries()) {
+              if (entry.user_id === req.auth.user.id) {
+                notifyCh = entry.channel || notifyCh;
+                walkiePresenceMap.delete(k);
+              }
+            }
+          }
+          const activeUnits = getActiveWalkieUnits(notifyCh);
+          broadcastWalkieEvent(
+            'walkie_presence',
+            { channel: notifyCh, activeUnits },
+            notifyCh
+          );
+          return res.json({ ok: true, activeUnits });
+        }
+
+        if (!canTransmitOnWalkieChannel(req.auth, rawChannel)) {
+          return res.status(403).json({
+            ok: false,
+            code: 'FORBIDDEN',
+            error: 'عفواً، حسابك مخصص لقناته المعتمدة فقط ولا يملك صلاحية التبديل لهذه القناة',
+          });
+        }
+
+        const normalizedStatus = status === 'talking' ? 'talking' : 'listening';
+        walkiePresenceMap.set(presenceKey, {
+          peer_id: peerId || req.auth.user.id,
+          user_id: req.auth.user.id,
+          display_name: req.auth.user.display_name,
+          role: req.auth.user.role,
+          role_label: req.auth.user.role_label,
+          avatar_color: req.auth.user.avatar_color || '#146C2E',
+          channel: rawChannel,
+          status: normalizedStatus,
+          live_on: liveOn,
+          mic_mode: cleanMicMode,
+          updated_at_ms: Date.now(),
+        });
+
+        const activeUnits = getActiveWalkieUnits(rawChannel);
+        broadcastWalkieEvent(
+          'walkie_presence',
+          { channel: rawChannel, activeUnits },
+          rawChannel
+        );
+
+        return res.json({ ok: true, channel: rawChannel, activeUnits });
+      } catch (err) {
+        return res.status(500).json({ error: err.message });
+      }
+    }
+  );
+
+  // WebRTC Multi-Peer Mesh Signaling Endpoint (join / leave / offer / answer / ice / talking_state)
+  app.post(
+    '/api/walkie/signal',
+    requireAuth,
+    requirePermission('walkie:use'),
+    (req, res) => {
+      try {
+        const allowedChannels = getAllowedWalkieChannels(req.auth);
+        if (allowedChannels.length === 0) {
+          return res.status(403).json({ ok: false, code: 'FORBIDDEN', error: 'غير مصرح باستخدام اللاسلكي' });
+        }
+
+        const targetChannel = String(req.body?.channel || allowedChannels[0] || 'security').trim();
+        if (!VALID_WALKIE_CHANNELS.includes(targetChannel)) {
+          return res.status(400).json({ error: 'تردد القناة غير صالح' });
+        }
+        if (!canTransmitOnWalkieChannel(req.auth, targetChannel)) {
+          return res.status(403).json({
+            ok: false,
+            code: 'FORBIDDEN',
+            error: 'غير مصرح بالاتصال الحي على هذه القناة',
+          });
+        }
+
+        const fromPeerId = String(req.body?.peer_id || req.auth.user.id).trim().slice(0, 80);
+        const targetPeerId = String(req.body?.target_peer_id || '').trim().slice(0, 80);
+        const signalType = String(req.body?.signal_type || '').trim();
+        const validSignalTypes = ['join', 'leave', 'offer', 'answer', 'ice', 'talking_state'];
+        if (!validSignalTypes.includes(signalType)) {
+          return res.status(400).json({ error: 'نوع إشارة الربط الحي غير صالح' });
+        }
+
+        const presenceKey = `${req.auth.user.id}::${fromPeerId}`;
+        if (signalType === 'leave') {
+          walkiePresenceMap.delete(presenceKey);
+          walkieSignalInboxMap.delete(fromPeerId);
+        } else {
+          const prev = walkiePresenceMap.get(presenceKey);
+          const nextTalking =
+            signalType === 'talking_state'
+              ? Boolean(req.body?.data?.talking)
+              : prev?.status === 'talking';
+          const rawMicMode = String(req.body?.data?.mic_mode || prev?.mic_mode || 'vad');
+          walkiePresenceMap.set(presenceKey, {
+            peer_id: fromPeerId,
+            user_id: req.auth.user.id,
+            display_name: req.auth.user.display_name,
+            role: req.auth.user.role,
+            role_label: req.auth.user.role_label,
+            avatar_color: req.auth.user.avatar_color || '#146C2E',
+            channel: targetChannel,
+            status: nextTalking ? 'talking' : 'listening',
+            live_on: true,
+            mic_mode: ['vad', 'open', 'muted'].includes(rawMicMode) ? rawMicMode : 'vad',
+            updated_at_ms: Date.now(),
+          });
+        }
+
+        const envelope = {
+          id: crypto.randomUUID(),
+          channel: targetChannel,
+          from_peer_id: fromPeerId,
+          target_peer_id: targetPeerId,
+          user_id: req.auth.user.id,
+          display_name: req.auth.user.display_name,
+          role: req.auth.user.role,
+          role_label: req.auth.user.role_label,
+          avatar_color: req.auth.user.avatar_color || '#146C2E',
+          signal_type: signalType,
+          data: req.body?.data ?? null,
+          timestamp: new Date().toISOString(),
+          ts_ms: Date.now(),
+        };
+
+        if (targetPeerId) {
+          enqueueWalkieSignalForPeer(targetPeerId, envelope);
+        } else {
+          const units = getActiveWalkieUnits(targetChannel);
+          for (const u of units) {
+            if (u.peer_id && u.peer_id !== fromPeerId) {
+              enqueueWalkieSignalForPeer(u.peer_id, envelope);
+            }
+          }
+        }
+
+        broadcastWalkieEvent('walkie_signal', envelope, targetChannel);
+        const activeUnits = getActiveWalkieUnits(targetChannel);
+        if (signalType === 'join' || signalType === 'leave' || signalType === 'talking_state') {
+          broadcastWalkieEvent(
+            'walkie_presence',
+            { channel: targetChannel, activeUnits },
+            targetChannel
+          );
+        }
+
+        return res.json({ ok: true, activeUnits });
+      } catch (err) {
+        return res.status(500).json({ error: err.message });
+      }
+    }
+  );
+
+  // Stateless Real-Time Audio Relay Endpoint (250ms 8kHz G.711 μ-law Live Frames)
+  app.post(
+    '/api/walkie/live-frame',
+    requireAuth,
+    requirePermission('walkie:use'),
+    (req, res) => {
+      try {
+        const allowedChannels = getAllowedWalkieChannels(req.auth);
+        if (allowedChannels.length === 0) {
+          return res.status(403).json({ ok: false, code: 'FORBIDDEN', error: 'غير مصرح باستخدام اللاسلكي' });
+        }
+
+        const targetChannel = String(req.body?.channel || allowedChannels[0] || 'security').trim();
+        if (!VALID_WALKIE_CHANNELS.includes(targetChannel)) {
+          return res.status(400).json({ error: 'تردد القناة غير صالح' });
+        }
+        if (!canTransmitOnWalkieChannel(req.auth, targetChannel)) {
+          return res.status(403).json({
+            ok: false,
+            code: 'FORBIDDEN',
+            error: 'عفواً، دورك الحالي مصرح له فقط بالبث على قناته المعتمدة',
+          });
+        }
+
+        const fromPeerId = String(req.body?.peer_id || req.auth.user.id).trim().slice(0, 80);
+        const ulawB64 = String(req.body?.ulaw_b64 || '').trim();
+        if (!ulawB64 || ulawB64.length < 16 || ulawB64.length > 24000) {
+          return res.status(400).json({ error: 'إطار الصوت الحي غير صالح أو يتجاوز الحجم المسموح' });
+        }
+
+        const sampleRate = Math.min(16000, Math.max(4000, Number(req.body?.sample_rate) || 8000));
+        const seq = ++walkieLiveSeqCounter;
+        const nowMs = Date.now();
+
+        const presenceKey = `${req.auth.user.id}::${fromPeerId}`;
+        const prevPresence = walkiePresenceMap.get(presenceKey);
+        walkiePresenceMap.set(presenceKey, {
+          peer_id: fromPeerId,
+          user_id: req.auth.user.id,
+          display_name: req.auth.user.display_name,
+          role: req.auth.user.role,
+          role_label: req.auth.user.role_label,
+          avatar_color: req.auth.user.avatar_color || '#146C2E',
+          channel: targetChannel,
+          status: 'talking',
+          live_on: true,
+          mic_mode: prevPresence?.mic_mode || 'vad',
+          updated_at_ms: nowMs,
+        });
+
+        const framePacket = {
+          seq,
+          channel: targetChannel,
+          from_peer_id: fromPeerId,
+          sender_id: req.auth.user.id,
+          sender_name: req.auth.user.display_name,
+          sender_role: req.auth.user.role,
+          avatar_color: req.auth.user.avatar_color || '#146C2E',
+          sample_rate: sampleRate,
+          ulaw_b64: ulawB64,
+          is_emergency: Boolean(req.body?.is_emergency || targetChannel === 'emergency'),
+          ts_ms: nowMs,
+        };
+
+        pruneWalkieLiveFrames();
+        walkieLiveFramesRing.push(framePacket);
+
+        broadcastWalkieEvent('walkie_live_frame', framePacket, targetChannel);
+        return res.json({ ok: true, seq });
+      } catch (err) {
+        return res.status(500).json({ error: err.message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/walkie/transmit',
+    requireAuth,
+    requirePermission('walkie:use'),
+    (req, res) => {
+      try {
+        const allowedChannels = getAllowedWalkieChannels(req.auth);
+        if (allowedChannels.length === 0) {
+          return res.status(403).json({ ok: false, code: 'FORBIDDEN', error: 'غير مصرح باستخدام اللاسلكي' });
+        }
+
+        const {
+          id: clientId,
+          channel: requestedChannel,
+          kind = 'voice',
+          audio_data = '',
+          mime_type = 'audio/webm',
+          duration_sec = 0,
+          is_emergency = false,
+        } = req.body || {};
+
+        const targetChannel = String(requestedChannel || allowedChannels[0] || 'security').trim();
+        if (!VALID_WALKIE_CHANNELS.includes(targetChannel)) {
+          return res.status(400).json({ error: 'تردد القناة غير صالح' });
+        }
+
+        if (!canTransmitOnWalkieChannel(req.auth, targetChannel)) {
+          recordAuditLog(db, {
+            userId: req.auth.user.id,
+            userName: req.auth.user.display_name,
+            role: req.auth.user.role,
+            action: 'رفض إرسال لاسلكي خارج القناة المخصصة',
+            details: `محاولة إرسال على (${targetChannel}) بينما القنوات المسموحة هي (${allowedChannels.join(', ')})`,
+            ip: getClientIp(req),
+            severity: 'warning',
+          });
+          return res.status(403).json({
+            ok: false,
+            code: 'FORBIDDEN',
+            error: 'عفواً، دورك الحالي مصرح له فقط بالإرسال على قناة الأمن المخصصة له',
+          });
+        }
+
+        const finalKind = kind === 'ping' ? 'ping' : 'voice';
+        let cleanAudio = '';
+        let cleanMime = 'audio/webm';
+        let cleanDuration = 0;
+
+        if (finalKind === 'voice') {
+          if (
+            typeof audio_data !== 'string' ||
+            !audio_data.startsWith('data:audio/') ||
+            audio_data.length < 48
+          ) {
+            return res.status(400).json({ error: 'المقطع الصوتي غير صالح أو قصير جداً' });
+          }
+          if (audio_data.length > 950000) {
+            return res.status(400).json({ error: 'حجم النداء الصوتي يتجاوز الحد المسموح (30 ثانية كحد أقصى)' });
+          }
+          cleanAudio = audio_data;
+          const mimeMatch = audio_data.match(/^data:(audio\/[a-z0-9.+=-]+(?:;codecs=[a-z0-9.,_-]+)?);base64,/i);
+          cleanMime = mimeMatch ? mimeMatch[1] : String(mime_type || 'audio/webm').slice(0, 64);
+          const parsedDur = Number(duration_sec);
+          cleanDuration = Number.isFinite(parsedDur)
+            ? Math.min(35, Math.max(0.4, Math.round(parsedDur * 10) / 10))
+            : 1.5;
+        }
+
+        const callId = clientId ? String(clientId).slice(0, 80) : crypto.randomUUID();
+        const existingCall = db.prepare('SELECT * FROM walkie_calls WHERE id = ?').get(callId);
+        if (existingCall) {
+          return res.status(200).json({ ok: true, call: existingCall });
+        }
+
+        const now = new Date();
+        const isoNow = now.toISOString();
+        const dateKey = getLocalDateKey(now);
+        const emergencyFlag = is_emergency || targetChannel === 'emergency' ? 1 : 0;
+
+        db.prepare(`
+          INSERT INTO walkie_calls (
+            id, channel, kind, sender_id, sender_name, sender_role,
+            audio_data, mime_type, duration_sec, is_emergency, timestamp, date_key, synced
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        `).run(
+          callId,
+          targetChannel,
+          finalKind,
+          req.auth.user.id,
+          req.auth.user.display_name,
+          req.auth.user.role,
+          cleanAudio,
+          cleanMime,
+          cleanDuration,
+          emergencyFlag,
+          isoNow,
+          dateKey
+        );
+
+        // Auto-prune calls older than 24h and cap each channel at newest 25 clips
+        try {
+          const cutoff24h = new Date(now.getTime() - 24 * 3600 * 1000).toISOString();
+          db.prepare('DELETE FROM walkie_calls WHERE timestamp < ?').run(cutoff24h);
+          db.prepare(`
+            DELETE FROM walkie_calls
+            WHERE channel = ? AND id NOT IN (
+              SELECT id FROM walkie_calls WHERE channel = ? ORDER BY timestamp DESC LIMIT 25
+            )
+          `).run(targetChannel, targetChannel);
+        } catch {
+          // Non-fatal cleanup
+        }
+
+        // Transition sender presence back from 'talking' -> 'listening'
+        const txPeerId = String(req.body?.peer_id || '').trim().slice(0, 80);
+        const txPresenceKey = txPeerId ? `${req.auth.user.id}::${txPeerId}` : req.auth.user.id;
+        const prevTxPresence = walkiePresenceMap.get(txPresenceKey);
+        walkiePresenceMap.set(txPresenceKey, {
+          peer_id: txPeerId || prevTxPresence?.peer_id || req.auth.user.id,
+          user_id: req.auth.user.id,
+          display_name: req.auth.user.display_name,
+          role: req.auth.user.role,
+          role_label: req.auth.user.role_label,
+          avatar_color: req.auth.user.avatar_color || '#146C2E',
+          channel: targetChannel,
+          status: 'listening',
+          live_on: prevTxPresence?.live_on ?? true,
+          mic_mode: prevTxPresence?.mic_mode || 'vad',
+          updated_at_ms: Date.now(),
+        });
+
+        const created = db.prepare('SELECT * FROM walkie_calls WHERE id = ?').get(callId);
+        const activeUnits = getActiveWalkieUnits(targetChannel);
+
+        broadcastWalkieEvent('walkie_tx', { call: created }, targetChannel);
+        broadcastWalkieEvent(
+          'walkie_presence',
+          { channel: targetChannel, activeUnits },
+          targetChannel
+        );
+        scheduleAutoCloudSync(db, uploadsDir);
+
+        if (finalKind === 'ping' || emergencyFlag) {
+          recordAuditLog(db, {
+            userId: req.auth.user.id,
+            userName: req.auth.user.display_name,
+            role: req.auth.user.role,
+            action: finalKind === 'ping' ? 'جرس انتباه لاسلكي عاجل' : 'نداء لاسلكي طارئ',
+            details: `${WALKIE_CHANNEL_LABELS[targetChannel] || targetChannel}`,
+            ip: getClientIp(req),
+            severity: emergencyFlag ? 'warning' : 'info',
+          });
+        }
+
+        return res.status(201).json({ ok: true, call: created, activeUnits });
+      } catch (err) {
+        return res.status(500).json({ error: err.message });
+      }
+    }
+  );
+
+  app.get(
+    '/api/walkie/poll',
+    requireAuth,
+    requirePermission('walkie:use'),
+    (req, res) => {
+      try {
+        const allowedChannels = getAllowedWalkieChannels(req.auth);
+        if (allowedChannels.length === 0) {
+          return res.status(403).json({ ok: false, code: 'FORBIDDEN', error: 'غير مصرح باستخدام اللاسلكي' });
+        }
+
+        const requestedChannel = String(req.query.channel || allowedChannels[0] || 'security').trim();
+        const activeChannel = VALID_WALKIE_CHANNELS.includes(requestedChannel)
+          ? requestedChannel
+          : allowedChannels[0];
+
+        if (!canReceiveWalkieChannel(req.auth, activeChannel)) {
+          return res.status(403).json({
+            ok: false,
+            code: 'FORBIDDEN',
+            error: 'غير مصرح بالاستماع لهذه القناة',
+          });
+        }
+
+        const pollPeerId = String(req.query.peer_id || '').trim().slice(0, 80);
+        const liveOnParam = req.query.live_on === '1';
+        if (req.query.listening === '1' && canTransmitOnWalkieChannel(req.auth, activeChannel)) {
+          const presenceKey = pollPeerId ? `${req.auth.user.id}::${pollPeerId}` : req.auth.user.id;
+          const existing = walkiePresenceMap.get(presenceKey);
+          const keepTalking =
+            existing?.status === 'talking' &&
+            existing?.channel === activeChannel &&
+            Date.now() - existing.updated_at_ms < 8000;
+          walkiePresenceMap.set(presenceKey, {
+            peer_id: pollPeerId || req.auth.user.id,
+            user_id: req.auth.user.id,
+            display_name: req.auth.user.display_name,
+            role: req.auth.user.role,
+            role_label: req.auth.user.role_label,
+            avatar_color: req.auth.user.avatar_color || '#146C2E',
+            channel: activeChannel,
+            status: keepTalking ? 'talking' : 'listening',
+            live_on: liveOnParam || Boolean(existing?.live_on),
+            mic_mode: existing?.mic_mode || 'vad',
+            updated_at_ms: Date.now(),
+          });
+        }
+
+        const since = String(req.query.since || '').trim();
+        let calls = [];
+        if (since) {
+          calls = db
+            .prepare(`
+              SELECT * FROM walkie_calls
+              WHERE (channel = ? OR channel = 'emergency') AND timestamp > ?
+              ORDER BY timestamp ASC
+              LIMIT 20
+            `)
+            .all(activeChannel, since);
+        } else {
+          calls = db
+            .prepare(`
+              SELECT * FROM walkie_calls
+              WHERE channel = ? OR channel = 'emergency'
+              ORDER BY timestamp DESC
+              LIMIT 20
+            `)
+            .all(activeChannel);
+        }
+
+        pruneWalkieLiveFrames();
+        const signals = pollPeerId ? drainWalkieSignalsForPeer(pollPeerId) : [];
+        const hasLastSeq = req.query.last_frame_seq !== undefined && req.query.last_frame_seq !== '';
+        const lastFrameSeq = hasLastSeq ? Number(req.query.last_frame_seq) || 0 : walkieLiveSeqCounter;
+        const liveFrames = hasLastSeq
+          ? walkieLiveFramesRing.filter(
+              (f) =>
+                f.seq > lastFrameSeq &&
+                f.from_peer_id !== (pollPeerId || req.auth.user.id) &&
+                (f.channel === activeChannel || f.channel === 'emergency')
+            )
+          : [];
+
+        return res.json({
+          ok: true,
+          serverTime: new Date().toISOString(),
+          channel: activeChannel,
+          allowedChannels,
+          calls,
+          signals,
+          liveFrames,
+          latestFrameSeq: walkieLiveSeqCounter,
+          activeUnits: getActiveWalkieUnits(activeChannel),
+        });
+      } catch (err) {
+        return res.status(500).json({ error: err.message });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/walkie/calls/:id',
+    requireAuth,
+    requirePermission('walkie:use'),
+    (req, res) => {
+      try {
+        const existing = db.prepare('SELECT * FROM walkie_calls WHERE id = ?').get(req.params.id);
+        if (!existing) {
+          return res.status(404).json({ error: 'النداء غير موجود' });
+        }
+        const canDelete =
+          req.auth.has('records:manage') ||
+          req.auth.has('users:manage') ||
+          existing.sender_id === req.auth.user.id;
+        if (!canDelete) {
+          return res.status(403).json({ error: 'غير مصرح بحذف هذا النداء' });
+        }
+        db.prepare('DELETE FROM walkie_calls WHERE id = ?').run(existing.id);
+        deleteCloudRecord(db, 'walkie_calls', existing.id);
+        return res.json({ ok: true });
+      } catch (err) {
+        return res.status(500).json({ error: err.message });
+      }
+    }
+  );
 
   // =========================================================================
   // 4E. PERSONAL PROFILE & INDIVIDUAL / MASTER LOGS

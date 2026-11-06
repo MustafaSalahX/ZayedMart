@@ -234,7 +234,7 @@ export default function QrQuickModal({
           <div class="badge-card">
             <div class="badge-info">
               <div class="badge-header">
-                <img src="${window.location.origin}/logo.jpeg" alt="${storeName}" class="badge-logo" onerror="this.style.display='none'" />
+                <img src="${window.location.origin}/Logo.png" alt="${storeName}" class="badge-logo" onerror="this.src='${window.location.origin}/logo.jpeg'" />
                 <span>${storeName} — بطاقة حضور ذكية</span>
               </div>
               <div class="badge-name">${emp.name}</div>
@@ -735,7 +735,12 @@ export default function QrQuickModal({
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5 text-[11px] font-extrabold text-[#0B57D0]">
                         <img
-                          src="/logo.jpeg"
+                          src="/Logo.png"
+                          onError={(e) => {
+                            if (e.currentTarget.src.endsWith('/Logo.png')) {
+                              e.currentTarget.src = '/logo.jpeg';
+                            }
+                          }}
                           alt={storeName}
                           className="w-5 h-5 rounded-md object-cover border border-[#DEE3EB] bg-white shrink-0"
                         />

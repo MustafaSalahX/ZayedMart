@@ -68,9 +68,16 @@ export default function PwaInstallBanner({ compact = false, onToast }) {
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 font-extrabold text-base">
-                  <span className="ms-icon filled text-xl text-[var(--g-primary)]">
-                    install_mobile
-                  </span>
+                  <img
+                    src="/Logo.png"
+                    onError={(e) => {
+                      if (e.currentTarget.src.endsWith('/Logo.png')) {
+                        e.currentTarget.src = '/logo.jpeg';
+                      }
+                    }}
+                    alt="زايد مارت"
+                    className="w-7 h-7 rounded-lg object-cover border border-[var(--g-border)] shrink-0 bg-white"
+                  />
                   <span>تثبيت تطبيق زايد مارت</span>
                 </div>
                 <button
@@ -119,9 +126,16 @@ export default function PwaInstallBanner({ compact = false, onToast }) {
     <div className="w-full max-w-md mx-auto mb-2.5">
       <div className="p-3 rounded-2xl bg-[var(--g-primary-container)]/75 border border-[var(--g-primary)]/25 flex items-center justify-between gap-2.5 shadow-2xs">
         <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-10 h-10 rounded-xl bg-[var(--g-primary)] text-white flex items-center justify-center shrink-0">
-            <span className="ms-icon filled text-xl">install_mobile</span>
-          </div>
+          <img
+            src="/Logo.png"
+            onError={(e) => {
+              if (e.currentTarget.src.endsWith('/Logo.png')) {
+                e.currentTarget.src = '/logo.jpeg';
+              }
+            }}
+            alt="زايد مارت"
+            className="w-10 h-10 rounded-xl object-cover border border-[var(--g-border)] shadow-xs shrink-0 bg-white"
+          />
           <div className="min-w-0">
             <div className="text-xs sm:text-sm font-extrabold text-[var(--g-text)] truncate">
               تثبيت تطبيق زايد مارت على الموبايل

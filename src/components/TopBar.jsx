@@ -29,6 +29,9 @@ export default function TopBar({
   onOpenQrModal,
   onOpenHandoverModal,
   onOpenProfileModal,
+  canUseWalkie = false,
+  walkieActive = false,
+  onOpenWalkieModal,
 }) {
   const [clock, setClock] = useState(() => new Date());
 
@@ -164,17 +167,23 @@ export default function TopBar({
       <div className="google-brand-bar" />
 
       <div className="max-w-7xl mx-auto px-3 sm:px-6 py-2.5 space-y-2">
-        {/* Row 1: Brand Identity (Never Truncated!) + User Badge + Logout */}
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5 min-w-0">
+        {/* Row 1: Brand Identity + User Profile + Quick System Controls */}
+        <div className="flex items-center justify-between gap-1.5 sm:gap-3 min-w-0">
+          {/* Right side in RTL: Store Brand + Real-time Sync Status + Subtitle */}
+          <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1">
             <img
-              src="/logo.jpeg"
+              src="/Logo.png"
+              onError={(e) => {
+                if (e.currentTarget.src.endsWith('/Logo.png')) {
+                  e.currentTarget.src = '/logo.jpeg';
+                }
+              }}
               alt={storeName || 'زايد مارت'}
-              className="w-11 h-11 sm:w-12 sm:h-12 rounded-2xl object-cover border border-[var(--g-border)] shadow-xs shrink-0 bg-white"
+              className="w-9 h-9 sm:w-11 sm:h-11 rounded-xl sm:rounded-2xl object-cover border border-[var(--g-border)] shadow-xs shrink-0 bg-white"
             />
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <h1 className="text-base sm:text-xl font-black tracking-tight m-0 whitespace-nowrap text-[var(--g-text)]">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                <h1 className="text-sm sm:text-lg font-black tracking-tight m-0 whitespace-nowrap text-[var(--g-text)]">
                   {storeName || 'زايد مارت'}
                 </h1>
                 <button
@@ -187,7 +196,7 @@ export default function TopBar({
                       ? 'اضغط لمزامنة الحركات المحفوظة محلياً مع السيرفر الآن'
                       : 'جميع البيانات متزامنة ومحفوظة رسمياً'
                   }
-                  className={`inline-flex items-center gap-1 text-[10px] sm:text-[11px] px-2.5 py-0.5 rounded-full font-extrabold shrink-0 transition-all active:scale-95 ${
+                  className={`inline-flex items-center gap-1 text-[10px] sm:text-[11px] px-2 sm:px-2.5 py-0.5 rounded-full font-extrabold shrink-0 transition-all active:scale-95 ${
                     isSyncing
                       ? 'bg-[var(--g-primary-container)] text-[var(--g-primary)]'
                       : connectionMode === 'offline_cached'
@@ -202,20 +211,35 @@ export default function TopBar({
                       isSyncing ? 'animate-ping' : ''
                     }`}
                   />
-                  {isSyncing
-                    ? `جاري المزامنة (${offlineQueueCount})`
-                    : connectionMode === 'offline_cached'
-                    ? `أوفلاين • محفوظ بالهاتف${offlineQueueCount > 0 ? ` (${offlineQueueCount})` : ''}`
-                    : offlineQueueCount > 0
-                    ? `بانتظار المزامنة (${offlineQueueCount})`
-                    : connectionMode === 'direct_cloud'
-                    ? 'سحابي مباشر'
-                    : 'متصل ومتزامن'}
+                  {/* Compact on mobile, full on desktop */}
+                  {isSyncing ? (
+                    <span>جاري الرفع ({offlineQueueCount})</span>
+                  ) : connectionMode === 'offline_cached' ? (
+                    <>
+                      <span className="sm:hidden">أوفلاين{offlineQueueCount > 0 ? ` (${offlineQueueCount})` : ''}</span>
+                      <span className="hidden sm:inline">أوفلاين • محفوظ بالهاتف{offlineQueueCount > 0 ? ` (${offlineQueueCount})` : ''}</span>
+                    </>
+                  ) : offlineQueueCount > 0 ? (
+                    <>
+                      <span className="sm:hidden">بانتظار النت ({offlineQueueCount})</span>
+                      <span className="hidden sm:inline">بانتظار المزامنة ({offlineQueueCount})</span>
+                    </>
+                  ) : connectionMode === 'direct_cloud' ? (
+                    <>
+                      <span className="sm:hidden">سحابي</span>
+                      <span className="hidden sm:inline">سحابي مباشر</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="sm:hidden">متصل</span>
+                      <span className="hidden sm:inline">متصل ومتزامن</span>
+                    </>
+                  )}
                 </button>
               </div>
 
-              <div className="flex items-center gap-1.5 text-[11px] sm:text-xs text-[var(--g-muted)] min-w-0 mt-0.5">
-                <span className="font-bold text-[var(--g-text)] truncate max-w-[145px] sm:max-w-none">
+              <div className="flex items-center gap-1.5 text-[10px] sm:text-xs text-[var(--g-muted)] min-w-0 mt-0.5">
+                <span className="font-bold text-[var(--g-text)] truncate max-w-[110px] sm:max-w-[200px]">
                   {authUser?.display_name || branchName || 'الفرع الرئيسي'}
                 </span>
                 <span className="hidden xs:inline">•</span>
@@ -230,21 +254,21 @@ export default function TopBar({
             </div>
           </div>
 
-          {/* Left side of Row 1: Profile + Kiosk Lock (Admin) + Clear Logout Button */}
-          <div className="flex items-center gap-1.5 shrink-0">
+          {/* Left side in RTL: Profile + Kiosk Lock + Logout (Never overlaps or crushes on mobile!) */}
+          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
             <button
               type="button"
               onClick={onOpenProfileModal}
               title="فتح بروفايلي الشخصي، كلمة المرور الخاصة بي، وسجلي الكامل"
-              className="min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] hover:border-[var(--g-primary)] flex items-center gap-1.5 active:scale-95 transition-all"
+              className="h-9 sm:min-h-[40px] px-2 sm:px-3 py-1 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] hover:border-[var(--g-primary)] flex items-center gap-1.5 active:scale-95 transition-all shrink-0"
             >
               <span
                 style={{ backgroundColor: authUser?.avatar_color || '#0B57D0' }}
-                className="w-6 h-6 rounded-full text-white flex items-center justify-center shrink-0"
+                className="w-6 h-6 rounded-full text-white flex items-center justify-center shrink-0 shadow-2xs"
               >
                 <span className="ms-icon filled text-sm">{roleIcon}</span>
               </span>
-              <span className="text-xs font-extrabold truncate max-w-[96px] sm:max-w-[140px]">
+              <span className="hidden sm:inline-block text-xs font-extrabold truncate max-w-[100px] md:max-w-[140px]">
                 {authUser?.display_name || 'بروفايلي'}
               </span>
               <span className="hidden lg:inline text-[10px] px-2 py-0.5 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] font-extrabold">
@@ -257,7 +281,7 @@ export default function TopBar({
                 type="button"
                 onClick={onLockToKiosk}
                 title="قفل الجهاز فوراً على شاشة كشك حضور العمال فقط"
-                className="min-h-[40px] px-2.5 sm:px-3.5 py-1.5 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] hover:border-[var(--g-primary)] text-xs font-extrabold flex items-center gap-1 shrink-0 active:scale-95"
+                className="w-9 h-9 sm:w-auto sm:min-h-[40px] px-0 sm:px-3 py-1 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] hover:border-[var(--g-primary)] text-xs font-extrabold flex items-center justify-center gap-1 shrink-0 active:scale-95"
               >
                 <span className="ms-icon text-base text-[#E37400]">touch_app</span>
                 <span className="hidden sm:inline">وضع الكشك</span>
@@ -268,10 +292,10 @@ export default function TopBar({
               type="button"
               onClick={onLogout}
               title="تسجيل الخروج أو تبديل الحساب"
-              className="min-h-[40px] px-3 sm:px-3.5 py-1.5 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] border border-[var(--g-red-border)]/25 text-xs font-extrabold flex items-center gap-1 shrink-0 active:scale-95"
+              className="h-9 sm:min-h-[40px] px-2.5 sm:px-3.5 py-1 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] border border-[var(--g-red-border)]/25 text-xs font-extrabold flex items-center justify-center gap-1 shrink-0 active:scale-95"
             >
               <span className="ms-icon text-base">logout</span>
-              <span>خروج</span>
+              <span className="hidden xs:inline">خروج</span>
             </button>
           </div>
         </div>
@@ -289,6 +313,23 @@ export default function TopBar({
               >
                 <span className="ms-icon filled text-base">qr_code_scanner</span>
                 <span>QR / كود</span>
+              </button>
+            )}
+
+            {canUseWalkie && (
+              <button
+                type="button"
+                onClick={onOpenWalkieModal}
+                title="فتح جهاز اللاسلكي الفوري لقناة الأمن والتيم"
+                className="min-h-[40px] px-3 py-1.5 rounded-full bg-[#0D1117] text-white border border-[#00E676]/60 text-xs font-extrabold flex items-center justify-center gap-1.5 hover:border-[#00E676] active:scale-95 shrink-0 cursor-pointer"
+              >
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    walkieActive ? 'bg-[#00E676]' : 'bg-[#64748B]'
+                  }`}
+                />
+                <span className="ms-icon filled text-base text-[#00E676]">podcasts</span>
+                <span>اللاسلكي</span>
               </button>
             )}
 

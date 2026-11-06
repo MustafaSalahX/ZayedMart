@@ -13,6 +13,8 @@ import KioskLockView from './components/KioskLockView.jsx';
 import AuthLoginScreen from './components/AuthLoginScreen.jsx';
 import ProfileModal from './components/ProfileModal.jsx';
 import PersonLogModal from './components/PersonLogModal.jsx';
+import WalkieFloatingDock from './components/WalkieFloatingDock.jsx';
+import WalkieTalkieConsole from './components/WalkieTalkieConsole.jsx';
 import {
   fetchBootstrap,
   flushOfflineQueue,
@@ -25,6 +27,7 @@ import {
   hasAnyPermission,
 } from './lib/api.js';
 import { subscribeSyncState } from './lib/localDb.js';
+import { emitWalkieSseEvent, useWalkieTalkie } from './lib/useWalkieTalkie.js';
 
 function getTodayLocalKey() {
   const d = new Date();
@@ -190,6 +193,34 @@ export default function App() {
         es.addEventListener('update', () => {
           loadData();
         });
+        es.addEventListener('walkie_tx', (ev) => {
+          try {
+            emitWalkieSseEvent('walkie_tx', JSON.parse(ev.data));
+          } catch {
+            // ignore
+          }
+        });
+        es.addEventListener('walkie_presence', (ev) => {
+          try {
+            emitWalkieSseEvent('walkie_presence', JSON.parse(ev.data));
+          } catch {
+            // ignore
+          }
+        });
+        es.addEventListener('walkie_signal', (ev) => {
+          try {
+            emitWalkieSseEvent('walkie_signal', JSON.parse(ev.data));
+          } catch {
+            // ignore
+          }
+        });
+        es.addEventListener('walkie_live_frame', (ev) => {
+          try {
+            emitWalkieSseEvent('walkie_live_frame', JSON.parse(ev.data));
+          } catch {
+            // ignore
+          }
+        });
       } catch {
         // Fallback polling
       }
@@ -232,6 +263,12 @@ export default function App() {
   const authUser = data?.auth?.user || authSession?.user || null;
   const permissions = data?.auth?.permissions || authSession?.permissions || [];
   const role = authUser?.role || '';
+
+  const walkie = useWalkieTalkie({
+    authUser: authSession?.token ? authUser : null,
+    permissions,
+    onToast: showToast,
+  });
 
   // Dark Mode applies to staff/admin, while Worker Kiosk ALWAYS stays in bright Daylight mode!
   useEffect(() => {
@@ -357,7 +394,12 @@ export default function App() {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-3 p-6 text-center">
         <img
-          src="/logo.jpeg"
+          src="/Logo.png"
+          onError={(e) => {
+            if (e.currentTarget.src.endsWith('/Logo.png')) {
+              e.currentTarget.src = '/logo.jpeg';
+            }
+          }}
           alt="زايد مارت"
           className="w-16 h-16 rounded-3xl object-cover border-2 border-[var(--g-border)] shadow-sm animate-pulse bg-white"
         />
@@ -443,7 +485,13 @@ export default function App() {
   return (
     <div
       className={`min-h-[100dvh] w-full flex flex-col overflow-x-hidden ${
-        permittedTabsCount > 1 ? 'pb-24 md:pb-6' : 'pb-6'
+        permittedTabsCount > 1
+          ? walkie.canUseWalkie
+            ? 'pb-38 md:pb-24'
+            : 'pb-24 md:pb-6'
+          : walkie.canUseWalkie
+          ? 'pb-24'
+          : 'pb-6'
       }`}
     >
       <TopBar
@@ -477,6 +525,9 @@ export default function App() {
         onOpenQrModal={() => setQrModalTab('code')}
         onOpenHandoverModal={() => setShowHandoverModal(true)}
         onOpenProfileModal={() => setShowProfileModal(true)}
+        canUseWalkie={walkie.canUseWalkie}
+        walkieActive={walkie.radioEnabled}
+        onOpenWalkieModal={() => walkie.setConsoleOpen(true)}
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-5">
@@ -581,6 +632,7 @@ export default function App() {
             teamMessages={data?.teamMessages || []}
             authUser={authUser}
             permissions={permissions}
+            walkie={walkie}
             onRefresh={loadData}
             onToast={showToast}
           />
@@ -616,6 +668,21 @@ export default function App() {
         authUser={authUser}
         permissions={permissions}
         summary={data?.summary}
+      />
+
+      {/* Floating Tactical Walkie-Talkie Quick-PTT Dock */}
+      <WalkieFloatingDock
+        walkie={walkie}
+        hasBottomNav={permittedTabsCount > 1}
+      />
+
+      {/* Full Walkie-Talkie Tactical Console Modal */}
+      <WalkieTalkieConsole
+        open={walkie.consoleOpen}
+        onClose={() => walkie.setConsoleOpen(false)}
+        walkie={walkie}
+        authUser={authUser}
+        canManageRecords={canManageRecords}
       />
 
       {/* QR Card & Quick Code Modal */}

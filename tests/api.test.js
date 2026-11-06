@@ -1163,3 +1163,308 @@ test('12-Hour Cross-Day Shift Sync, Smart Break Duration, Cashier Role & Suggest
     await ctx.close();
   }
 });
+
+test('Tactical Walkie-Talkie PTT: Security Channel Isolation, Live Presence, SSE Relay, Emergency Broadcast & Auto-Pruning', async () => {
+  const ctx = await startTestServer();
+  try {
+    const adminLogin = await loginByPassword(ctx.baseUrl, '123');
+    assert.equal(adminLogin.status, 200);
+    const ownerToken = adminLogin.json.token;
+
+    // 1. Create two Security Guards, one CCTV operator, and one Hall worker
+    const sec1Res = await fetch(`${ctx.baseUrl}/api/employees`, {
+      method: 'POST',
+      headers: authHeaders(ownerToken, true),
+      body: JSON.stringify({
+        name: 'محمود بوابة ١',
+        department: 'أمن',
+        role_title: 'فرد أمن البوابة',
+        emp_code: '701',
+      }),
+    });
+    assert.equal(sec1Res.status, 201);
+
+    const sec2Res = await fetch(`${ctx.baseUrl}/api/employees`, {
+      method: 'POST',
+      headers: authHeaders(ownerToken, true),
+      body: JSON.stringify({
+        name: 'خالد رصيف الاستلام',
+        department: 'أمن',
+        role_title: 'فرد أمن الرصيف',
+        emp_code: '702',
+      }),
+    });
+    assert.equal(sec2Res.status, 201);
+
+    const cctvRes = await fetch(`${ctx.baseUrl}/api/employees`, {
+      method: 'POST',
+      headers: authHeaders(ownerToken, true),
+      body: JSON.stringify({
+        name: 'عمرو مراقب الكاميرات',
+        department: 'مراقب كاميرات',
+        role_title: 'مراقب كاميرات',
+        emp_code: '703',
+      }),
+    });
+    assert.equal(cctvRes.status, 201);
+
+    const hallRes = await fetch(`${ctx.baseUrl}/api/employees`, {
+      method: 'POST',
+      headers: authHeaders(ownerToken, true),
+      body: JSON.stringify({
+        name: 'كريم منسق ممرات',
+        department: 'منسقي ممرات',
+        role_title: 'عامل صالة',
+        emp_code: '704',
+      }),
+    });
+    assert.equal(hallRes.status, 201);
+
+    const sec1Login = await loginByPassword(ctx.baseUrl, '701');
+    const sec2Login = await loginByPassword(ctx.baseUrl, '702');
+    const cctvLogin = await loginByPassword(ctx.baseUrl, '703');
+    const hallLogin = await loginByPassword(ctx.baseUrl, '704');
+
+    assert.equal(sec1Login.json.user.role, 'security');
+    assert.ok(sec1Login.json.permissions.includes('walkie:use'));
+    assert.ok(!sec1Login.json.permissions.includes('walkie:all_channels'));
+    assert.ok(cctvLogin.json.permissions.includes('walkie:use'));
+    assert.ok(cctvLogin.json.permissions.includes('walkie:all_channels'));
+    assert.ok(!hallLogin.json.permissions.includes('walkie:use'));
+
+    const sec1Token = sec1Login.json.token;
+    const sec2Token = sec2Login.json.token;
+    const cctvToken = cctvLogin.json.token;
+    const hallToken = hallLogin.json.token;
+
+    // 2. Hall worker & Kiosk device are strictly blocked (403 FORBIDDEN) from Walkie-Talkie
+    const hallPoll = await fetch(`${ctx.baseUrl}/api/walkie/poll?channel=security`, {
+      headers: authHeaders(hallToken),
+    });
+    assert.equal(hallPoll.status, 403);
+
+    // 3. Security Guard 1 starts holding PTT ('talking') -> Security Guard 2 sees live talking presence!
+    const presTalkingRes = await fetch(`${ctx.baseUrl}/api/walkie/presence`, {
+      method: 'POST',
+      headers: authHeaders(sec1Token, true),
+      body: JSON.stringify({ channel: 'security', status: 'talking' }),
+    });
+    assert.equal(presTalkingRes.status, 200);
+
+    const sec2InitialPoll = await (
+      await fetch(`${ctx.baseUrl}/api/walkie/poll?channel=security&listening=1`, {
+        headers: authHeaders(sec2Token),
+      })
+    ).json();
+    assert.equal(sec2InitialPoll.ok, true);
+    assert.deepEqual(sec2InitialPoll.allowedChannels, ['security']);
+    const talkingUnit = sec2InitialPoll.activeUnits.find((u) => u.display_name === 'محمود بوابة ١');
+    assert.ok(talkingUnit, 'Guard 1 appears in activeUnits');
+    assert.equal(talkingUnit.status, 'talking');
+
+    // 4. Open live SSE stream for Security Guard 2 and verify instant walkie_tx push when Guard 1 transmits
+    const sseController = new AbortController();
+    const sseResponse = await fetch(
+      `${ctx.baseUrl}/api/events?token=${encodeURIComponent(sec2Token)}`,
+      { signal: sseController.signal }
+    );
+    assert.equal(sseResponse.status, 200);
+    const reader = sseResponse.body.getReader();
+    const decoder = new TextDecoder();
+    // Read initial connected frame
+    await reader.read();
+
+    const sampleOpusDataUrl =
+      'data:audio/webm;codecs=opus;base64,GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQRChYECGFOAZwH/////////';
+
+    const txRes = await fetch(`${ctx.baseUrl}/api/walkie/transmit`, {
+      method: 'POST',
+      headers: authHeaders(sec1Token, true),
+      body: JSON.stringify({
+        channel: 'security',
+        kind: 'voice',
+        audio_data: sampleOpusDataUrl,
+        duration_sec: 4.2,
+      }),
+    });
+    assert.equal(txRes.status, 201);
+    const txJson = await txRes.json();
+    assert.equal(txJson.call.channel, 'security');
+    assert.equal(txJson.call.sender_name, 'محمود بوابة ١');
+    assert.equal(txJson.call.duration_sec, 4.2);
+
+    const sseChunk = await reader.read();
+    const sseText = decoder.decode(sseChunk.value);
+    assert.ok(sseText.includes('event: walkie_tx'), 'SSE pushes walkie_tx immediately to Security Guard 2');
+    assert.ok(sseText.includes('محمود بوابة ١'));
+    sseController.abort();
+
+    // 5. Security Guard 1 cannot transmit on 'warehouse' channel (isolated to 'security' channel!)
+    const secWrongChannel = await fetch(`${ctx.baseUrl}/api/walkie/transmit`, {
+      method: 'POST',
+      headers: authHeaders(sec1Token, true),
+      body: JSON.stringify({
+        channel: 'warehouse',
+        kind: 'voice',
+        audio_data: sampleOpusDataUrl,
+        duration_sec: 2.0,
+      }),
+    });
+    assert.equal(secWrongChannel.status, 403);
+
+    // 6. CCTV operator (walkie:all_channels) sends an urgent Call-Tone ping on 'emergency' -> Security Guard 2 receives it!
+    const pingRes = await fetch(`${ctx.baseUrl}/api/walkie/transmit`, {
+      method: 'POST',
+      headers: authHeaders(cctvToken, true),
+      body: JSON.stringify({
+        channel: 'emergency',
+        kind: 'ping',
+        is_emergency: true,
+      }),
+    });
+    assert.equal(pingRes.status, 201);
+
+    const sec2DeltaPoll = await (
+      await fetch(
+        `${ctx.baseUrl}/api/walkie/poll?channel=security&since=${encodeURIComponent(txJson.call.timestamp)}`,
+        { headers: authHeaders(sec2Token) }
+      )
+    ).json();
+    assert.equal(sec2DeltaPoll.calls.length, 1);
+    assert.equal(sec2DeltaPoll.calls[0].kind, 'ping');
+    assert.equal(sec2DeltaPoll.calls[0].sender_name, 'عمرو مراقب الكاميرات');
+
+    // 7. Auto-pruning keeps at most 25 calls per channel
+    for (let i = 0; i < 28; i++) {
+      const r = await fetch(`${ctx.baseUrl}/api/walkie/transmit`, {
+        method: 'POST',
+        headers: authHeaders(sec1Token, true),
+        body: JSON.stringify({
+          channel: 'security',
+          kind: 'voice',
+          audio_data: sampleOpusDataUrl,
+          duration_sec: 1.2,
+        }),
+      });
+      assert.equal(r.status, 201);
+    }
+    const countRow = ctx.db
+      .prepare("SELECT COUNT(*) as c FROM walkie_calls WHERE channel = 'security'")
+      .get();
+    assert.equal(countRow.c, 25, 'Channel history auto-pruned to max 25 clips');
+
+    // 8. LIVE INTERCOM v2: WebRTC Mesh Signaling (/api/walkie/signal) + Simultaneous Live Audio Relay (/api/walkie/live-frame)
+    const liveSseController = new AbortController();
+    const liveSseRes = await fetch(
+      `${ctx.baseUrl}/api/events?token=${encodeURIComponent(sec2Token)}`,
+      { signal: liveSseController.signal }
+    );
+    const liveReader = liveSseRes.body.getReader();
+    await liveReader.read(); // consume initial 'connected' frame
+
+    // Guard 2 joins Live Channel with peer_sec2
+    const joinSec2 = await fetch(`${ctx.baseUrl}/api/walkie/signal`, {
+      method: 'POST',
+      headers: authHeaders(sec2Token, true),
+      body: JSON.stringify({
+        channel: 'security',
+        peer_id: 'peer_sec2',
+        signal_type: 'join',
+        data: { mic_mode: 'vad' },
+      }),
+    });
+    assert.equal(joinSec2.status, 200);
+    await liveReader.read(); // consume join broadcast
+
+    // Guard 1 sends targeted WebRTC SDP offer to peer_sec2
+    const offerRes = await fetch(`${ctx.baseUrl}/api/walkie/signal`, {
+      method: 'POST',
+      headers: authHeaders(sec1Token, true),
+      body: JSON.stringify({
+        channel: 'security',
+        peer_id: 'peer_sec1',
+        target_peer_id: 'peer_sec2',
+        signal_type: 'offer',
+        data: { sdp: { type: 'offer', sdp: 'v=0\r\n' } },
+      }),
+    });
+    assert.equal(offerRes.status, 200);
+
+    const sigSseChunk = await liveReader.read();
+    const sigSseText = decoder.decode(sigSseChunk.value);
+    assert.ok(sigSseText.includes('event: walkie_signal'), 'SSE delivers WebRTC offer signal in real time');
+    assert.ok(sigSseText.includes('peer_sec1'));
+
+    // Poll inbox also delivers targeted offer if a client is polling without SSE
+    const sec2SignalPoll = await (
+      await fetch(
+        `${ctx.baseUrl}/api/walkie/poll?channel=security&listening=1&live_on=1&peer_id=peer_sec2`,
+        { headers: authHeaders(sec2Token) }
+      )
+    ).json();
+    assert.equal(sec2SignalPoll.signals.length, 1);
+    assert.equal(sec2SignalPoll.signals[0].signal_type, 'offer');
+    const baselineFrameSeq = sec2SignalPoll.latestFrameSeq;
+
+    // Guard 1 & CCTV transmit live 250ms μ-law frames AT THE SAME TIME -> Guard 2 receives both simultaneously!
+    const sampleMuLawFrame = Buffer.alloc(400, 0x7f).toString('base64');
+    const [frame1Res, frame2Res] = await Promise.all([
+      fetch(`${ctx.baseUrl}/api/walkie/live-frame`, {
+        method: 'POST',
+        headers: authHeaders(sec1Token, true),
+        body: JSON.stringify({
+          channel: 'security',
+          peer_id: 'peer_sec1',
+          sample_rate: 8000,
+          ulaw_b64: sampleMuLawFrame,
+        }),
+      }),
+      fetch(`${ctx.baseUrl}/api/walkie/live-frame`, {
+        method: 'POST',
+        headers: authHeaders(cctvToken, true),
+        body: JSON.stringify({
+          channel: 'security',
+          peer_id: 'peer_cctv',
+          sample_rate: 8000,
+          ulaw_b64: sampleMuLawFrame,
+        }),
+      }),
+    ]);
+    assert.equal(frame1Res.status, 200);
+    assert.equal(frame2Res.status, 200);
+
+    const frameSseChunk = await liveReader.read();
+    const frameSseText = decoder.decode(frameSseChunk.value);
+    assert.ok(
+      frameSseText.includes('event: walkie_live_frame'),
+      'SSE streams live audio frames immediately'
+    );
+    liveSseController.abort();
+
+    const sec2FramesPoll = await (
+      await fetch(
+        `${ctx.baseUrl}/api/walkie/poll?channel=security&listening=1&live_on=1&peer_id=peer_sec2&last_frame_seq=${baselineFrameSeq}`,
+        { headers: authHeaders(sec2Token) }
+      )
+    ).json();
+    assert.equal(
+      sec2FramesPoll.liveFrames.length,
+      2,
+      'Both simultaneous speakers frames are delivered together without blocking each other'
+    );
+
+    // Security Guard 1 cannot stream live frames on 'warehouse' channel (RBAC isolated!)
+    const secForbiddenLive = await fetch(`${ctx.baseUrl}/api/walkie/live-frame`, {
+      method: 'POST',
+      headers: authHeaders(sec1Token, true),
+      body: JSON.stringify({
+        channel: 'warehouse',
+        peer_id: 'peer_sec1',
+        ulaw_b64: sampleMuLawFrame,
+      }),
+    });
+    assert.equal(secForbiddenLive.status, 403);
+  } finally {
+    await ctx.close();
+  }
+});

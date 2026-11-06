@@ -37,6 +37,8 @@ export const ALL_PERMISSION_IDS = [
   'handover:manage',
   'chat:read',
   'chat:write',
+  'walkie:use',
+  'walkie:all_channels',
   'profile:view',
   'reports:view',
   'reports:export',
@@ -1071,4 +1073,209 @@ export async function togglePinTeamMessage(id) {
 
 export async function deleteTeamMessage(id) {
   return apiRequest(`/api/team-messages/${encodeURIComponent(id)}`, 'DELETE');
+}
+
+// ============================================================================
+// WALKIE-TALKIE (PUSH-TO-TALK RADIO API & DIRECT CLOUD REALTIME)
+// ============================================================================
+
+export function createWalkieRealtimeChannel(channelName = 'zayed_walkie_live_v1') {
+  const supabase = getSupabaseDirectClient();
+  if (!supabase) return null;
+  try {
+    return {
+      supabase,
+      channel: supabase.channel(channelName, {
+        config: { broadcast: { self: false } },
+      }),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function updateWalkiePresence(payload) {
+  try {
+    const res = await fetch('/api/walkie/presence', {
+      method: 'POST',
+      headers: buildHeaders(true),
+      body: JSON.stringify(payload || {}),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      return await res.json();
+    }
+    if (res.status === 404) {
+      return { ok: false, routeMissing: true, activeUnits: [] };
+    }
+    if (res.status === 401 && contentType.includes('application/json')) {
+      notifyAuthInvalidated();
+    }
+    return { ok: false, activeUnits: [] };
+  } catch {
+    return { ok: false, activeUnits: [] };
+  }
+}
+
+export async function sendWalkieSignal(payload) {
+  try {
+    const res = await fetch('/api/walkie/signal', {
+      method: 'POST',
+      headers: buildHeaders(true),
+      body: JSON.stringify(payload || {}),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      return await res.json();
+    }
+    if (res.status === 404) {
+      return { ok: false, routeMissing: true };
+    }
+    if (res.status === 401 && contentType.includes('application/json')) {
+      notifyAuthInvalidated();
+    }
+    return { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function sendWalkieLiveFrame(payload) {
+  try {
+    const res = await fetch('/api/walkie/live-frame', {
+      method: 'POST',
+      headers: buildHeaders(true),
+      body: JSON.stringify(payload || {}),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      return await res.json();
+    }
+    if (res.status === 404) {
+      return { ok: false, routeMissing: true };
+    }
+    return { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function transmitWalkieCall(payload) {
+  const callId = payload?.id || makeClientUuid();
+  const finalPayload = { ...payload, id: callId };
+  try {
+    const res = await fetch('/api/walkie/transmit', {
+      method: 'POST',
+      headers: buildHeaders(true),
+      body: JSON.stringify(finalPayload),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      return await res.json();
+    }
+    if (getDirectCloudCredentials() && !contentType.includes('application/json')) {
+      const supabase = getSupabaseDirectClient();
+      if (supabase) {
+        const session = getCachedAuthSession();
+        const now = new Date();
+        const row = {
+          id: callId,
+          channel: finalPayload.channel || 'security',
+          kind: finalPayload.kind || 'voice',
+          sender_id: session?.user?.id || 'cloud_owner',
+          sender_name: session?.user?.display_name || 'الأمن',
+          sender_role: session?.user?.role || 'security',
+          audio_data: finalPayload.audio_data || '',
+          mime_type: finalPayload.mime_type || 'audio/webm',
+          duration_sec: Number(finalPayload.duration_sec) || 0,
+          is_emergency: finalPayload.is_emergency ? 1 : 0,
+          timestamp: now.toISOString(),
+          date_key: getLocalDateKey(now),
+          synced: 1,
+        };
+        await supabase.from('walkie_calls').upsert(row, { onConflict: 'id' });
+        return { ok: true, call: row, activeUnits: [] };
+      }
+    }
+    const errJson = contentType.includes('application/json') ? await res.json() : {};
+    if (res.status === 401) notifyAuthInvalidated();
+    throw new Error(errJson.error || 'تعذر إرسال النداء اللاسلكي');
+  } catch (err) {
+    throw new Error(err.message || 'تعذر إرسال النداء — تحقق من الاتصال بالشبكة');
+  }
+}
+
+export async function pollWalkieChannel({
+  channel = 'security',
+  since = '',
+  listening = true,
+  peerId = '',
+  liveOn = false,
+  lastFrameSeq = undefined,
+} = {}) {
+  const params = new URLSearchParams();
+  params.set('channel', channel);
+  if (since) params.set('since', since);
+  if (listening) params.set('listening', '1');
+  if (peerId) params.set('peer_id', peerId);
+  if (liveOn) params.set('live_on', '1');
+  if (lastFrameSeq !== undefined && lastFrameSeq !== null && lastFrameSeq !== '') {
+    params.set('last_frame_seq', String(lastFrameSeq));
+  }
+
+  try {
+    const res = await fetch(`/api/walkie/poll?${params.toString()}`, {
+      headers: buildHeaders(false),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      return await res.json();
+    }
+    if (res.status === 404) {
+      return {
+        ok: false,
+        routeMissing: true,
+        calls: [],
+        signals: [],
+        liveFrames: [],
+        activeUnits: [],
+      };
+    }
+    if (res.status === 401 && contentType.includes('application/json')) {
+      notifyAuthInvalidated();
+      return { ok: false, calls: [], signals: [], liveFrames: [], activeUnits: [] };
+    }
+    if (getDirectCloudCredentials() && !contentType.includes('application/json')) {
+      const supabase = getSupabaseDirectClient();
+      if (supabase) {
+        let query = supabase
+          .from('walkie_calls')
+          .select('*')
+          .or(`channel.eq.${channel},channel.eq.emergency`);
+        if (since) {
+          query = query.gt('timestamp', since).order('timestamp', { ascending: true }).limit(20);
+        } else {
+          query = query.order('timestamp', { ascending: false }).limit(20);
+        }
+        const { data } = await query;
+        return {
+          ok: true,
+          serverTime: new Date().toISOString(),
+          channel,
+          allowedChannels: ['security', 'warehouse', 'floor', 'emergency'],
+          calls: data || [],
+          signals: [],
+          liveFrames: [],
+          activeUnits: [],
+        };
+      }
+    }
+    return { ok: false, calls: [], signals: [], liveFrames: [], activeUnits: [] };
+  } catch {
+    return { ok: false, calls: [], signals: [], liveFrames: [], activeUnits: [] };
+  }
+}
+
+export async function deleteWalkieCall(id) {
+  return apiRequest(`/api/walkie/calls/${encodeURIComponent(id)}`, 'DELETE');
 }

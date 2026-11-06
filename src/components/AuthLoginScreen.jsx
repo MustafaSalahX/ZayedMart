@@ -93,7 +93,12 @@ export default function AuthLoginScreen({
           {/* Brand Identity */}
           <div className="text-center space-y-1">
             <img
-              src="/logo.jpeg"
+              src="/Logo.png"
+              onError={(e) => {
+                if (e.currentTarget.src.endsWith('/Logo.png')) {
+                  e.currentTarget.src = '/logo.jpeg';
+                }
+              }}
               alt={storeInfo.store_name || 'زايد مارت'}
               className="w-16 h-16 sm:w-20 sm:h-20 mx-auto rounded-2xl sm:rounded-3xl object-cover border-2 border-[var(--g-border)] shadow-sm bg-white"
             />
