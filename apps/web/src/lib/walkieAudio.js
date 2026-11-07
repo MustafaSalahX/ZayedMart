@@ -1,12 +1,15 @@
 /**
- * محرك الصوت التكتيكي والخط الحي بالخلفية للاسلكي زايد مارت (v2 Live Intercom & Background Carrier)
- * - صفر تحذيرات AudioContext (لا يُنشأ إلا بعد نقرة مستخدم معتمدة Click / Keydown / Touchend)
- * - حامل صوتي مستمر بالخلفية (MediaStreamDestination -> HTMLAudioElement + MediaSession Lock-Screen)
- * - ترميز وفك ترميز صوتي حي فوري متعدد المتحدثين (Stateless 8kHz μ-law Jitter-Buffered Mixer)
+ * محرك الصوت التكتيكي والخط الحي بالخلفية للاسلكي زايد مارت (v3 Police Dispatch & Loudspeaker Boost)
+ * - مخرج صوتي مزدوج دائم (WebAudio Destination المباشر + حامل الخلفية MediaStreamDestination) لمنع انقطاع الصوت عند فتح المايك على الموبايل
+ * - مضخم صوت لاسلكي تكتيكي (DynamicsCompressor + 2.35x Loudspeaker Gain) لرفع صوت السماعة الخارجية على الهاتف
+ * - محول فوري من إطارات 8kHz μ-law إلى ملف صوتي قياسي (WAV 16-bit PCM) متوافق 100% مع أندرويد وآيفون والكمبيوتر
+ * - صافرة طوارئ الشرطة (Tetra Emergency Siren) + إشعارات النظام بالخلفية وقفل الشاشة
  */
 
 let sharedAudioCtx = null;
 let masterBusGain = null;
+let masterCompressor = null;
+let masterPostGain = null;
 let activeWakeLock = null;
 let userGestureConfirmed = false;
 
@@ -63,49 +66,96 @@ export function getSharedAudioContext({ allowCreateWithoutCheck = false } = {}) 
     try {
       sharedAudioCtx = new AudioCtx({ latencyHint: 'interactive' });
       masterBusGain = null;
+      masterCompressor = null;
+      masterPostGain = null;
     } catch {
       return null;
     }
   }
 
-  if (sharedAudioCtx.state === 'suspended' && (allowCreateWithoutCheck || hasStickyUserActivation())) {
+  if (sharedAudioCtx.state === 'suspended') {
     sharedAudioCtx.resume().catch(() => {});
   }
 
   return sharedAudioCtx;
 }
 
-function getOutputDestination(ctx) {
-  if (!ctx) return null;
-  if (!masterBusGain || masterBusGain.context !== ctx) {
-    masterBusGain = ctx.createGain();
-    masterBusGain.gain.value = 1.0;
-    if (bgCarrier.usingCarrierOutput && bgCarrier.streamDest) {
-      masterBusGain.connect(bgCarrier.streamDest);
-    } else {
-      masterBusGain.connect(ctx.destination);
+/**
+ * يضمن دائماً توصيل الصوت إلى سماعة الجهاز المباشرة (ctx.destination) بالإضافة إلى حامل الخلفية (streamDest)
+ * حتى لا ينقطع الصوت أبداً على الهواتف عند فتح المايكروفون (getUserMedia).
+ */
+export function getOutputDestination(ctx) {
+  const targetCtx = ctx || getSharedAudioContext({ allowCreateWithoutCheck: true });
+  if (!targetCtx) return null;
+
+  if (!masterBusGain || masterBusGain.context !== targetCtx) {
+    masterBusGain = targetCtx.createGain();
+    masterBusGain.gain.value = 1.35;
+
+    try {
+      masterCompressor = targetCtx.createDynamicsCompressor();
+      masterCompressor.threshold.value = -24;
+      masterCompressor.knee.value = 12;
+      masterCompressor.ratio.value = 6;
+      masterCompressor.attack.value = 0.003;
+      masterCompressor.release.value = 0.15;
+
+      masterPostGain = targetCtx.createGain();
+      masterPostGain.gain.value = 2.15;
+
+      masterBusGain.connect(masterCompressor);
+      masterCompressor.connect(masterPostGain);
+    } catch {
+      masterCompressor = null;
+      masterPostGain = masterBusGain;
     }
+
+    rewireMasterBusOutput();
   }
   return masterBusGain;
 }
 
 function rewireMasterBusOutput() {
   const ctx = sharedAudioCtx;
-  if (!ctx || !masterBusGain) return;
+  const outNode = masterPostGain || masterBusGain;
+  if (!ctx || !outNode) return;
   try {
-    masterBusGain.disconnect();
+    outNode.disconnect();
   } catch {
     // ignore
   }
-  if (bgCarrier.usingCarrierOutput && bgCarrier.streamDest) {
-    masterBusGain.connect(bgCarrier.streamDest);
-  } else {
-    masterBusGain.connect(ctx.destination);
+  // 1. ALWAYS connect directly to hardware speaker destination so mobile getUserMedia never mutes WebAudio!
+  try {
+    outNode.connect(ctx.destination);
+  } catch {
+    // ignore
+  }
+  // 2. Also connect in parallel to background carrier stream when active for lock-screen / background playback
+  if (bgCarrier.usingCarrierOutput && bgCarrier.streamDest && bgCarrier.streamDest.context === ctx) {
+    try {
+      outNode.connect(bgCarrier.streamDest);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export function ensureAudioPipelineResumed() {
+  try {
+    const ctx = getSharedAudioContext({ allowCreateWithoutCheck: true });
+    if (ctx && ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+    if (bgCarrier.active && bgCarrier.audioEl && bgCarrier.audioEl.paused) {
+      bgCarrier.audioEl.play().catch(() => {});
+    }
+  } catch {
+    // ignore
   }
 }
 
 /**
- * يُستدعى فقط داخل حدث تفاعل معتمد (click / touchend / keydown) لفتح محرك الصوت بدون أي تحذيرات
+ * يُستدعى داخل أي تفاعل مستخدم لفتح محرك الصوت وطلب صلاحية الإشعارات بالخلفية
  */
 export function unlockWalkieAudio({ fromTrustedGesture = false } = {}) {
   if (fromTrustedGesture) {
@@ -119,14 +169,29 @@ export function unlockWalkieAudio({ fromTrustedGesture = false } = {}) {
     if (ctx.state === 'suspended') {
       ctx.resume().catch(() => {});
     }
+    getOutputDestination(ctx);
     const buf = ctx.createBuffer(1, 1, 22050);
     const src = ctx.createBufferSource();
     src.buffer = buf;
     src.connect(ctx.destination);
     src.start(0);
+    if (bgCarrier.active && bgCarrier.audioEl && bgCarrier.audioEl.paused) {
+      bgCarrier.audioEl.play().catch(() => {});
+    }
     return ctx;
   } catch {
     return null;
+  }
+}
+
+export async function requestWalkieNotificationPermission() {
+  if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported';
+  try {
+    if (Notification.permission === 'granted') return 'granted';
+    if (Notification.permission === 'denied') return 'denied';
+    return await Notification.requestPermission();
+  } catch {
+    return 'default';
   }
 }
 
@@ -142,11 +207,12 @@ export function triggerHaptic(pattern = [35]) {
 
 /**
  * تشغيل حامل الصوت المستمر في الخلفية + شاشة القفل (MediaSession + HTMLAudioElement Carrier)
- * يضمن عدم إيقاف المتصفح للصوت الحي أو المايكروفون عند تصغير الشاشة أو قفل الموبايل
+ * يضمن عدم إيقاف المتصفح للصوت الحي أو الاستقبال التلقائي عند تصغير الشاشة أو قفل الموبايل
  */
 export async function startBackgroundRadioCarrier({
   channelLabel = 'قناة الأمن والبوابة',
   channelCode = 'CH-01',
+  speakerText = 'وضع الاستقبال التلقائي كالشرطة نشط بالخلفية',
   onToggleMicMute,
   onPowerOff,
 } = {}) {
@@ -156,20 +222,20 @@ export async function startBackgroundRadioCarrier({
 
   try {
     if (ctx.state === 'suspended') {
-      await ctx.resume();
+      await ctx.resume().catch(() => {});
     }
 
     if (!bgCarrier.streamDest || bgCarrier.streamDest.context !== ctx) {
       bgCarrier.streamDest = ctx.createMediaStreamDestination();
     }
 
-    // Sub-audible 22Hz carrier at 0.00008 gain prevents mobile OS hardware DSP from suspending "digital zero" streams
+    // Sub-audible 22Hz carrier at 0.00012 gain prevents mobile OS hardware DSP from suspending "digital zero" streams
     if (!bgCarrier.osc) {
       const osc = ctx.createOscillator();
       const oscGain = ctx.createGain();
       osc.type = 'sine';
       osc.frequency.value = 22;
-      oscGain.gain.value = 0.00008;
+      oscGain.gain.value = 0.00012;
       osc.connect(oscGain);
       oscGain.connect(bgCarrier.streamDest);
       osc.start();
@@ -192,15 +258,17 @@ export async function startBackgroundRadioCarrier({
       bgCarrier.audioEl.srcObject = bgCarrier.streamDest.stream;
     }
 
-    await bgCarrier.audioEl.play();
     bgCarrier.active = true;
     bgCarrier.usingCarrierOutput = true;
+    getOutputDestination(ctx);
     rewireMasterBusOutput();
+
+    await bgCarrier.audioEl.play().catch(() => {});
 
     updateBackgroundRadioMediaSession({
       channelLabel,
       channelCode,
-      speakerText: 'الخط الحي مفتوح بالخلفية — جاهز للتحدث والاستماع',
+      speakerText,
       onToggleMicMute,
       onPowerOff,
     });
@@ -224,7 +292,7 @@ export function updateBackgroundRadioMediaSession({
   try {
     if (typeof MediaMetadata !== 'undefined') {
       navigator.mediaSession.metadata = new MediaMetadata({
-        title: `لاسلكي زايد مارت (${channelCode} LIVE)`,
+        title: `لاسلكي زايد مارت (${channelCode})`,
         artist: speakerText,
         album: channelLabel,
         artwork: [
@@ -244,12 +312,11 @@ export function updateBackgroundRadioMediaSession({
     };
 
     safeSetHandler('play', () => {
-      bgCarrier.audioEl?.play?.().catch(() => {});
+      ensureAudioPipelineResumed();
       onToggleMicMute?.(false);
     });
     safeSetHandler('pause', () => {
-      // On headset tap, toggle mic mute while keeping carrier stream alive!
-      bgCarrier.audioEl?.play?.().catch(() => {});
+      ensureAudioPipelineResumed();
       onToggleMicMute?.();
     });
     safeSetHandler('stop', () => {
@@ -338,6 +405,80 @@ export function decodeMuLawBase64ToFloat32(ulawB64) {
   }
 }
 
+/**
+ * تحويل إطارات G.711 μ-law الملتقطة أثناء التحدث إلى مقطع WAV قياسي (16-bit PCM RIFF WAV DataURL)
+ * يعمل على جميع الهواتف (Android / iPhone / PC) بنسبة 100% لضمان سماع النداء حتى لو فاتت إطارات البث الحي.
+ */
+export function encodeMuLawFramesToWavDataUrl(ulawFrames = [], sampleRate = 8000) {
+  if (!Array.isArray(ulawFrames) || ulawFrames.length === 0 || typeof btoa !== 'function') {
+    return '';
+  }
+  try {
+    const decodedChunks = [];
+    let totalSamples = 0;
+    const maxSamples = sampleRate * 28; // Cap at 28s so payload stays compact (<450KB)
+
+    for (const b64 of ulawFrames) {
+      const f32 = decodeMuLawBase64ToFloat32(b64);
+      if (f32 && f32.length > 0) {
+        decodedChunks.push(f32);
+        totalSamples += f32.length;
+        if (totalSamples >= maxSamples) break;
+      }
+    }
+
+    if (totalSamples < sampleRate * 0.35) {
+      return '';
+    }
+
+    const bytesPerSample = 2; // 16-bit PCM
+    const dataByteLength = totalSamples * bytesPerSample;
+    const buffer = new ArrayBuffer(44 + dataByteLength);
+    const view = new DataView(buffer);
+
+    const writeAscii = (offset, str) => {
+      for (let i = 0; i < str.length; i++) {
+        view.setUint8(offset + i, str.charCodeAt(i));
+      }
+    };
+
+    writeAscii(0, 'RIFF');
+    view.setUint32(4, 36 + dataByteLength, true);
+    writeAscii(8, 'WAVE');
+    writeAscii(12, 'fmt ');
+    view.setUint32(16, 16, true); // PCM chunk size
+    view.setUint16(20, 1, true); // PCM format = 1
+    view.setUint16(22, 1, true); // Mono = 1 channel
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * bytesPerSample, true);
+    view.setUint16(32, bytesPerSample, true);
+    view.setUint16(34, 16, true); // 16 bits per sample
+    writeAscii(36, 'data');
+    view.setUint32(40, dataByteLength, true);
+
+    let byteOffset = 44;
+    for (const chunk of decodedChunks) {
+      for (let i = 0; i < chunk.length; i++) {
+        // Apply gentle 1.35x speech normalization before 16-bit quantization
+        const s = Math.max(-1, Math.min(1, chunk[i] * 1.35));
+        const int16 = s < 0 ? Math.round(s * 0x8000) : Math.round(s * 0x7fff);
+        view.setInt16(byteOffset, int16, true);
+        byteOffset += 2;
+      }
+    }
+
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const step = 0x4000;
+    for (let i = 0; i < bytes.length; i += step) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+    }
+    return `data:audio/wav;base64,${btoa(binary)}`;
+  } catch {
+    return '';
+  }
+}
+
 export function computeBarsFromRms(rms) {
   const norm = Math.min(1, Math.max(0, rms * 5.2));
   if (norm < 0.03) return IDLE_BAR_LEVELS;
@@ -349,18 +490,16 @@ export function computeBarsFromRms(rms) {
 }
 
 /**
- * تشغيل فوري متزامن لإطار صوتي حي وارد (250ms μ-law) مع دعم تعدد المتحدثين في نفس اللحظة
+ * تشغيل فوري متزامن لإطار صوتي حي وارد (250ms μ-law) مع مضخم صوت السماعة الخارجية للهاتف
  */
 export function playIncomingLiveMuLawFrame(
   peerKey,
   ulawB64,
-  { sampleRate = 8000, onLevel } = {}
+  { sampleRate = 8000, isEmergency = false, onLevel } = {}
 ) {
-  const ctx = getSharedAudioContext();
+  ensureAudioPipelineResumed();
+  const ctx = getSharedAudioContext({ allowCreateWithoutCheck: true });
   if (!ctx || !ulawB64) return false;
-  if (ctx.state === 'suspended' && hasStickyUserActivation()) {
-    ctx.resume().catch(() => {});
-  }
 
   const samples = decodeMuLawBase64ToFloat32(ulawB64);
   if (!samples || samples.length === 0) return false;
@@ -371,11 +510,11 @@ export function playIncomingLiveMuLawFrame(
   const key = peerKey || 'default_peer';
   const now = ctx.currentTime;
   let sched = peerScheduleMap.get(key);
-  const isNewBurst = !sched || sched.nextTime < now - 0.15;
+  const isNewBurst = !sched || sched.nextTime < now - 0.18;
 
   if (!sched || sched.nextTime < now + 0.01) {
-    // 95ms jitter cushion on burst start keeps continuous 250ms packets silky smooth
-    sched = { nextTime: now + 0.095, lastFrameAtMs: Date.now() };
+    // 85ms jitter cushion on burst start keeps continuous 250ms packets silky smooth
+    sched = { nextTime: now + 0.085, lastFrameAtMs: Date.now() };
   }
 
   // Gentle 2.5ms anti-click ramp at the start of a new speech burst
@@ -384,7 +523,11 @@ export function playIncomingLiveMuLawFrame(
     for (let i = 0; i < fadeSamples; i++) {
       samples[i] *= i / fadeSamples;
     }
-    playIncomingRxChirp({ subtle: true });
+    if (isEmergency) {
+      playIncomingRxChirp({ subtle: false });
+    } else {
+      playIncomingRxChirp({ subtle: true });
+    }
   }
 
   try {
@@ -394,15 +537,20 @@ export function playIncomingLiveMuLawFrame(
     const src = ctx.createBufferSource();
     src.buffer = audioBuf;
 
-    // Band-limit gently around 3.6kHz for crisp Motorola voice clarity without high-frequency aliasing
+    // Crisp Police Radio voice filter (highpass 220Hz removes rumble, lowpass 3700Hz removes hiss)
+    const hpFilter = ctx.createBiquadFilter();
+    hpFilter.type = 'highpass';
+    hpFilter.frequency.value = 220;
+
     const lpFilter = ctx.createBiquadFilter();
     lpFilter.type = 'lowpass';
-    lpFilter.frequency.value = 3650;
+    lpFilter.frequency.value = 3700;
 
     const boostGain = ctx.createGain();
-    boostGain.gain.value = 1.25;
+    boostGain.gain.value = isEmergency ? 2.1 : 1.65;
 
-    src.connect(lpFilter);
+    src.connect(hpFilter);
+    hpFilter.connect(lpFilter);
     lpFilter.connect(boostGain);
     boostGain.connect(dest);
 
@@ -434,8 +582,9 @@ export function playIncomingLiveMuLawFrame(
  */
 export function playPttStartChirp() {
   triggerHaptic([35]);
+  ensureAudioPipelineResumed();
   try {
-    const ctx = getSharedAudioContext();
+    const ctx = getSharedAudioContext({ allowCreateWithoutCheck: true });
     const dest = getOutputDestination(ctx);
     if (!ctx || !dest) return;
     const now = ctx.currentTime;
@@ -450,7 +599,7 @@ export function playPttStartChirp() {
       osc.type = 'sine';
       osc.frequency.setValueAtTime(t.freq, now + t.start);
       gain.gain.setValueAtTime(0.001, now + t.start);
-      gain.gain.linearRampToValueAtTime(0.16, now + t.start + 0.006);
+      gain.gain.linearRampToValueAtTime(0.18, now + t.start + 0.006);
       gain.gain.exponentialRampToValueAtTime(0.001, now + t.start + t.dur);
       osc.connect(gain);
       gain.connect(dest);
@@ -467,8 +616,9 @@ export function playPttStartChirp() {
  */
 export function playPttEndSquelch() {
   triggerHaptic([20]);
+  ensureAudioPipelineResumed();
   try {
-    const ctx = getSharedAudioContext();
+    const ctx = getSharedAudioContext({ allowCreateWithoutCheck: true });
     const dest = getOutputDestination(ctx);
     if (!ctx || !dest) return;
     const now = ctx.currentTime;
@@ -478,7 +628,7 @@ export function playPttEndSquelch() {
     osc.type = 'triangle';
     osc.frequency.setValueAtTime(1180, now);
     beepGain.gain.setValueAtTime(0.001, now);
-    beepGain.gain.linearRampToValueAtTime(0.12, now + 0.008);
+    beepGain.gain.linearRampToValueAtTime(0.14, now + 0.008);
     beepGain.gain.exponentialRampToValueAtTime(0.001, now + 0.055);
     osc.connect(beepGain);
     beepGain.connect(dest);
@@ -500,7 +650,7 @@ export function playPttEndSquelch() {
     filter.Q.setValueAtTime(1.4, now + 0.05);
 
     const noiseGain = ctx.createGain();
-    noiseGain.gain.setValueAtTime(0.08, now + 0.05);
+    noiseGain.gain.setValueAtTime(0.09, now + 0.05);
     noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
 
     noiseSrc.connect(filter);
@@ -513,29 +663,30 @@ export function playPttEndSquelch() {
 }
 
 /**
- * نغمة فتح استقبال نداء وارد من زميل على القناة
+ * نغمة فتح استقبال نداء وارد من زميل على القناة (Police Dispatch Squelch Break)
  */
 export function playIncomingRxChirp({ subtle = false } = {}) {
-  if (!subtle) triggerHaptic([40]);
+  if (!subtle) triggerHaptic([50, 30, 50]);
+  ensureAudioPipelineResumed();
   try {
-    const ctx = getSharedAudioContext();
+    const ctx = getSharedAudioContext({ allowCreateWithoutCheck: true });
     const dest = getOutputDestination(ctx);
     if (!ctx || !dest) return;
     const now = ctx.currentTime;
-    const peak = subtle ? 0.07 : 0.14;
-    const notes = [784, 1174.66];
+    const peak = subtle ? 0.09 : 0.2;
+    const notes = [880, 1318.51, 1760];
     notes.forEach((freq, i) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(freq, now + i * 0.04);
-      gain.gain.setValueAtTime(0.001, now + i * 0.04);
-      gain.gain.linearRampToValueAtTime(peak, now + i * 0.04 + 0.007);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.04 + 0.045);
+      osc.frequency.setValueAtTime(freq, now + i * 0.036);
+      gain.gain.setValueAtTime(0.001, now + i * 0.036);
+      gain.gain.linearRampToValueAtTime(peak, now + i * 0.036 + 0.006);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.036 + 0.042);
       osc.connect(gain);
       gain.connect(dest);
-      osc.start(now + i * 0.04);
-      osc.stop(now + i * 0.04 + 0.05);
+      osc.start(now + i * 0.036);
+      osc.stop(now + i * 0.036 + 0.046);
     });
   } catch {
     // Ignore
@@ -543,46 +694,90 @@ export function playIncomingRxChirp({ subtle = false } = {}) {
 }
 
 /**
- * جرس انتباه لاسلكي عاجل (Call-Tone / Emergency Pager Alert)
+ * جرس انتباه لاسلكي عاجل / صافرة طوارئ الشرطة (Police Tetra Emergency Dispatch Siren)
  */
 export function playUrgentPagerTone() {
-  triggerHaptic([110, 60, 110, 60, 140]);
+  triggerHaptic([160, 70, 160, 70, 240]);
+  ensureAudioPipelineResumed();
   try {
-    const ctx = getSharedAudioContext();
+    const ctx = getSharedAudioContext({ allowCreateWithoutCheck: true });
     const dest = getOutputDestination(ctx);
     if (!ctx || !dest) return;
     const now = ctx.currentTime;
-    const pattern = [987.77, 1318.51, 987.77, 1318.51, 1567.98];
+    const pattern = [987.77, 1318.51, 987.77, 1318.51, 1567.98, 1975.53];
     pattern.forEach((freq, idx) => {
-      const start = now + idx * 0.095;
+      const start = now + idx * 0.088;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.type = 'square';
+      osc.type = 'sawtooth';
       osc.frequency.setValueAtTime(freq, start);
       gain.gain.setValueAtTime(0.001, start);
-      gain.gain.linearRampToValueAtTime(0.11, start + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.001, start + 0.085);
+      gain.gain.linearRampToValueAtTime(0.16, start + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + 0.08);
       osc.connect(gain);
       gain.connect(dest);
       osc.start(start);
-      osc.stop(start + 0.09);
+      osc.stop(start + 0.085);
     });
   } catch {
     // Ignore
   }
 }
 
+export function playPoliceEmergencySiren() {
+  playUrgentPagerTone();
+}
+
 /**
- * إرسال إشعار نظام عبر Service Worker عند ورود جرس انتباه والتطبيق بالخلفية
+ * إرسال إشعار نظام فوري (Push Notification) عبر Service Worker عند فتح زميل للخط أو التحدث أو الطوارئ
  */
-export function notifyWalkieBackgroundAlert(title, body) {
-  if (typeof document === 'undefined' || document.visibilityState === 'visible') return;
+export function notifyWalkieBackgroundAlert(
+  title,
+  body,
+  { isEmergency = false, forceShow = false, tag = 'zayed-walkie-live' } = {}
+) {
+  if (typeof document === 'undefined') return;
+  const isHidden = document.visibilityState !== 'visible';
+  if (!isHidden && !forceShow && !isEmergency) return;
+
   try {
-    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-      navigator.serviceWorker.controller.postMessage({
-        type: 'ZAYED_WALKIE_NOTIFY',
-        title,
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.ready
+        .then((reg) => {
+          if (reg && typeof reg.showNotification === 'function') {
+            return reg.showNotification(title, {
+              body,
+              icon: '/pwa-192.png',
+              badge: '/pwa-192.png',
+              tag: isEmergency ? `zayed-walkie-emergency-${Date.now()}` : tag,
+              renotify: true,
+              requireInteraction: Boolean(isEmergency),
+              vibrate: isEmergency
+                ? [240, 80, 240, 80, 360]
+                : [120, 60, 120, 60, 160],
+              data: { isEmergency, at: Date.now() },
+            });
+          }
+          if (navigator.serviceWorker.controller) {
+            navigator.serviceWorker.controller.postMessage({
+              type: 'ZAYED_WALKIE_NOTIFY',
+              title,
+              body,
+              isEmergency,
+              tag,
+            });
+          }
+          return undefined;
+        })
+        .catch(() => {});
+      return;
+    }
+
+    if ('Notification' in window && Notification.permission === 'granted') {
+      new Notification(title, {
         body,
+        icon: '/pwa-192.png',
+        tag: isEmergency ? `zayed-walkie-emergency-${Date.now()}` : tag,
       });
     }
   } catch {
@@ -590,21 +785,41 @@ export function notifyWalkieBackgroundAlert(title, body) {
   }
 }
 
+function dataUrlToArrayBuffer(dataUrl) {
+  try {
+    const commaIdx = dataUrl.indexOf(',');
+    if (commaIdx === -1 || typeof atob !== 'function') return null;
+    const b64 = dataUrl.slice(commaIdx + 1);
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * تشغيل مقطع نداء لاسلكي مسجل (لإعادة تشغيل السجل أو جرس الطوارئ)
+ * تشغيل مقطع نداء لاسلكي مسجل عبر مضخم WebAudio المباشر (مع بديل تلقائي HTMLAudioElement)
+ * يضمن سماع الصوت بأعلى وضوح على سماعة الهاتف الخارجية حتى أثناء فتح المايكروفون!
  */
-export function playWalkieAudioClip(dataUrl, { onLevel, withRadioEffects = true } = {}) {
+export function playWalkieAudioClip(
+  dataUrl,
+  { onLevel, withRadioEffects = true, isEmergency = false } = {}
+) {
   return new Promise((resolve) => {
-    if (!dataUrl || typeof Audio === 'undefined') {
+    if (!dataUrl || typeof window === 'undefined') {
       resolve(false);
       return;
     }
 
+    ensureAudioPipelineResumed();
+
     let settled = false;
     let simInterval = null;
     let safetyTimeout = null;
-    const audio = new Audio(dataUrl);
-    audio.preload = 'auto';
 
     function finish(ok) {
       if (settled) return;
@@ -619,7 +834,11 @@ export function playWalkieAudioClip(dataUrl, { onLevel, withRadioEffects = true 
     }
 
     if (withRadioEffects) {
-      playIncomingRxChirp();
+      if (isEmergency) {
+        playUrgentPagerTone();
+      } else {
+        playIncomingRxChirp();
+      }
     }
 
     if (onLevel) {
@@ -632,25 +851,54 @@ export function playWalkieAudioClip(dataUrl, { onLevel, withRadioEffects = true 
       }, 95);
     }
 
-    audio.onended = () => finish(true);
-    audio.onerror = () => finish(false);
+    safetyTimeout = setTimeout(() => finish(true), 36000);
 
-    safetyTimeout = setTimeout(() => {
-      try {
-        audio.pause();
-      } catch {
-        // ignore
+    // 1. Primary path: Decode & play through boosted WebAudio masterBusGain (immune to mobile <audio> autoplay blocks!)
+    const ctx = getSharedAudioContext({ allowCreateWithoutCheck: true });
+    const dest = getOutputDestination(ctx);
+    const rawBuffer = dataUrlToArrayBuffer(dataUrl);
+
+    if (ctx && dest && rawBuffer && typeof ctx.decodeAudioData === 'function') {
+      ctx
+        .decodeAudioData(rawBuffer.slice(0))
+        .then((audioBuffer) => {
+          if (settled) return;
+          const src = ctx.createBufferSource();
+          src.buffer = audioBuffer;
+          const gain = ctx.createGain();
+          gain.gain.value = isEmergency ? 1.85 : 1.45;
+          src.connect(gain);
+          gain.connect(dest);
+          src.onended = () => finish(true);
+          src.start(ctx.currentTime + (withRadioEffects ? 0.09 : 0));
+        })
+        .catch(() => {
+          // 2. Fallback to HTML5 Audio element if browser couldn't decode container in WebAudio
+          playViaHtmlAudioElement();
+        });
+      return;
+    }
+
+    playViaHtmlAudioElement();
+
+    function playViaHtmlAudioElement() {
+      if (typeof Audio === 'undefined') {
+        finish(false);
+        return;
       }
-      finish(true);
-    }, 36000);
-
-    setTimeout(
-      () => {
-        if (settled) return;
-        audio.play().catch(() => finish(false));
-      },
-      withRadioEffects ? 85 : 0
-    );
+      const audio = new Audio(dataUrl);
+      audio.preload = 'auto';
+      audio.volume = 1.0;
+      audio.onended = () => finish(true);
+      audio.onerror = () => finish(false);
+      setTimeout(
+        () => {
+          if (settled) return;
+          audio.play().catch(() => finish(false));
+        },
+        withRadioEffects ? 85 : 0
+      );
+    }
   });
 }
 

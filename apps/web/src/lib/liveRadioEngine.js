@@ -1,15 +1,16 @@
 /**
- * محرك الغرفة الصوتية الحية المتزامنة للاسلكي زايد مارت (Live Multi-Peer Intercom Engine)
- * - ربط صوتي مباشر متزامن (WebRTC RTCPeerConnection Mesh - Full Duplex < 50ms)
- * - بث احتياطي فوري ذكي (250ms 8kHz G.711 μ-law Frames) يعمل تلقائياً قبل اكتمال ICE أو خلف 4G NAT الصارم
- * - معالجة الصوت وبوابة التحدث الذكية (Smart VAD) داخل خيط الصوت المستقل (AudioWorklet) للعمل في الخلفية وقفل الشاشة
- * - مؤقت Web Worker خلفي غير خاضع لتجميد المتصفح للحفاظ على الاتصال حياً بالخلفية
+ * محرك الغرفة الصوتية الحية المتزامنة للاسلكي زايد مارت (v3 Police Radio & Guaranteed Audio Engine)
+ * - بث مزدوج مضمون 100%: إطارات 8kHz G.711 μ-law الحية دائماً لكل المستمعين + WebRTC P2P متى توفر
+ * - تسجيل تلقائي فوري لكل نداء صوتي بصيغة WAV 16-bit PCM وإرساله كنسخة احتياطية للأجهزة التي كانت بقفل الشاشة
+ * - أولوية الاستماع الذكية (Smart Half-Duplex Squelch Priority) لمنع مايك الهاتف من كتم صوت الزميل المتحدث
  */
 
 import {
   IDLE_BAR_LEVELS,
   computeBarsFromRms,
   encodeFloat32ToMuLawBase64,
+  encodeMuLawFramesToWavDataUrl,
+  getOutputDestination,
   getSharedAudioContext,
   playIncomingLiveMuLawFrame,
   playPttEndSquelch,
@@ -25,8 +26,8 @@ const RTC_CONFIG = {
   ],
 };
 
-const VAD_TRIGGER_RMS = 0.015;
-const VAD_HANG_MS = 580;
+const VAD_TRIGGER_RMS = 0.018;
+const VAD_HANG_MS = 620;
 
 const WORKLET_PROCESSOR_CODE = `
 class ZayedWalkieLiveProcessor extends AudioWorkletProcessor {
@@ -39,7 +40,6 @@ class ZayedWalkieLiveProcessor extends AudioWorkletProcessor {
     this._meterSumSq = 0;
     this._resampleAcc = 0;
     this._resampleCount = 0;
-    this._step = sampleRate / this._targetRate;
     this._inPos = 0;
   }
 
@@ -93,7 +93,7 @@ class ZayedWalkieLiveProcessor extends AudioWorkletProcessor {
 registerProcessor('zayed-walkie-live-proc', ZayedWalkieLiveProcessor);
 `;
 
-let workletLoadedForCtx = new WeakSet();
+const workletLoadedForCtx = new WeakSet();
 
 function createBackgroundHeartbeatWorker(intervalMs = 2200, onTick) {
   if (typeof Worker !== 'undefined' && typeof Blob !== 'undefined' && typeof URL !== 'undefined') {
@@ -143,8 +143,10 @@ export function createLiveRadioRoomEngine({
   peerId,
   channel = 'security',
   initialMicMode = 'vad',
+  initialEmergencyMode = false,
   sendSignal,
   sendLiveFrame,
+  onSpeechBurstComplete,
   onLocalSpeakingChange,
   onRemoteSpeakersChange,
   onMeshPeersChange,
@@ -155,6 +157,7 @@ export function createLiveRadioRoomEngine({
   let destroyed = false;
   let currentChannel = channel;
   let micMode = initialMicMode; // 'vad' | 'open' | 'muted'
+  let emergencyMode = Boolean(initialEmergencyMode || channel === 'emergency');
   let pttPressed = false;
   let localStream = null;
   let localAudioTrack = null;
@@ -169,30 +172,102 @@ export function createLiveRadioRoomEngine({
   let vadOpenUntilMs = 0;
   let isCurrentlyTransmitting = false;
   let preRollSamples8k = null;
+  let currentBurstFramesB64 = [];
+  let currentBurstStartedAtMs = 0;
   let expectedRemotePeerIds = new Set();
 
   // Map<remotePeerId, PeerEntry>
   const peersMap = new Map();
-  // Map<remotePeerId, { peer_id, user_id, display_name, role, untilMs }>
+  // Map<remotePeerId, { peer_id, user_id, display_name, role, is_emergency, untilMs }>
   const relaySpeakingMap = new Map();
 
+  function isEmergencyActive() {
+    return Boolean(emergencyMode || currentChannel === 'emergency');
+  }
+
+  function hasActiveRemoteSpeaker(nowMs = Date.now()) {
+    for (const [rPeerId, relaySpeaker] of relaySpeakingMap.entries()) {
+      if (relaySpeaker.untilMs >= nowMs && rPeerId !== peerId) {
+        return true;
+      }
+    }
+    for (const entry of peersMap.values()) {
+      if (entry.remoteSpeaking && entry.peer_id !== peerId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function flushCompletedSpeechBurst() {
+    if (currentBurstFramesB64.length < 2) {
+      currentBurstFramesB64 = [];
+      currentBurstStartedAtMs = 0;
+      return;
+    }
+    const framesToEncode = currentBurstFramesB64.slice(0, 112);
+    const durationSec = Math.max(
+      0.6,
+      Math.round(framesToEncode.length * 0.25 * 10) / 10
+    );
+    const burstEmergency = isEmergencyActive();
+    currentBurstFramesB64 = [];
+    currentBurstStartedAtMs = 0;
+
+    try {
+      const wavDataUrl = encodeMuLawFramesToWavDataUrl(framesToEncode, 8000);
+      if (wavDataUrl) {
+        onSpeechBurstComplete?.({
+          wavDataUrl,
+          mimeType: 'audio/wav',
+          durationSec,
+          isEmergency: burstEmergency,
+          channel: currentChannel,
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   function syncLocalTrackGate(nowMs = Date.now()) {
-    const vadActive = micMode === 'vad' && nowMs < vadOpenUntilMs;
+    // Half-Duplex Police Radio Priority: when a colleague is actively speaking to us,
+    // suppress auto-VAD triggers from our phone speaker unless the user explicitly holds PTT!
+    const remoteCurrentlySpeaking = hasActiveRemoteSpeaker(nowMs);
+    if (remoteCurrentlySpeaking && !pttPressed && micMode === 'vad') {
+      vadOpenUntilMs = 0;
+    }
+
+    const vadActive = micMode === 'vad' && nowMs < vadOpenUntilMs && !remoteCurrentlySpeaking;
+    const openMicActive = micMode === 'open' && (!remoteCurrentlySpeaking || pttPressed);
     const shouldOpen =
-      hasMicrophone && (pttPressed || micMode === 'open' || vadActive);
+      hasMicrophone && (pttPressed || openMicActive || vadActive);
 
     if (localAudioTrack && localAudioTrack.enabled !== shouldOpen) {
       localAudioTrack.enabled = shouldOpen;
     }
 
     if (shouldOpen !== isCurrentlyTransmitting) {
+      const wasTransmitting = isCurrentlyTransmitting;
       isCurrentlyTransmitting = shouldOpen;
+      if (shouldOpen && !wasTransmitting) {
+        currentBurstStartedAtMs = nowMs;
+        currentBurstFramesB64 = [];
+      } else if (!shouldOpen && wasTransmitting) {
+        flushCompletedSpeechBurst();
+      }
+
       onLocalSpeakingChange?.(shouldOpen);
       sendSignal?.({
         channel: currentChannel,
         peer_id: peerId,
         signal_type: 'talking_state',
-        data: { talking: shouldOpen, mic_mode: micMode },
+        is_emergency: isEmergencyActive(),
+        data: {
+          talking: shouldOpen,
+          mic_mode: micMode,
+          is_emergency: isEmergencyActive(),
+        },
       });
       if (!shouldOpen) {
         onLevels?.(IDLE_BAR_LEVELS);
@@ -202,24 +277,11 @@ export function createLiveRadioRoomEngine({
     return shouldOpen;
   }
 
-  function needsRelayFallback() {
-    // Send lightweight 250ms μ-law relay frames if any peer on channel isn't yet 'connected' via WebRTC,
-    // or when expectedRemotePeerIds is empty (e.g., serverless/cloud listener not yet discovered via P2P)
-    if (expectedRemotePeerIds.size === 0) return true;
-    for (const remoteId of expectedRemotePeerIds) {
-      if (remoteId === peerId) continue;
-      const entry = peersMap.get(remoteId);
-      if (!entry || !entry.isConnected || !entry.hasRemoteAudio) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   function handleIncomingAudioMeter(rms) {
     if (destroyed) return;
     const now = Date.now();
-    if (micMode === 'vad' && rms >= VAD_TRIGGER_RMS) {
+    const remoteSpeaking = hasActiveRemoteSpeaker(now);
+    if (micMode === 'vad' && !remoteSpeaking && rms >= VAD_TRIGGER_RMS) {
       vadOpenUntilMs = now + VAD_HANG_MS;
     }
     const open = syncLocalTrackGate(now);
@@ -232,7 +294,9 @@ export function createLiveRadioRoomEngine({
     if (destroyed) return;
     const now = Date.now();
     const wasTransmitting = isCurrentlyTransmitting;
-    if (micMode === 'vad' && rms >= VAD_TRIGGER_RMS) {
+    const remoteSpeaking = hasActiveRemoteSpeaker(now);
+
+    if (micMode === 'vad' && !remoteSpeaking && rms >= VAD_TRIGGER_RMS) {
       vadOpenUntilMs = now + VAD_HANG_MS;
     }
     const open = syncLocalTrackGate(now);
@@ -242,34 +306,39 @@ export function createLiveRadioRoomEngine({
       return;
     }
 
-    if (needsRelayFallback()) {
-      // Flush pre-roll 250ms syllable buffer on speech onset so zero words are clipped!
-      if (!wasTransmitting && preRollSamples8k) {
-        const preB64 = encodeFloat32ToMuLawBase64(preRollSamples8k);
-        preRollSamples8k = null;
-        if (preB64) {
-          sendLiveFrame?.({
-            channel: currentChannel,
-            peer_id: peerId,
-            sample_rate: 8000,
-            ulaw_b64: preB64,
-            is_emergency: currentChannel === 'emergency',
-          });
-        }
-      }
+    const emergencyFlag = isEmergencyActive();
 
-      const ulawB64 = encodeFloat32ToMuLawBase64(samples8k);
-      if (ulawB64) {
+    // Always broadcast 250ms 8kHz μ-law frames so ALL listeners (including Auto-Standby Police Receiver
+    // and phones behind 4G NAT or with blocked WebRTC <audio>) hear every single word!
+    if (!wasTransmitting && preRollSamples8k) {
+      const preB64 = encodeFloat32ToMuLawBase64(preRollSamples8k);
+      preRollSamples8k = null;
+      if (preB64) {
+        if (currentBurstFramesB64.length < 112) {
+          currentBurstFramesB64.push(preB64);
+        }
         sendLiveFrame?.({
           channel: currentChannel,
           peer_id: peerId,
           sample_rate: 8000,
-          ulaw_b64: ulawB64,
-          is_emergency: currentChannel === 'emergency',
+          ulaw_b64: preB64,
+          is_emergency: emergencyFlag,
         });
       }
-    } else {
-      preRollSamples8k = null;
+    }
+
+    const ulawB64 = encodeFloat32ToMuLawBase64(samples8k);
+    if (ulawB64) {
+      if (currentBurstFramesB64.length < 112) {
+        currentBurstFramesB64.push(ulawB64);
+      }
+      sendLiveFrame?.({
+        channel: currentChannel,
+        peer_id: peerId,
+        sample_rate: 8000,
+        ulaw_b64: ulawB64,
+        is_emergency: emergencyFlag,
+      });
     }
   }
 
@@ -288,6 +357,7 @@ export function createLiveRadioRoomEngine({
     try {
       entry.analyserSource?.disconnect();
       entry.analyser?.disconnect();
+      entry.webAudioOutGain?.disconnect();
     } catch {
       // ignore
     }
@@ -334,9 +404,11 @@ export function createLiveRadioRoomEngine({
       isConnected: false,
       hasRemoteAudio: false,
       remoteSpeaking: false,
+      lastWebRtcActiveMs: 0,
       audioEl: null,
       analyser: null,
       analyserSource: null,
+      webAudioOutGain: null,
       freqBuf: null,
     };
     peersMap.set(remotePeerId, entry);
@@ -365,7 +437,6 @@ export function createLiveRadioRoomEngine({
 
     pc.onnegotiationneeded = async () => {
       if (destroyed) return;
-      // Only impolite peer auto-initiates initial negotiation to avoid simultaneous glare
       if (entry.isPolite && pc.signalingState === 'stable' && !pc.remoteDescription) {
         return;
       }
@@ -423,8 +494,9 @@ export function createLiveRadioRoomEngine({
         entry.audioEl.play().catch(() => {});
       }
 
-      // Attach WebAudio analyser so we detect simultaneous remote speakers even without extra signaling
-      const ctx = getSharedAudioContext();
+      // Connect WebRTC stream into our boosted WebAudio masterBusGain + analyser!
+      const ctx = getSharedAudioContext({ allowCreateWithoutCheck: true });
+      const dest = getOutputDestination(ctx);
       if (ctx && !entry.analyser) {
         try {
           const src = ctx.createMediaStreamSource(stream);
@@ -432,6 +504,13 @@ export function createLiveRadioRoomEngine({
           analyser.fftSize = 64;
           analyser.smoothingTimeConstant = 0.65;
           src.connect(analyser);
+          if (dest) {
+            const outGain = ctx.createGain();
+            outGain.gain.value = 1.25;
+            analyser.connect(outGain);
+            outGain.connect(dest);
+            entry.webAudioOutGain = outGain;
+          }
           entry.analyserSource = src;
           entry.analyser = analyser;
           entry.freqBuf = new Uint8Array(analyser.frequencyBinCount);
@@ -469,7 +548,9 @@ export function createLiveRadioRoomEngine({
   }
 
   async function setupAudioCaptureGraph(stream) {
-    const ctx = unlockWalkieAudio({ fromTrustedGesture: true }) || getSharedAudioContext({ allowCreateWithoutCheck: true });
+    const ctx =
+      unlockWalkieAudio({ fromTrustedGesture: true }) ||
+      getSharedAudioContext({ allowCreateWithoutCheck: true });
     if (!ctx || !stream) return;
 
     if (ctx.state === 'suspended') {
@@ -520,7 +601,7 @@ export function createLiveRadioRoomEngine({
       let inPos = 0;
       let acc = 0;
       let count = 0;
-      let frameBuf = new Float32Array(2000);
+      const frameBuf = new Float32Array(2000);
       let frameIdx = 0;
 
       sp.onaudioprocess = (ev) => {
@@ -570,6 +651,7 @@ export function createLiveRadioRoomEngine({
         const avg = sum / (13 * 255);
         if (avg > 0.085) {
           speakingViaWebRtc = true;
+          entry.lastWebRtcActiveMs = now;
           if (avg > maxRemoteEnergy) maxRemoteEnergy = avg;
         }
       }
@@ -596,6 +678,7 @@ export function createLiveRadioRoomEngine({
           user_id: relaySpeaker.user_id,
           display_name: relaySpeaker.display_name,
           role: relaySpeaker.role,
+          is_emergency: Boolean(relaySpeaker.is_emergency),
           transport: 'relay',
         });
       }
@@ -611,7 +694,7 @@ export function createLiveRadioRoomEngine({
       }
     }
 
-    // Also close expired VAD gate cleanly when user stops speaking
+    // Close expired VAD gate cleanly when user stops speaking
     syncLocalTrackGate(now);
   }
 
@@ -673,12 +756,17 @@ export function createLiveRadioRoomEngine({
 
     meterMonitorTimer = setInterval(pollRemoteSpeakersAndMeters, 140);
 
-    // Announce live room join to all peers on this channel
+    // Announce live room join + session_open to all peers on this channel
     await sendSignal?.({
       channel: currentChannel,
       peer_id: peerId,
       signal_type: 'join',
-      data: { mic_mode: micMode, has_mic: hasMicrophone },
+      is_emergency: isEmergencyActive(),
+      data: {
+        mic_mode: micMode,
+        has_mic: hasMicrophone,
+        is_emergency: isEmergencyActive(),
+      },
     });
 
     syncLocalTrackGate();
@@ -687,7 +775,12 @@ export function createLiveRadioRoomEngine({
 
   async function handleSignal(envelope) {
     if (destroyed || !envelope) return;
-    if (envelope.channel !== currentChannel && envelope.channel !== 'emergency') return;
+    const isEmergencySig = Boolean(
+      envelope.channel === 'emergency' ||
+        envelope.is_emergency ||
+        envelope.data?.is_emergency
+    );
+    if (envelope.channel !== currentChannel && !isEmergencySig) return;
     const remotePeerId = envelope.from_peer_id;
     if (!remotePeerId || remotePeerId === peerId) return;
     if (envelope.target_peer_id && envelope.target_peer_id !== peerId) return;
@@ -703,13 +796,14 @@ export function createLiveRadioRoomEngine({
       return;
     }
 
-    if (sigType === 'talking_state') {
-      if (data?.talking) {
+    if (sigType === 'talking_state' || sigType === 'emergency_alert') {
+      if (data?.talking || sigType === 'emergency_alert') {
         relaySpeakingMap.set(remotePeerId, {
           peer_id: remotePeerId,
           user_id: envelope.user_id,
           display_name: envelope.display_name || 'زميل متصل',
           role: envelope.role || 'security',
+          is_emergency: isEmergencySig,
           untilMs: Date.now() + 3500,
         });
       } else {
@@ -719,12 +813,16 @@ export function createLiveRadioRoomEngine({
       return;
     }
 
+    if (sigType === 'session_open') {
+      pollRemoteSpeakersAndMeters();
+      return;
+    }
+
     const entry = ensurePeerConnection(remotePeerId, envelope);
     if (!entry) return;
     const { pc } = entry;
 
     if (sigType === 'join') {
-      // Reply with targeted join-ack once so both sides discover each other immediately
       if (!data?.ack) {
         sendSignal?.({
           channel: currentChannel,
@@ -804,26 +902,38 @@ export function createLiveRadioRoomEngine({
     if (destroyed || !packet?.ulaw_b64) return;
     const remotePeerId = packet.from_peer_id || packet.sender_id;
     if (!remotePeerId || remotePeerId === peerId) return;
-    if (packet.channel !== currentChannel && packet.channel !== 'emergency') return;
+    const isEmergencyFrame = Boolean(
+      packet.channel === 'emergency' || packet.is_emergency
+    );
+    if (packet.channel !== currentChannel && !isEmergencyFrame) return;
 
+    const now = Date.now();
     expectedRemotePeerIds.add(remotePeerId);
     relaySpeakingMap.set(remotePeerId, {
       peer_id: remotePeerId,
       user_id: packet.sender_id || remotePeerId,
       display_name: packet.sender_name || 'زميل على الخط',
       role: packet.sender_role || 'security',
-      untilMs: Date.now() + 900,
+      is_emergency: isEmergencyFrame,
+      untilMs: now + 1100,
     });
 
-    // Deduplication: if this peer already has a live connected WebRTC audio stream, skip μ-law playback so there is ZERO echo!
+    // Only skip μ-law playback if WebRTC is actively producing real measured audio energy within the last 550ms!
+    // This guarantees that if mobile OS blocked/paused the WebRTC <audio> element, μ-law plays crystal clear!
     const peerEntry = peersMap.get(remotePeerId);
-    if (peerEntry && peerEntry.isConnected && peerEntry.hasRemoteAudio) {
+    if (
+      peerEntry &&
+      peerEntry.isConnected &&
+      peerEntry.hasRemoteAudio &&
+      now - (peerEntry.lastWebRtcActiveMs || 0) < 550
+    ) {
       pollRemoteSpeakersAndMeters();
       return;
     }
 
     playIncomingLiveMuLawFrame(remotePeerId, packet.ulaw_b64, {
       sampleRate: packet.sample_rate || 8000,
+      isEmergency: isEmergencyFrame,
       onLevel: (bars) => {
         if (!isCurrentlyTransmitting) {
           onLevels?.(bars);
@@ -866,6 +976,11 @@ export function createLiveRadioRoomEngine({
     syncLocalTrackGate();
   }
 
+  function setEmergencyMode(nextEmergency) {
+    emergencyMode = Boolean(nextEmergency || currentChannel === 'emergency');
+    syncLocalTrackGate();
+  }
+
   function setPttPressed(pressed) {
     const next = Boolean(pressed);
     if (pttPressed === next) return;
@@ -881,6 +996,11 @@ export function createLiveRadioRoomEngine({
   function stop() {
     if (destroyed) return;
     destroyed = true;
+
+    if (isCurrentlyTransmitting) {
+      isCurrentlyTransmitting = false;
+      flushCompletedSpeechBurst();
+    }
 
     try {
       sendSignal?.({
@@ -932,6 +1052,7 @@ export function createLiveRadioRoomEngine({
     start,
     stop,
     setMicMode,
+    setEmergencyMode,
     setPttPressed,
     handleSignal,
     handleLiveFrame,

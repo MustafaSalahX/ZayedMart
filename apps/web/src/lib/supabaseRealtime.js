@@ -165,6 +165,7 @@ export function joinGlobalWalkieRoom({
   onSignal,
   onLiveFrame,
   onTxCall,
+  onDispatch,
   onConnectionChange,
 }) {
   const supabase = getGlobalSupabaseClient();
@@ -172,6 +173,7 @@ export function joinGlobalWalkieRoom({
 
   const topicName = `zayed_walkie_ch_${channel}`;
   let isSubscribed = false;
+  let isEmergencySubscribed = false;
   let currentTrackedState = {
     peer_id: peerId,
     user_id: user.id,
@@ -216,6 +218,9 @@ export function joinGlobalWalkieRoom({
     .on('broadcast', { event: 'walkie_tx' }, ({ payload }) => {
       if (payload) onTxCall?.(payload);
     })
+    .on('broadcast', { event: 'walkie_dispatch' }, ({ payload }) => {
+      if (payload) onDispatch?.(payload);
+    })
     .subscribe(async (status) => {
       const nowConnected = status === 'SUBSCRIBED';
       isSubscribed = nowConnected;
@@ -232,7 +237,7 @@ export function joinGlobalWalkieRoom({
       }
     });
 
-  // Also listen to Global Emergency Channel (CH-09) if user is tuned to CH-01 / CH-02 / CH-03
+  // Also listen & broadcast to Global Emergency Channel (CH-09) if user is tuned to CH-01 / CH-02 / CH-03
   let emergencyChannel = null;
   if (channel !== 'emergency') {
     emergencyChannel = supabase.channel('zayed_walkie_ch_emergency', {
@@ -241,13 +246,21 @@ export function joinGlobalWalkieRoom({
       },
     });
     emergencyChannel
+      .on('broadcast', { event: 'walkie_signal' }, ({ payload }) => {
+        if (payload) onSignal?.(payload);
+      })
       .on('broadcast', { event: 'walkie_live_frame' }, ({ payload }) => {
         if (payload) onLiveFrame?.(payload);
       })
       .on('broadcast', { event: 'walkie_tx' }, ({ payload }) => {
         if (payload) onTxCall?.(payload);
       })
-      .subscribe();
+      .on('broadcast', { event: 'walkie_dispatch' }, ({ payload }) => {
+        if (payload) onDispatch?.(payload);
+      })
+      .subscribe((status) => {
+        isEmergencySubscribed = status === 'SUBSCRIBED';
+      });
   }
 
   return {
@@ -278,6 +291,17 @@ export function joinGlobalWalkieRoom({
           event: 'walkie_signal',
           payload: envelope,
         });
+        if (
+          (envelope?.is_emergency || envelope?.data?.is_emergency) &&
+          emergencyChannel &&
+          isEmergencySubscribed
+        ) {
+          emergencyChannel.send({
+            type: 'broadcast',
+            event: 'walkie_signal',
+            payload: envelope,
+          });
+        }
         return true;
       } catch {
         return false;
@@ -292,6 +316,13 @@ export function joinGlobalWalkieRoom({
           event: 'walkie_live_frame',
           payload: framePacket,
         });
+        if (framePacket?.is_emergency && emergencyChannel && isEmergencySubscribed) {
+          emergencyChannel.send({
+            type: 'broadcast',
+            event: 'walkie_live_frame',
+            payload: framePacket,
+          });
+        }
         return true;
       } catch {
         return false;
@@ -306,6 +337,34 @@ export function joinGlobalWalkieRoom({
           event: 'walkie_tx',
           payload: { call: callObj },
         });
+        if (callObj?.is_emergency && emergencyChannel && isEmergencySubscribed) {
+          emergencyChannel.send({
+            type: 'broadcast',
+            event: 'walkie_tx',
+            payload: { call: callObj },
+          });
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
+    sendDispatch(dispatchPayload) {
+      if (!isSubscribed) return false;
+      try {
+        roomChannel.send({
+          type: 'broadcast',
+          event: 'walkie_dispatch',
+          payload: dispatchPayload,
+        });
+        if (dispatchPayload?.is_emergency && emergencyChannel && isEmergencySubscribed) {
+          emergencyChannel.send({
+            type: 'broadcast',
+            event: 'walkie_dispatch',
+            payload: dispatchPayload,
+          });
+        }
         return true;
       } catch {
         return false;
@@ -314,6 +373,7 @@ export function joinGlobalWalkieRoom({
 
     leave() {
       isSubscribed = false;
+      isEmergencySubscribed = false;
       try {
         roomChannel.untrack();
       } catch {

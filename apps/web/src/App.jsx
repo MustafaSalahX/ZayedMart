@@ -222,6 +222,13 @@ export default function App() {
             // ignore
           }
         });
+        es.addEventListener('walkie_dispatch', (ev) => {
+          try {
+            emitWalkieSseEvent('walkie_dispatch', JSON.parse(ev.data));
+          } catch {
+            // ignore
+          }
+        });
       } catch {
         // Fallback polling
       }

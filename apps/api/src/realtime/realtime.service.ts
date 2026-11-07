@@ -62,10 +62,10 @@ export class RealtimeService {
     };
   }
 
-  private canAuthReceiveWalkie(auth: AuthContext, channel: string): boolean {
+  private canAuthReceiveWalkie(auth: AuthContext, channel: string, isEmergency = false): boolean {
     const allowed = resolveAllowedWalkieChannels(auth.user.role, auth.permissions);
     if (allowed.length === 0) return false;
-    if (channel === 'emergency') return true;
+    if (channel === 'emergency' || isEmergency) return true;
     return allowed.includes(channel as any);
   }
 
@@ -113,10 +113,16 @@ export class RealtimeService {
     targetChannel: string,
     alsoCloudBroadcast = false
   ): Promise<void> {
+    const isEmergency = Boolean(
+      targetChannel === 'emergency' ||
+        payloadObj?.is_emergency ||
+        payloadObj?.call?.is_emergency ||
+        payloadObj?.data?.is_emergency
+    );
     const serialized = JSON.stringify(payloadObj);
     for (const client of this.sseClients) {
       try {
-        if (!this.canAuthReceiveWalkie(client.auth, targetChannel)) continue;
+        if (!this.canAuthReceiveWalkie(client.auth, targetChannel, isEmergency)) continue;
         client.res.write(`event: ${eventName}\ndata: ${serialized}\n\n`);
       } catch {
         this.sseClients.delete(client);
@@ -126,9 +132,11 @@ export class RealtimeService {
     if (alsoCloudBroadcast) {
       const topic = `zayed_walkie_ch_${targetChannel}`;
       await this.sendSupabaseHttpBroadcast(topic, eventName, payloadObj);
-      if (targetChannel === 'emergency') {
-        for (const ch of ['security', 'warehouse', 'floor']) {
-          await this.sendSupabaseHttpBroadcast(`zayed_walkie_ch_${ch}`, eventName, payloadObj);
+      if (isEmergency) {
+        for (const ch of ['security', 'warehouse', 'floor', 'emergency']) {
+          if (ch !== targetChannel) {
+            await this.sendSupabaseHttpBroadcast(`zayed_walkie_ch_${ch}`, eventName, payloadObj);
+          }
         }
       }
     }

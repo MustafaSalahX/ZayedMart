@@ -239,6 +239,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'handover:manage',
     'chat:read',
     'chat:write',
+    'walkie:use',
     'profile:view',
   ],
   cctv: [
@@ -283,6 +284,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'handover:manage',
     'chat:read',
     'chat:write',
+    'walkie:use',
     'profile:view',
   ],
   warehouse: [
@@ -298,6 +300,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'handover:manage',
     'chat:read',
     'chat:write',
+    'walkie:use',
     'profile:view',
   ],
   delivery: [
@@ -307,6 +310,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'notes:write',
     'chat:read',
     'chat:write',
+    'walkie:use',
     'profile:view',
   ],
   kiosk: ['attendance:kiosk'],
@@ -324,12 +328,12 @@ export function resolveAllowedWalkieChannels(
     return [...VALID_WALKIE_CHANNELS];
   }
   if (role === 'security') {
-    return ['security'];
+    return ['security', 'emergency'];
   }
   if (role === 'warehouse') {
-    return ['warehouse'];
+    return ['warehouse', 'emergency'];
   }
-  return ['floor'];
+  return ['floor', 'emergency'];
 }
 
 export function inferDefaultRoleFromDepartment(department = '', roleTitle = ''): string {

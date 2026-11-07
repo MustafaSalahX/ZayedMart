@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'zayed-mart-shell-v5.0';
+const CACHE_VERSION = 'zayed-mart-shell-v5.1';
 const FONT_CACHE = 'zayed-mart-fonts-v1';
 
 const CORE_SHELL_URLS = [
@@ -46,6 +46,8 @@ self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'ZAYED_WALKIE_NOTIFY') {
     const title = event.data.title || 'نداء لاسلكي حي — زايد مارت';
     const body = event.data.body || 'يوجد اتصال على قناة اللاسلكي الآن';
+    const isEmergency = Boolean(event.data.isEmergency);
+    const tag = event.data.tag || (isEmergency ? `zayed-walkie-emergency-${Date.now()}` : 'zayed-walkie-live');
     if (self.registration && typeof self.registration.showNotification === 'function') {
       event.waitUntil(
         self.registration
@@ -53,13 +55,41 @@ self.addEventListener('message', (event) => {
             body,
             icon: '/pwa-192.png',
             badge: '/pwa-192.png',
-            tag: 'zayed-walkie-live',
+            tag,
             renotify: true,
-            vibrate: [120, 60, 120, 60, 160],
+            requireInteraction: isEmergency,
+            vibrate: isEmergency
+              ? [240, 80, 240, 80, 360]
+              : [120, 60, 120, 60, 160],
           })
           .catch(() => {})
       );
     }
+  }
+});
+
+self.addEventListener('push', (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch {
+    data = { body: event.data ? event.data.text() : '' };
+  }
+  const isEmergency = Boolean(data.isEmergency);
+  const title = data.title || (isEmergency ? '🚨 نداء طوارئ لاسلكي — زايد مارت' : '📻 نداء لاسلكي حي — زايد مارت');
+  const body = data.body || 'يوجد اتصال صوتي حي على قناة اللاسلكي الآن';
+  if (self.registration && typeof self.registration.showNotification === 'function') {
+    event.waitUntil(
+      self.registration.showNotification(title, {
+        body,
+        icon: '/pwa-192.png',
+        badge: '/pwa-192.png',
+        tag: isEmergency ? `zayed-walkie-emergency-${Date.now()}` : 'zayed-walkie-live',
+        renotify: true,
+        requireInteraction: isEmergency,
+        vibrate: isEmergency ? [240, 80, 240, 80, 360] : [120, 60, 120, 60, 160],
+      })
+    );
   }
 });
 

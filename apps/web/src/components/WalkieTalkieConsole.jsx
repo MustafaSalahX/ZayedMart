@@ -28,9 +28,30 @@ const MIC_MODES = [
   },
   {
     id: 'muted',
-    label: 'كتم المايك',
-    sub: 'استماع حي + ضغط للتحدث',
-    icon: 'mic_off',
+    label: 'اضغط للتحدث',
+    sub: 'استماع حي + ضغط مطول',
+    icon: 'touch_app',
+  },
+];
+
+const RECEIVE_MODES = [
+  {
+    id: 'all',
+    label: 'الكل تلقائياً (كالشرطة)',
+    sub: 'تسمع أي زميل فوراً طالما فاتح نت',
+    icon: 'volume_up',
+  },
+  {
+    id: 'emergency_only',
+    label: 'الطوارئ فقط 🚨',
+    sub: 'يسمع نداءات الطوارئ فقط بصوت عالٍ',
+    icon: 'e911_emergency',
+  },
+  {
+    id: 'muted',
+    label: 'كتم العادي',
+    sub: 'إشعار مرئي + اختراق للطوارئ',
+    icon: 'notifications_paused',
   },
 ];
 
@@ -54,6 +75,10 @@ export default function WalkieTalkieConsole({
     globalCloudConnected = false,
     toggleLivePower,
     turnLiveOn,
+    receiveMode = 'all',
+    setReceiveMode,
+    emergencyMode = false,
+    setEmergencyMode,
     micMode,
     setMicMode,
     localSpeaking,
@@ -116,7 +141,6 @@ export default function WalkieTalkieConsole({
   }
 
   function handlePttPointerDown(e) {
-    if (!liveOn) return;
     if (e.button !== undefined && e.button !== 0) return;
     e.preventDefault();
     try {
@@ -181,10 +205,10 @@ export default function WalkieTalkieConsole({
             </div>
             <div className="min-w-0">
               <h2 className="text-base sm:text-lg font-black m-0 truncate">
-                لاسلكي زايد مارت الحي (Live Walkie-Talkie)
+                لاسلكي زايد مارت التكتيكي (Police Radio PTT)
               </h2>
               <p className="text-xs text-[var(--g-muted)] m-0 truncate">
-                خط صوتي حي متزامن لكل القناة + استمرار العمل في الخلفية
+                استقبال تلقائي فوري كالشرطة بالخلفية + إشعار للكل عند فتح الخط أو الطوارئ
               </p>
             </div>
           </div>
@@ -202,17 +226,17 @@ export default function WalkieTalkieConsole({
           </button>
         </div>
 
-        {/* Server Stale Route Notice (If an older server process was running) */}
+        {/* Server Stale Route Notice */}
         {serverRouteMissing && (
           <div className="p-3 rounded-2xl bg-[var(--g-amber-bg)] border border-[var(--g-amber)]/40 text-[var(--g-amber)] text-xs font-extrabold flex items-center gap-2">
             <span className="ms-icon filled text-lg shrink-0">warning</span>
             <span>
-              تنبيه: الخادم المفتوح حالياً يعمل بنسخة قديمة قبل التحديث — أعد تشغيل الخادم (أو افتح ملف تشغيل زايد مارت) لتفعيل البث الحي الكامل.
+              تنبيه: الخادم المفتوح حالياً يعمل بنسخة قديمة قبل التحديث — أعد تشغيل الخادم لتفعيل البث الحي الكامل.
             </span>
           </div>
         )}
 
-        {/* Microphone Guidance Notice (e.g. non-HTTPS LAN or listen-only desktop) */}
+        {/* Microphone Guidance Notice */}
         {micWarning && liveOn && (
           <div className="p-3 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-[var(--g-text)] text-xs font-bold flex items-center gap-2">
             <span className="ms-icon text-lg text-[#00C853] shrink-0">info</span>
@@ -223,7 +247,9 @@ export default function WalkieTalkieConsole({
         {/* MASTER LIVE CHANNEL POWER SWITCH (ON / OFF) */}
         <div
           className={`rounded-3xl p-4 border-2 flex flex-wrap items-center justify-between gap-3 transition-colors duration-200 ${
-            liveOn
+            emergencyMode && liveOn
+              ? 'bg-[#3B0A0D] border-[#FF453A] text-white shadow-[0_8px_24px_rgba(255,69,58,0.28)]'
+              : liveOn
               ? 'bg-[#07291A] border-[#00E676] text-white shadow-[0_8px_24px_rgba(0,230,118,0.18)]'
               : 'bg-[#0D1117] border-[#262E3B] text-[#E6EDF3]'
           }`}
@@ -232,46 +258,48 @@ export default function WalkieTalkieConsole({
             <div className="flex items-center gap-2 flex-wrap">
               <span
                 className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                  liveOn ? 'bg-[#00E676] animate-pulse' : 'bg-[#64748B]'
+                  liveOn || receiveMode === 'all'
+                    ? 'bg-[#00E676] animate-pulse'
+                    : 'bg-[#FBBF24]'
                 }`}
               />
               <span className="text-sm sm:text-base font-black">
                 {liveOn
-                  ? 'الخط الصوتي الحي مفتوح للقناة (LIVE ON)'
-                  : 'الخط الصوتي الحي متوقف حالياً (OFF)'}
+                  ? emergencyMode
+                    ? '🚨 جلسة بث طوارئ حية مفتوحة للكل (EMERGENCY ON)'
+                    : 'جلسة التحدث الحية مفتوحة للقناة (LIVE ON)'
+                  : 'وضع الاستقبال التلقائي كالشرطة نشط (Auto-Listen)'}
               </span>
             </div>
             <p className="text-[11px] text-[#B8C4D0] m-0 leading-relaxed">
               {liveOn
-                ? 'أي زميل يتكلم يُسمع فوراً في نفس اللحظة، ويستمر اللاسلكي بالعمل حتى عند تصغير التطبيق أو قفل الشاشة.'
-                : 'اضغط (تشغيل الخط الحي ON) لفتح الاتصال الصوتي الفوري مع كل المتصلين على القناة والعمل بالخلفية.'}
+                ? 'تم إرسال إشعار فتح الخط للزملاء — صوتك يُسمع فوراً لديهم حتى لو لم يفتحوا نافذة اللاسلكي.'
+                : 'تسمع أي زميل يفتح الخط أو يتحدث تلقائياً طالما هاتفك متصل بالإنترنت — اضغط (فتح جلسة تحدث ON) للتكلم.'}
             </p>
-            {liveOn && (
-              <div className="flex items-center gap-2 flex-wrap pt-1 text-[10px] font-extrabold">
-                <span className="px-2 py-0.5 rounded-full bg-[#00E676]/20 text-[#69F0AE] border border-[#00E676]/40 inline-flex items-center gap-1">
-                  <span className="ms-icon text-xs">screen_lock_portrait</span>
-                  <span>
-                    {bgKeepAliveActive || wakeLockActive
-                      ? 'نشط في الخلفية وشاشة القفل'
-                      : 'متصل بالاستماع الحي'}
-                  </span>
+            <div className="flex items-center gap-2 flex-wrap pt-1 text-[10px] font-extrabold">
+              <span className="px-2 py-0.5 rounded-full bg-[#00E676]/20 text-[#69F0AE] border border-[#00E676]/40 inline-flex items-center gap-1">
+                <span className="ms-icon text-xs">screen_lock_portrait</span>
+                <span>
+                  {bgKeepAliveActive || wakeLockActive
+                    ? 'يعمل في الخلفية وشاشة القفل تلقائياً'
+                    : 'استماع فوري تلقائي كالشرطة'}
                 </span>
-                <span className="px-2 py-0.5 rounded-full bg-[#38BDF8]/20 text-[#7DD3FC] border border-[#38BDF8]/40 inline-flex items-center gap-1">
-                  <span className="ms-icon text-xs">public</span>
-                  <span>
-                    {globalCloudConnected
-                      ? 'ربط عالمي عبر كل الشبكات (4G / Wi-Fi)'
-                      : 'ربط شبكة محلية'}
-                  </span>
+              </span>
+              <span className="px-2 py-0.5 rounded-full bg-[#38BDF8]/20 text-[#7DD3FC] border border-[#38BDF8]/40 inline-flex items-center gap-1">
+                <span className="ms-icon text-xs">public</span>
+                <span>
+                  {globalCloudConnected
+                    ? 'ربط عالمي عبر كل الشبكات (4G / Wi-Fi)'
+                    : 'ربط شبكة محلية'}
                 </span>
-                {meshConnectedCount > 0 && (
-                  <span className="px-2 py-0.5 rounded-full bg-white/10 text-white border border-white/15 inline-flex items-center gap-1 num-ltr">
-                    <span className="ms-icon text-xs text-[#00E676]">hub</span>
-                    <span>P2P Direct: {meshConnectedCount}</span>
-                  </span>
-                )}
-              </div>
-            )}
+              </span>
+              {meshConnectedCount > 0 && (
+                <span className="px-2 py-0.5 rounded-full bg-white/10 text-white border border-white/15 inline-flex items-center gap-1 num-ltr">
+                  <span className="ms-icon text-xs text-[#00E676]">hub</span>
+                  <span>P2P Direct: {meshConnectedCount}</span>
+                </span>
+              )}
+            </div>
           </div>
 
           <button
@@ -289,10 +317,51 @@ export default function WalkieTalkieConsole({
               {connectingLive
                 ? 'جاري فتح الخط...'
                 : liveOn
-                ? 'إيقاف الخط (OFF)'
-                : 'تشغيل الخط الحي (ON)'}
+                ? 'إنهاء الجلسة (OFF)'
+                : 'فتح جلسة تحدث (ON)'}
             </span>
           </button>
+        </div>
+
+        {/* Police Radio Auto-Receive Mode Selector (يسمع على طول طالما فاتح نت حسب طوارئ ولا لأ) */}
+        <div className="g-card p-3.5 bg-[var(--g-surface-variant)]/60 space-y-2">
+          <div className="flex items-center justify-between gap-2 px-1">
+            <span className="text-xs font-extrabold text-[var(--g-text)] flex items-center gap-1.5">
+              <span className="ms-icon text-base text-[#00C853]">hearing</span>
+              <span>وضع الاستماع التلقائي عند اتصال الإنترنت (بدون فتح النافذة):</span>
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {RECEIVE_MODES.map((rm) => {
+              const active = receiveMode === rm.id;
+              return (
+                <button
+                  key={rm.id}
+                  type="button"
+                  onClick={() => setReceiveMode?.(rm.id)}
+                  className={`min-h-[52px] px-2 py-2 rounded-2xl border text-center flex flex-col items-center justify-center gap-0.5 transition-colors duration-150 cursor-pointer ${
+                    active
+                      ? rm.id === 'emergency_only'
+                        ? 'bg-[#3B0A0D] text-[#FF8A80] border-[#FF453A]'
+                        : rm.id === 'muted'
+                        ? 'bg-[#1E293B] text-white border-[#64748B]'
+                        : 'bg-[#0D1117] text-[#00E676] border-[#00E676]'
+                      : 'bg-[var(--g-surface)] text-[var(--g-text)] border-[var(--g-border)] hover:border-[var(--g-primary)]'
+                  }`}
+                >
+                  <div className="flex items-center gap-1 text-[11px] sm:text-xs font-black">
+                    <span className={`ms-icon text-base ${active ? 'filled' : ''}`}>
+                      {rm.icon}
+                    </span>
+                    <span>{rm.label}</span>
+                  </div>
+                  <span className="text-[10px] opacity-80 font-bold hidden sm:inline">
+                    {rm.sub}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* Tactical OLED Digital Frequency & Simultaneous Speakers Display */}
@@ -306,6 +375,11 @@ export default function WalkieTalkieConsole({
                 >
                   {currentChannelMeta.code} • {currentChannelMeta.freq}
                 </span>
+                {emergencyMode && (
+                  <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-[#FF453A] text-white animate-pulse">
+                    🚨 وضع اختراق الطوارئ مفعل
+                  </span>
+                )}
               </div>
               <div className="text-base sm:text-lg font-black text-white flex items-center gap-1.5">
                 <span
@@ -328,7 +402,7 @@ export default function WalkieTalkieConsole({
                   <span className="w-2.5 h-2.5 rounded-full bg-[#FF3B30] animate-ping" />
                   <span className="num-ltr">LIVE {txElapsedSec.toFixed(1)}s</span>
                 </div>
-              ) : isReceiving && liveOn ? (
+              ) : isReceiving ? (
                 <div className="px-3 py-1.5 rounded-full bg-[#00E676]/20 border border-[#00E676] text-[#00E676] text-xs font-black flex items-center gap-1.5">
                   <span className="w-2.5 h-2.5 rounded-full bg-[#00E676] animate-pulse" />
                   <span>بث حي وارد ({liveSpeakingUnits.length || 1})</span>
@@ -336,11 +410,11 @@ export default function WalkieTalkieConsole({
               ) : liveOn ? (
                 <div className="px-3 py-1.5 rounded-full bg-[#00E676]/15 border border-[#00E676]/50 text-[#00E676] text-xs font-extrabold flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-[#00E676]" />
-                  <span>خط مفتوح</span>
+                  <span>جلسة نشطة</span>
                 </div>
               ) : (
-                <div className="px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-[#94A3B8] text-xs font-bold">
-                  في وضع الاستعداد
+                <div className="px-3 py-1.5 rounded-full bg-[#00E676]/10 border border-[#00E676]/30 text-[#69F0AE] text-xs font-bold">
+                  استقبال تلقائي نشط
                 </div>
               )}
             </div>
@@ -357,9 +431,13 @@ export default function WalkieTalkieConsole({
               ) : localSpeaking ? (
                 <div className="text-xs sm:text-sm font-extrabold text-[#FF6961] truncate flex items-center gap-1.5">
                   <span className="ms-icon filled text-base">mic</span>
-                  <span>صوتك يُبث حياً الآن لكل القناة...</span>
+                  <span>
+                    {emergencyMode
+                      ? '🚨 صوتك يُبث كطوارئ لكل القنوات الآن...'
+                      : 'صوتك يُبث حياً الآن ويُسمع تلقائياً لدى الزملاء...'}
+                  </span>
                 </div>
-              ) : speakingNamesBanner && liveOn ? (
+              ) : speakingNamesBanner ? (
                 <div className="text-xs sm:text-sm font-extrabold text-[#00E676] truncate flex items-center gap-1.5">
                   <span className="ms-icon filled text-base">graphic_eq</span>
                   <span>{speakingNamesBanner} يتحدث الآن حياً...</span>
@@ -374,14 +452,14 @@ export default function WalkieTalkieConsole({
                   </span>
                 </div>
               ) : (
-                <div className="text-xs font-bold text-[#8B949E] truncate flex items-center gap-1.5">
-                  <span className="ms-icon text-base text-[#64748B]">power_settings_new</span>
-                  <span>اضغط تشغيل الخط الحي (ON) لبدء المحادثة المباشرة</span>
+                <div className="text-xs font-bold text-[#A7F3D0] truncate flex items-center gap-1.5">
+                  <span className="ms-icon text-base text-[#00E676]">hearing</span>
+                  <span>الراديو جاهز للاستقبال التلقائي — اضغط الدائرة للتحدث الفوري</span>
                 </div>
               )}
             </div>
 
-            {/* 12 GPU-Transformed Visualizer Bars (Zero Layout Shift) */}
+            {/* 12 GPU-Transformed Visualizer Bars */}
             <div
               aria-hidden="true"
               className="flex items-center gap-1 h-8 shrink-0 px-1"
@@ -393,7 +471,7 @@ export default function WalkieTalkieConsole({
                     transform: `scaleY(${Math.max(0.14, Math.min(1, lvl))})`,
                     backgroundColor: localSpeaking
                       ? '#FF453A'
-                      : isReceiving && liveOn
+                      : isReceiving
                       ? '#00E676'
                       : liveOn
                       ? '#10B981'
@@ -408,10 +486,10 @@ export default function WalkieTalkieConsole({
           {/* Connected Units Strip */}
           <div className="flex items-center justify-between gap-2 pt-0.5 text-[11px]">
             <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-              <span className="text-[#8B949E] font-bold shrink-0">المتصلون على القناة:</span>
+              <span className="text-[#8B949E] font-bold shrink-0">المتصلون بالاستقبال:</span>
               {activeUnits.length === 0 ? (
                 <span className="text-[#94A3B8] font-bold">
-                  {liveOn ? 'أنت متصل على الخط الحي' : 'لا يوجد متصلون حالياً'}
+                  جهازك متصل بالاستقبال السحابي
                 </span>
               ) : (
                 activeUnits.slice(0, 6).map((u) => {
@@ -451,8 +529,8 @@ export default function WalkieTalkieConsole({
           </div>
         </div>
 
-        {/* Channel Switcher (For Multi-Channel Roles) OR Dedicated Security Lock Badge */}
-        {allowedChannels.length > 1 ? (
+        {/* Channel Switcher */}
+        {allowedChannels.length > 1 && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             {allowedChannels.map((ch) => {
               const selected = ch.id === activeChannel;
@@ -463,7 +541,9 @@ export default function WalkieTalkieConsole({
                   onClick={() => selectChannel(ch.id)}
                   className={`min-h-[46px] px-3 py-2 rounded-2xl border text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors duration-200 cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--g-primary)] ${
                     selected
-                      ? 'bg-[#0D1117] text-white border-[#00E676] shadow-xs'
+                      ? ch.id === 'emergency'
+                        ? 'bg-[#3B0A0D] text-white border-[#FF453A] shadow-xs'
+                        : 'bg-[#0D1117] text-white border-[#00E676] shadow-xs'
                       : 'bg-[var(--g-surface-variant)] text-[var(--g-text)] border-[var(--g-border)] hover:border-[var(--g-primary)]'
                   }`}
                 >
@@ -478,24 +558,19 @@ export default function WalkieTalkieConsole({
               );
             })}
           </div>
-        ) : (
-          <div className="px-3.5 py-2.5 rounded-2xl bg-[var(--g-green-bg)] border border-[var(--g-green-border)]/40 text-[var(--g-green)] text-xs font-extrabold flex items-center justify-center gap-2">
-            <span className="ms-icon filled text-base">verified_user</span>
-            <span>جهازك مضبوط تلقائياً على تردد قناة الأمن والبوابة (CH-01)</span>
-          </div>
         )}
 
         {/* 3-Way Live Microphone Mode Selector + Tactile Hardware Deck */}
         <div className="g-card p-4 sm:p-5 bg-[var(--g-surface-variant)]/55 space-y-4">
           <div className="space-y-1.5">
             <div className="text-xs font-extrabold text-[var(--g-muted)] px-1 flex items-center justify-between">
-              <span>وضع المايكروفون أثناء فتح الخط الحي:</span>
+              <span>وضع المايكروفون أثناء التحدث:</span>
               <span className="text-[11px] font-bold text-[var(--g-primary)]">
                 {micMode === 'vad'
-                  ? 'حساسية صوتية ذكية (بدون ضوضاء)'
+                  ? 'حساسية صوتية ذكية (أولوية استماع آلية)'
                   : micMode === 'open'
                   ? 'مايك مفتوح ١٠٠٪'
-                  : 'استماع بالخلفية فقط'}
+                  : 'اضغط مطولاً للتحدث (PTT)'}
               </span>
             </div>
             <div className="grid grid-cols-3 gap-2">
@@ -549,44 +624,46 @@ export default function WalkieTalkieConsole({
                 onPointerDown={handlePttPointerDown}
                 onPointerUp={handlePttPointerUp}
                 onPointerCancel={handlePttPointerUp}
-                aria-label={
-                  !liveOn
-                    ? 'اضغط لتشغيل الخط الحي للقناة'
-                    : 'اضغط مطولاً للتحدث الفوري المباشر'
-                }
+                aria-label="اضغط مطولاً للتحدث الفوري المباشر"
                 className={`relative z-10 w-38 h-38 sm:w-42 sm:h-42 rounded-full select-none touch-none flex flex-col items-center justify-center gap-1.5 border-4 transition-all duration-150 cursor-pointer shadow-lg focus-visible:outline-4 focus-visible:outline-[var(--g-primary)] ${
-                  !liveOn
-                    ? 'bg-[#0D1117] hover:bg-[#16202E] border-[#00E676] text-[#00E676]'
-                    : localSpeaking
+                  localSpeaking
                     ? 'bg-[#D93025] border-[#FF8A80] text-white scale-96 shadow-[0_0_32px_rgba(217,48,37,0.55)]'
+                    : emergencyMode
+                    ? 'bg-[#3B0A0D] hover:bg-[#4E0E12] border-[#FF453A] text-white shadow-[0_0_24px_rgba(255,69,58,0.35)]'
+                    : !liveOn
+                    ? 'bg-[#0D1117] hover:bg-[#16202E] border-[#00E676] text-[#00E676]'
                     : micMode === 'muted'
                     ? 'bg-[#1E293B] hover:bg-[#273549] border-[#94A3B8] text-white'
                     : 'bg-[#07291A] hover:bg-[#0A3823] border-[#00E676] text-white shadow-[0_0_24px_rgba(0,230,118,0.25)]'
                 }`}
               >
                 <span className="ms-icon filled text-5xl">
-                  {!liveOn
-                    ? 'power_settings_new'
-                    : localSpeaking
+                  {localSpeaking
                     ? 'mic'
+                    : emergencyMode
+                    ? 'e911_emergency'
+                    : !liveOn
+                    ? 'touch_app'
                     : micMode === 'muted'
                     ? 'touch_app'
                     : 'graphic_eq'}
                 </span>
                 <span className="text-sm font-black tracking-tight text-center px-2">
-                  {!liveOn
-                    ? 'اضغط لفتح الخط ON'
-                    : localSpeaking
-                    ? 'صوتك مباشر الآن'
+                  {localSpeaking
+                    ? 'صوتك مباشر الآن للكل'
+                    : emergencyMode && !liveOn
+                    ? 'اضغط لبث طوارئ للكل 🚨'
+                    : !liveOn
+                    ? 'اضغط مطولاً للتحدث فوراً'
                     : micMode === 'muted'
                     ? 'اضغط مطولاً للتحدث'
                     : 'الخط مفتوح • تكلم فوراً'}
                 </span>
                 <span className="text-[11px] font-bold opacity-85 num-ltr">
-                  {!liveOn
-                    ? 'OPEN LIVE CHANNEL'
-                    : localSpeaking
+                  {localSpeaking
                     ? `ON AIR • ${txElapsedSec.toFixed(1)}s`
+                    : !liveOn
+                    ? 'HOLD PTT OR TAP ON'
                     : micMode === 'muted'
                     ? 'HOLD TO TALK'
                     : 'LIVE AUTO-TALK'}
@@ -594,20 +671,37 @@ export default function WalkieTalkieConsole({
               </button>
             </div>
 
-            {/* Urgent Pager Alert Button */}
-            <div className="flex items-center justify-center w-full max-w-xs">
+            {/* Emergency Mode Toggle + Urgent Pager Alert Row */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full">
+              <button
+                type="button"
+                onClick={() => setEmergencyMode?.((prev) => !prev)}
+                className={`min-h-[48px] px-3 py-2 rounded-2xl border text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors duration-200 cursor-pointer ${
+                  emergencyMode
+                    ? 'bg-[#FF453A] text-white border-white shadow-md'
+                    : 'bg-[var(--g-surface)] text-[var(--g-text)] border-[var(--g-border)] hover:border-[#FF453A]'
+                }`}
+              >
+                <span className="ms-icon filled text-base">e911_emergency</span>
+                <span>
+                  {emergencyMode
+                    ? '🚨 وضع اختراق الطوارئ مفعل (يصل للكل)'
+                    : 'تفعيل وضع الطوارئ عند التحدث 🚨'}
+                </span>
+              </button>
+
               <button
                 type="button"
                 onClick={sendAlertPing}
-                className="w-full min-h-[48px] px-4 py-2 rounded-2xl bg-[var(--g-red-bg)] text-[var(--g-red)] border border-[var(--g-red-border)]/40 hover:border-[var(--g-red)] text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors duration-200 cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--g-red)]"
+                className="min-h-[48px] px-3 py-2 rounded-2xl bg-[var(--g-red-bg)] text-[var(--g-red)] border border-[var(--g-red-border)]/40 hover:border-[var(--g-red)] text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors duration-200 cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--g-red)]"
               >
                 <span className="ms-icon filled text-base">notifications_active</span>
-                <span>إرسال جرس انتباه عاجل لكل القناة</span>
+                <span>إرسال صافرة وبوش طوارئ للكل</span>
               </button>
             </div>
 
             <p className="text-[11px] text-[var(--g-muted)] text-center m-0">
-              عند تفعيل <strong className="text-[var(--g-text)]">LIVE ON</strong> يمكنك إغلاق هذه النافذة أو قفل شاشة الموبايل وسيبقى الخط الصوتي الحي متصلاً بالخلفية
+              النظام يعمل مثل <strong className="text-[var(--g-text)]">لاسلكي الشرطة</strong>: بمجرد فتح الخط أو التحدث من عندك يصل إشعار وصوت مباشر تلقائياً لكل زميل متصل بالإنترنت بدون أن يضطر لفتح النافذة
             </p>
           </div>
         </div>
@@ -618,7 +712,7 @@ export default function WalkieTalkieConsole({
             <div className="flex items-center justify-between px-1">
               <h3 className="text-xs sm:text-sm font-extrabold m-0 flex items-center gap-1.5">
                 <span className="ms-icon text-base text-[var(--g-primary)]">history</span>
-                <span>آخر التنبيهات والنداءات المسجلة ({recentCalls.length})</span>
+                <span>آخر التنبيهات والنداءات المحفوظة تلقائياً ({recentCalls.length})</span>
               </h3>
             </div>
 
@@ -647,7 +741,7 @@ export default function WalkieTalkieConsole({
                         className={`w-11 h-11 rounded-full flex items-center justify-center shrink-0 transition-colors duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--g-primary)] ${
                           isPlayingThis
                             ? 'bg-[#137333] text-white'
-                            : call.kind === 'ping'
+                            : call.kind === 'ping' || call.is_emergency
                             ? 'bg-[var(--g-red)] text-white'
                             : 'bg-[var(--g-primary)] text-white'
                         }`}
@@ -666,6 +760,11 @@ export default function WalkieTalkieConsole({
                           <span className="text-xs font-black text-[var(--g-text)] truncate">
                             {call.sender_name}
                           </span>
+                          {Boolean(call.is_emergency) && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--g-red)] text-white font-extrabold">
+                              طوارئ 🚨
+                            </span>
+                          )}
                           {roleText && (
                             <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--g-surface)] text-[var(--g-muted)] font-extrabold">
                               {roleText}
@@ -675,8 +774,8 @@ export default function WalkieTalkieConsole({
                         <div className="text-[11px] text-[var(--g-muted)] font-bold flex items-center gap-2 mt-0.5">
                           <span>
                             {call.kind === 'ping'
-                              ? 'جرس انتباه عاجل'
-                              : `نداء مسجل (${Number(call.duration_sec || 1).toFixed(1)} ث)`}
+                              ? 'صافرة انتباه وطوارئ عاجلة'
+                              : `نداء صوتي (${Number(call.duration_sec || 1).toFixed(1)} ث)`}
                           </span>
                           <span>•</span>
                           <span className="num-ltr">{formatTimeArabic(call.timestamp)}</span>

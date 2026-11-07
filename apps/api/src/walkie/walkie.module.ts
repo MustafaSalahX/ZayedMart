@@ -58,6 +58,8 @@ export class WalkieController {
 
   private canTransmitOnChannel(auth: AuthContext, channel: string): boolean {
     const allowed = this.getAllowedChannels(auth);
+    if (allowed.length === 0) return false;
+    if (channel === 'emergency') return true;
     return allowed.includes(channel as WalkieChannelId);
   }
 
@@ -335,10 +337,26 @@ export class WalkieController {
       const fromPeerId = String(body?.peer_id || auth.user.id).trim().slice(0, 80);
       const targetPeerId = String(body?.target_peer_id || '').trim().slice(0, 80);
       const signalType = String(body?.signal_type || '').trim();
-      const validSignalTypes = ['join', 'leave', 'offer', 'answer', 'ice', 'talking_state'];
+      const validSignalTypes = [
+        'join',
+        'leave',
+        'offer',
+        'answer',
+        'ice',
+        'talking_state',
+        'session_open',
+        'emergency_alert',
+      ];
       if (!validSignalTypes.includes(signalType)) {
         return res.status(400).json({ error: 'نوع إشارة الربط الحي غير صالح' });
       }
+
+      const isEmergencySignal = Boolean(
+        targetChannel === 'emergency' ||
+          signalType === 'emergency_alert' ||
+          body?.is_emergency ||
+          body?.data?.is_emergency
+      );
 
       const presenceKey = `${auth.user.id}::${fromPeerId}`;
       if (signalType === 'leave') {
@@ -350,6 +368,8 @@ export class WalkieController {
         const nextTalking =
           signalType === 'talking_state'
             ? Boolean(body?.data?.talking)
+            : signalType === 'emergency_alert'
+            ? true
             : prev?.status === 'talking';
         const rawMicMode = String(body?.data?.mic_mode || prev?.mic_mode || 'vad');
         const entry: WalkiePresenceEntry = {
@@ -366,7 +386,12 @@ export class WalkieController {
           updated_at_ms: Date.now(),
         };
         this.walkiePresenceMap.set(presenceKey, entry);
-        if (signalType === 'join' || signalType === 'talking_state') {
+        if (
+          signalType === 'join' ||
+          signalType === 'talking_state' ||
+          signalType === 'session_open' ||
+          signalType === 'emergency_alert'
+        ) {
           await this.upsertPersistentPresence(entry);
         }
       }
@@ -382,12 +407,13 @@ export class WalkieController {
         role_label: auth.user.role_label,
         avatar_color: auth.user.avatar_color || '#146C2E',
         signal_type: signalType,
+        is_emergency: isEmergencySignal,
         data: body?.data ?? null,
         timestamp: new Date().toISOString(),
         ts_ms: Date.now(),
       };
 
-      const activeUnits = await this.getActiveUnits(targetChannel);
+      const activeUnits = await this.getActiveUnits(isEmergencySignal ? 'all' : targetChannel);
       if (targetPeerId) {
         this.enqueueSignalForPeer(targetPeerId, envelope);
       } else {
@@ -405,7 +431,13 @@ export class WalkieController {
         targetChannel,
         alsoCloud
       );
-      if (signalType === 'join' || signalType === 'leave' || signalType === 'talking_state') {
+      if (
+        signalType === 'join' ||
+        signalType === 'leave' ||
+        signalType === 'talking_state' ||
+        signalType === 'session_open' ||
+        signalType === 'emergency_alert'
+      ) {
         await this.realtime.broadcastWalkieEvent(
           'walkie_presence',
           { channel: targetChannel, activeUnits },
@@ -749,14 +781,14 @@ export class WalkieController {
       const calls = since
         ? await this.db.queryAll(
             `SELECT * FROM walkie_calls
-             WHERE (channel = ? OR channel = 'emergency') AND timestamp > ?
+             WHERE (channel = ? OR channel = 'emergency' OR is_emergency = 1) AND timestamp > ?
              ORDER BY timestamp ASC
              LIMIT 20`,
             [activeChannel, since]
           )
         : await this.db.queryAll(
             `SELECT * FROM walkie_calls
-             WHERE channel = ? OR channel = 'emergency'
+             WHERE channel = ? OR channel = 'emergency' OR is_emergency = 1
              ORDER BY timestamp DESC
              LIMIT 20`,
             [activeChannel]
@@ -773,7 +805,7 @@ export class WalkieController {
             (f) =>
               f.seq > lastFrameSeq &&
               f.from_peer_id !== (pollPeerId || auth.user.id) &&
-              (f.channel === activeChannel || f.channel === 'emergency')
+              (f.channel === activeChannel || f.channel === 'emergency' || f.is_emergency)
           )
         : [];
 
