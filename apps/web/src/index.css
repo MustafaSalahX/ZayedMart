@@ -420,6 +420,28 @@
   }
 }
 
+/* Lite / Economy Mode for Low-End Android Phones (1GB-2GB RAM, Android Go, budget GPUs) */
+html.lite-mode *,
+html.lite-mode *::before,
+html.lite-mode *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  transition-duration: 0.01ms !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+}
+
+html.lite-mode .g-card,
+html.lite-mode .g-dialog-sheet,
+html.lite-mode header,
+html.lite-mode nav {
+  box-shadow: none !important;
+}
+
+html.lite-mode .g-modal-overlay {
+  background-color: rgba(0, 0, 0, 0.72) !important;
+}
+
 /* Print Layout strictly for QR Employee Cards (unconstrained multi-page A4) */
 @media print {
   html,

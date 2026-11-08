@@ -34,42 +34,100 @@ export const WALKIE_CHANNELS = [
     code: 'CH-01',
     freq: '101.5 MHz',
     label: 'قناة الأمن والبوابة',
-    shortLabel: 'الأمن والبوابة',
+    shortLabel: 'الأمن CH-01',
     icon: 'shield_person',
     accent: '#00E676',
-    description: 'خط لاسلكي تكتيكي مباشر لأفراد الأمن، البوابة الرئيسية، استلام العربيات، ومراقب الكاميرات',
+    roleBadge: 'الأمن + جميع الأقسام',
+    description: 'خط لاسلكي مباشر للتواصل الفوري مع أفراد الأمن والبوابة من أي قسم أو كاشير',
   },
   {
-    id: 'warehouse',
+    id: 'cashier',
     code: 'CH-02',
     freq: '102.0 MHz',
-    label: 'المخزن والرصيف',
-    shortLabel: 'المخزن والرصيف',
-    icon: 'warehouse',
-    accent: '#38BDF8',
-    description: 'خط لاسلكي مباشر لأمين المخزن، تنزيل البضاعة، وتوفير نواقص الصالة',
+    label: 'قناة الكاشيرية وخدمة العملاء',
+    shortLabel: 'الكاشير CH-02',
+    icon: 'point_of_sale',
+    accent: '#F87171',
+    roleBadge: 'الكاشيرية',
+    description: 'قناة متخصصة للكاشيرية، استعلامات الأسعار، الفكة، ومشرف الكاشير',
   },
   {
     id: 'floor',
     code: 'CH-03',
     freq: '103.5 MHz',
-    label: 'الصالة والكاشير',
-    shortLabel: 'الصالة والكاشير',
-    icon: 'point_of_sale',
+    label: 'قناة الصالة والممرات',
+    shortLabel: 'الصالة CH-03',
+    icon: 'shopping_basket',
     accent: '#FBBF24',
-    description: 'خط لاسلكي مباشر لمشرفي الصالة والكاشيرية ومنسقي الممرات',
+    roleBadge: 'منسقي الصالة',
+    description: 'قناة متخصصة لمنسقي الصالة والممرات وتجهيز الرفوف والنواقص',
+  },
+  {
+    id: 'warehouse',
+    code: 'CH-04',
+    freq: '104.2 MHz',
+    label: 'قناة المخزن والرصيف',
+    shortLabel: 'المخزن CH-04',
+    icon: 'warehouse',
+    accent: '#38BDF8',
+    roleBadge: 'أمين المخزن',
+    description: 'قناة متخصصة لأمناء المخزن، تنزيل عربيات البضاعة، وتزويد الصالة',
+  },
+  {
+    id: 'delivery',
+    code: 'CH-05',
+    freq: '105.8 MHz',
+    label: 'قناة الدليفري والتوصيل',
+    shortLabel: 'الدليفري CH-05',
+    icon: 'two_wheeler',
+    accent: '#FB923C',
+    roleBadge: 'الدليفري والطيارين',
+    description: 'قناة متخصصة لطيارين الدليفري، تجهيز الأوردرات الخارجية، ومتابعة التوصيل',
+  },
+  {
+    id: 'supervisor',
+    code: 'CH-06',
+    freq: '106.4 MHz',
+    label: 'قناة المشرفين والإدارة',
+    shortLabel: 'المشرفين CH-06',
+    icon: 'manage_accounts',
+    accent: '#A78BFA',
+    roleBadge: 'الإدارة والكاميرات',
+    description: 'قناة متخصصة للمدير، مشرفي الفرع، ومراقب الكاميرات',
   },
   {
     id: 'emergency',
     code: 'CH-09',
     freq: '109.9 MHz',
-    label: 'نداء الطوارئ العام',
-    shortLabel: 'طوارئ الفرع',
+    label: 'نداء الطوارئ العام للكل',
+    shortLabel: 'الطوارئ CH-09',
     icon: 'e911_emergency',
     accent: '#FF453A',
-    description: 'بث طوارئ كالشرطة يخترق جميع القنوات ويُسمع تلقائياً لدى كل الأجهزة المتصلة فوراً',
+    roleBadge: 'عام لجميع الأدوار',
+    description: 'بث طوارئ عام يخترق جميع القنوات ويُسمع تلقائياً لدى كل الأجهزة المتصلة فوراً',
   },
 ];
+
+function getPrimaryChannelForRoleClient(role) {
+  switch (role) {
+    case 'security':
+      return 'security';
+    case 'cashier':
+      return 'cashier';
+    case 'warehouse':
+      return 'warehouse';
+    case 'delivery':
+      return 'delivery';
+    case 'owner':
+    case 'manager':
+    case 'supervisor':
+    case 'cctv':
+      return 'supervisor';
+    case 'hall':
+    default:
+      return 'floor';
+  }
+}
 
 const RADIO_CHANNEL_KEY = 'zayed_walkie_channel_v1';
 const RADIO_MIC_MODE_KEY = 'zayed_walkie_mic_mode_v2';
@@ -140,19 +198,15 @@ export function useWalkieTalkie({ authUser, permissions = [], onToast }) {
   const allowedChannels = useMemo(() => {
     if (!canUseWalkie) return [];
     if (canAllChannels) return WALKIE_CHANNELS;
-    if (role === 'security') {
-      return WALKIE_CHANNELS.filter((c) => c.id === 'security' || c.id === 'emergency');
-    }
-    if (role === 'warehouse') {
-      return WALKIE_CHANNELS.filter((c) => c.id === 'warehouse' || c.id === 'emergency');
-    }
-    return WALKIE_CHANNELS.filter((c) => c.id === 'floor' || c.id === 'emergency');
+    const primaryId = getPrimaryChannelForRoleClient(role);
+    const allowedIds = new Set([primaryId, 'security', 'emergency']);
+    return WALKIE_CHANNELS.filter((c) => allowedIds.has(c.id));
   }, [canUseWalkie, canAllChannels, role]);
 
   const defaultChannelId = useMemo(() => {
     if (allowedChannels.length === 0) return 'security';
-    if (role === 'security' && allowedChannels.some((c) => c.id === 'security')) return 'security';
-    if (role === 'warehouse' && allowedChannels.some((c) => c.id === 'warehouse')) return 'warehouse';
+    const primaryId = getPrimaryChannelForRoleClient(role);
+    if (allowedChannels.some((c) => c.id === primaryId)) return primaryId;
     if (allowedChannels.some((c) => c.id === 'security')) return 'security';
     return allowedChannels[0].id;
   }, [allowedChannels, role]);
@@ -195,6 +249,7 @@ export function useWalkieTalkie({ authUser, permissions = [], onToast }) {
   const [txElapsedSec, setTxElapsedSec] = useState(0);
   const [liveLevels, setLiveLevels] = useState(IDLE_BAR_LEVELS);
   const [activeUnits, setActiveUnits] = useState([]);
+  const [channelActivitySummary, setChannelActivitySummary] = useState({});
   const [globalCloudConnected, setGlobalCloudConnected] = useState(false);
   const [engineRemoteSpeakers, setEngineRemoteSpeakers] = useState([]);
   const [standbyRemoteSpeakers, setStandbyRemoteSpeakers] = useState([]);
@@ -845,6 +900,9 @@ export function useWalkieTalkie({ authUser, permissions = [], onToast }) {
       serverUnitsRef.current = res.activeUnits;
       commitMergedUnits();
     }
+    if (res.channelActivitySummary && typeof res.channelActivitySummary === 'object') {
+      setChannelActivitySummary(res.channelActivitySummary);
+    }
 
     if (Array.isArray(res.signals)) {
       for (const sig of res.signals) {
@@ -1479,6 +1537,7 @@ export function useWalkieTalkie({ authUser, permissions = [], onToast }) {
     txElapsedSec,
     liveLevels,
     activeUnits,
+    channelActivitySummary,
     liveSpeakingUnits,
     remoteTalkingUnit: liveSpeakingUnits[0] || null,
     incomingDispatchAlert,

@@ -67,7 +67,10 @@ export function subscribeSyncState(listener) {
 export function isStandaloneMode() {
   if (typeof window === 'undefined') return false;
   return Boolean(
-    window.matchMedia?.('(display-mode: standalone)')?.matches ||
+    window.Capacitor?.isNativePlatform?.() ||
+      window.ZayedAndroidBridge ||
+      /; wv\)/i.test(window.navigator?.userAgent || '') ||
+      window.matchMedia?.('(display-mode: standalone)')?.matches ||
       window.matchMedia?.('(display-mode: fullscreen)')?.matches ||
       window.navigator?.standalone === true
   );

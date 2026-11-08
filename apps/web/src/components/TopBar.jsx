@@ -19,6 +19,8 @@ export default function TopBar({
   onToast,
   darkMode,
   onToggleDarkMode,
+  liteMode = false,
+  onToggleLiteMode,
   fontScale,
   onCycleFontScale,
   fontFamily,
@@ -42,6 +44,7 @@ export default function TopBar({
 
   const role = authUser?.role || '';
   const canAttendance = hasAnyPermission(permissions, role, [
+    'attendance:self',
     'attendance:read',
     'attendance:write',
     'attendance:kiosk',
@@ -276,7 +279,7 @@ export default function TopBar({
               </span>
             </button>
 
-            {connectionMode === 'local_server' && isAdminLevel && (
+            {isAdminLevel && (
               <button
                 type="button"
                 onClick={onLockToKiosk}
@@ -372,6 +375,27 @@ export default function TopBar({
               <span className="ms-icon text-base">format_size</span>
               <span className="hidden sm:inline">{scaleLabel}</span>
             </button>
+
+            {/* Lite / Economy Mode Toggle for Budget Phones */}
+            {onToggleLiteMode && (
+              <button
+                type="button"
+                onClick={onToggleLiteMode}
+                title={
+                  liteMode
+                    ? 'وضع الهواتف الاقتصادية مفعّل (سريع وخفيف على الرام والبطارية)'
+                    : 'تفعيل الوضع الخفيف للهواتف الاقتصادية الضعيفة'
+                }
+                className={`min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-full border text-xs font-extrabold flex items-center justify-center gap-1 active:scale-95 shrink-0 ${
+                  liteMode
+                    ? 'bg-[var(--g-green-bg)] text-[var(--g-green)] border-[var(--g-green)]/40'
+                    : 'bg-[var(--g-surface-variant)] text-[var(--g-text)] border-[var(--g-border)]'
+                }`}
+              >
+                <span className="ms-icon filled text-base">bolt</span>
+                <span className="hidden xs:inline">{liteMode ? 'أداء خفيف ⚡' : 'خفيف'}</span>
+              </button>
+            )}
 
             {/* Dark / Light Mode Toggle */}
             <button

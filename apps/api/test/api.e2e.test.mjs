@@ -135,7 +135,7 @@ describe('ZayedMart NestJS API + Global Walkie-Talkie + Zero-Conflict Sync E2E',
     assert.equal(secBoot.json.serverColdEmpty, false);
   });
 
-  it('4. records 12-hour shift attendance (check_in -> break_start -> break_end -> check_out)', async () => {
+  it('4. enforces Attendance State Machine (no double break, post-checkout lock, flexible shifts)', async () => {
     const scanIn = await api(
       '/api/attendance/quick-scan',
       'POST',
@@ -146,6 +146,15 @@ describe('ZayedMart NestJS API + Global Walkie-Talkie + Zero-Conflict Sync E2E',
     assert.equal(scanIn.json.nextAction, 'check_in');
     const empId = scanIn.json.employee.id;
 
+    // Duplicate check_in while present is strictly blocked (400)
+    const dupIn = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: empId, action_type: 'check_in' },
+      securityToken
+    );
+    assert.equal(dupIn.status, 400);
+
     const brkStart = await api(
       '/api/attendance',
       'POST',
@@ -153,6 +162,15 @@ describe('ZayedMart NestJS API + Global Walkie-Talkie + Zero-Conflict Sync E2E',
       securityToken
     );
     assert.equal(brkStart.status, 201);
+
+    // Starting another break while already on_break is strictly blocked (400)
+    const doubleBreak = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: empId, action_type: 'break_start', allowed_break_minutes: 15 },
+      securityToken
+    );
+    assert.equal(doubleBreak.status, 400);
 
     const brkEnd = await api(
       '/api/attendance',
@@ -169,21 +187,55 @@ describe('ZayedMart NestJS API + Global Walkie-Talkie + Zero-Conflict Sync E2E',
       securityToken
     );
     assert.equal(checkOut.status, 201);
+
+    // Immediate check-in after check-out is locked until next shift window (400)
+    const lockedReCheckIn = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: empId, action_type: 'check_in' },
+      securityToken
+    );
+    assert.equal(lockedReCheckIn.status, 400);
+
+    // Owner/Admin can explicitly override to reopen shift if needed
+    const adminReopen = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: empId, action_type: 'check_in', allow_reopen_shift: true },
+      ownerToken
+    );
+    assert.equal(adminReopen.status, 201);
   });
 
-  it('5. enforces Tactical Walkie-Talkie security channel isolation, signaling, and live audio relay', async () => {
-    // Hall employee has NO walkie:use -> strictly blocked 403
-    const hallPoll = await api('/api/walkie/poll?channel=security', 'GET', undefined, hallToken);
-    assert.equal(hallPoll.status, 403);
+  it('5. enforces Multi-Role Walkie-Talkie channels (Cashier/Hall/Security/Admin/CCTV) and Admin RBAC control', async () => {
+    // Hall employee has access to 'floor' (CH-03), 'security' (CH-01), and 'emergency' (CH-09),
+    // but is blocked (403) from 'warehouse' (CH-04)
+    const hallWrongCh = await api(
+      '/api/walkie/presence',
+      'POST',
+      { channel: 'warehouse', peer_id: 'peer_hall_1', status: 'listening', live_on: true },
+      hallToken
+    );
+    assert.equal(hallWrongCh.status, 403);
 
-    // Security guard is allowed ONLY on CH-01 (security) -> blocked 403 from transmitting on warehouse CH-02
-    const secWrongCh = await api(
+    // Hall employee CAN join 'security' (CH-01) to talk to Security
+    const hallToSec = await api(
+      '/api/walkie/presence',
+      'POST',
+      { channel: 'security', peer_id: 'peer_hall_1', status: 'listening', live_on: true },
+      hallToken
+    );
+    assert.equal(hallToSec.status, 200);
+
+    // Security guard has walkie:all_channels -> CAN enter 'warehouse' (CH-04), 'cashier' (CH-02), and 'security' (CH-01)
+    const secWarehouseCh = await api(
       '/api/walkie/presence',
       'POST',
       { channel: 'warehouse', peer_id: 'peer_sec_1', status: 'listening', live_on: true },
       securityToken
     );
-    assert.equal(secWrongCh.status, 403);
+    assert.equal(secWarehouseCh.status, 200);
+    assert.ok(secWarehouseCh.json.channelActivitySummary);
 
     // Security guard joins CH-01 (security)
     const secPres = await api(
@@ -227,7 +279,7 @@ describe('ZayedMart NestJS API + Global Walkie-Talkie + Zero-Conflict Sync E2E',
     assert.equal(liveFrame.status, 200);
     assert.ok(liveFrame.json.seq >= 1);
 
-    // Owner polls and receives the live frame, presence, and sends an urgent alert ping
+    // Owner polls and receives the live frame, presence, and channelActivitySummary
     const ownerPoll = await api(
       '/api/walkie/poll?channel=security&listening=1&peer_id=peer_owner_1&live_on=1&last_frame_seq=0',
       'GET',
@@ -237,6 +289,7 @@ describe('ZayedMart NestJS API + Global Walkie-Talkie + Zero-Conflict Sync E2E',
     assert.equal(ownerPoll.status, 200);
     assert.equal(ownerPoll.json.liveFrames.length, 1);
     assert.equal(ownerPoll.json.liveFrames[0].from_peer_id, 'peer_sec_1');
+    assert.ok(ownerPoll.json.channelActivitySummary.security);
 
     const pingTx = await api(
       '/api/walkie/transmit',
@@ -246,5 +299,14 @@ describe('ZayedMart NestJS API + Global Walkie-Talkie + Zero-Conflict Sync E2E',
     );
     assert.equal(pingTx.status, 201);
     assert.equal(pingTx.json.call.kind, 'ping');
+
+    // Test Admin RBAC policy reset endpoint
+    const resetRes = await api('/api/rbac/policies/cashier/reset', 'POST', {}, ownerToken);
+    assert.equal(resetRes.status, 201);
+    assert.equal(resetRes.json.ok, true);
+    assert.ok(resetRes.json.permissions.includes('shortages:write'));
+    assert.ok(resetRes.json.permissions.includes('notes:write'));
+    assert.ok(resetRes.json.permissions.includes('walkie:use'));
+    assert.ok(resetRes.json.permissions.includes('attendance:self'));
   });
 });

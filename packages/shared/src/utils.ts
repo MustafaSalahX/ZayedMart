@@ -69,3 +69,137 @@ export function computeLateMinutes(shiftStart?: string, checkInDate: Date = new 
   if (diffMin < -600) return 0;
   return diffMin > 10 ? diffMin : 0;
 }
+
+export function computeShiftDurationHours(shiftStart?: string, shiftEnd?: string): number {
+  if (!shiftStart || !shiftEnd || !/^\d{2}:\d{2}$/.test(shiftStart) || !/^\d{2}:\d{2}$/.test(shiftEnd)) {
+    return 12;
+  }
+  const [sh, sm] = shiftStart.split(':').map(Number);
+  const [eh, em] = shiftEnd.split(':').map(Number);
+  const startTotalMin = sh * 60 + sm;
+  let endTotalMin = eh * 60 + em;
+  if (endTotalMin <= startTotalMin) {
+    endTotalMin += 24 * 60;
+  }
+  const diffHours = (endTotalMin - startTotalMin) / 60;
+  if (diffHours <= 0 || diffHours >= 24) return 12;
+  return Math.round(diffHours * 10) / 10;
+}
+
+export function formatShiftDurationArabic(hours: number): string {
+  const h = Number.isFinite(hours) && hours > 0 ? hours : 12;
+  if (h >= 3 && h <= 10 && Number.isInteger(h)) {
+    return `${h} ساعات`;
+  }
+  return `${h} ساعة`;
+}
+
+export function formatShiftSummaryArabic(shiftStart?: string, shiftEnd?: string): string {
+  const hours = computeShiftDurationHours(shiftStart, shiftEnd);
+  const durationLabel = formatShiftDurationArabic(hours);
+  if (shiftStart && shiftEnd) {
+    return `شفت ${durationLabel} (${shiftStart} - ${shiftEnd})`;
+  }
+  return `شفت ${durationLabel}`;
+}
+
+export interface NextCheckInAvailability {
+  canCheckIn: boolean;
+  nextShiftStartStr: string;
+  windowOpenTimeStr: string;
+  remainingMinutes: number;
+  lockReasonArabic: string;
+}
+
+export function evaluateNextCheckInAvailability(params: {
+  shiftStart?: string;
+  shiftEnd?: string;
+  lastCheckInAt?: string | null;
+  lastCheckOutAt?: string | null;
+  now?: Date;
+}): NextCheckInAvailability {
+  const { shiftStart = '08:00', shiftEnd = '20:00', lastCheckInAt, lastCheckOutAt, now = new Date() } = params;
+  if (!lastCheckOutAt) {
+    return {
+      canCheckIn: true,
+      nextShiftStartStr: shiftStart,
+      windowOpenTimeStr: shiftStart,
+      remainingMinutes: 0,
+      lockReasonArabic: '',
+    };
+  }
+
+  const checkOutDate = new Date(lastCheckOutAt);
+  if (Number.isNaN(checkOutDate.getTime())) {
+    return {
+      canCheckIn: true,
+      nextShiftStartStr: shiftStart,
+      windowOpenTimeStr: shiftStart,
+      remainingMinutes: 0,
+      lockReasonArabic: '',
+    };
+  }
+
+  const validStart = /^\d{2}:\d{2}$/.test(shiftStart) ? shiftStart : '08:00';
+  const [sh, sm] = validStart.split(':').map(Number);
+  const shiftHours = computeShiftDurationHours(validStart, shiftEnd);
+
+  // Reference start of the completed shift
+  const refDate = lastCheckInAt && !Number.isNaN(new Date(lastCheckInAt).getTime())
+    ? new Date(lastCheckInAt)
+    : checkOutDate;
+
+  // Build candidate next shift start: start from the day of refDate at sh:sm
+  const candidate = new Date(refDate);
+  candidate.setHours(sh, sm, 0, 0);
+  if (sh >= 18 && refDate.getHours() < 6) {
+    candidate.setDate(candidate.getDate() - 1);
+  }
+
+  // Advance by 24h so it represents the NEXT shift after the one that started around refDate
+  const nextShiftStart = new Date(candidate.getTime() + 24 * 60 * 60 * 1000);
+
+  // Allow check-in up to 2 hours before the next shift start,
+  // but never earlier than 2 hours after check-out (or end of current shift window)
+  const twoHoursBeforeNextShift = new Date(nextShiftStart.getTime() - 2 * 60 * 60 * 1000);
+  const minCooldownMinutes = Math.max(120, Math.round((24 - shiftHours - 4) * 60));
+  const minCooldownTime = new Date(checkOutDate.getTime() + Math.min(minCooldownMinutes, 360) * 60 * 1000);
+
+  const unlockTime = twoHoursBeforeNextShift.getTime() > checkOutDate.getTime() + 60 * 60 * 1000
+    ? twoHoursBeforeNextShift
+    : minCooldownTime;
+
+  const diffMs = unlockTime.getTime() - now.getTime();
+  const windowOpenTimeStr = [unlockTime.getHours(), unlockTime.getMinutes()]
+    .map((v) => String(v).padStart(2, '0'))
+    .join(':');
+
+  if (diffMs <= 0) {
+    return {
+      canCheckIn: true,
+      nextShiftStartStr: validStart,
+      windowOpenTimeStr,
+      remainingMinutes: 0,
+      lockReasonArabic: '',
+    };
+  }
+
+  const remainingMinutes = Math.ceil(diffMs / 60000);
+  const remHours = Math.floor(remainingMinutes / 60);
+  const remMins = remainingMinutes % 60;
+  const remText =
+    remHours > 0
+      ? remMins > 0
+        ? `${remHours} س و ${remMins} د`
+        : `${remHours} ساعة`
+      : `${remMins} دقيقة`;
+
+  return {
+    canCheckIn: false,
+    nextShiftStartStr: validStart,
+    windowOpenTimeStr,
+    remainingMinutes,
+    lockReasonArabic: `تم تسجيل الانصراف لهذا الشفت — يفتح تسجيل الحضور للشفت القادم (${validStart}) بداية من الساعة ${windowOpenTimeStr} (بعد ${remText})`,
+  };
+}
+

@@ -66,6 +66,7 @@ export default function WalkieTalkieConsole({
 
   const {
     peerId,
+    canAllChannels = false,
     allowedChannels,
     activeChannel,
     currentChannelMeta,
@@ -86,6 +87,7 @@ export default function WalkieTalkieConsole({
     txElapsedSec,
     liveLevels,
     activeUnits,
+    channelActivitySummary = {},
     liveSpeakingUnits = [],
     meshConnectedCount = 0,
     bgKeepAliveActive = false,
@@ -529,34 +531,112 @@ export default function WalkieTalkieConsole({
           </div>
         </div>
 
-        {/* Channel Switcher */}
+        {/* Channel Switcher & Multi-Role Radar */}
         {allowedChannels.length > 1 && (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            {allowedChannels.map((ch) => {
-              const selected = ch.id === activeChannel;
-              return (
-                <button
-                  key={ch.id}
-                  type="button"
-                  onClick={() => selectChannel(ch.id)}
-                  className={`min-h-[46px] px-3 py-2 rounded-2xl border text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors duration-200 cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--g-primary)] ${
-                    selected
-                      ? ch.id === 'emergency'
-                        ? 'bg-[#3B0A0D] text-white border-[#FF453A] shadow-xs'
-                        : 'bg-[#0D1117] text-white border-[#00E676] shadow-xs'
-                      : 'bg-[var(--g-surface-variant)] text-[var(--g-text)] border-[var(--g-border)] hover:border-[var(--g-primary)]'
-                  }`}
-                >
-                  <span
-                    style={{ color: selected ? ch.accent : undefined }}
-                    className={`ms-icon text-base ${selected ? 'filled' : ''}`}
+          <div className="g-card p-3.5 bg-[var(--g-surface-variant)]/50 space-y-2.5">
+            <div className="flex items-center justify-between gap-2 flex-wrap px-1">
+              <div className="flex items-center gap-1.5 text-xs font-black text-[var(--g-text)]">
+                <span className="ms-icon filled text-base text-[#00C853]">radar</span>
+                <span>
+                  {canAllChannels
+                    ? `رادار القنوات الشامل (${allowedChannels.length} قنوات — الأمن / الآدمن / الكاميرات)`
+                    : 'قنوات اللاسلكي المخصصة لك + خط الأمن والطوارئ:'}
+                </span>
+              </div>
+
+              {!canAllChannels &&
+                activeChannel !== 'security' &&
+                allowedChannels.some((c) => c.id === 'security') && (
+                  <button
+                    type="button"
+                    onClick={() => selectChannel('security')}
+                    className="px-2.5 py-1 rounded-full bg-[#146C2E] text-white text-[11px] font-black flex items-center gap-1 shadow-2xs hover:opacity-95 cursor-pointer"
                   >
-                    {ch.icon}
-                  </span>
-                  <span className="truncate">{ch.shortLabel}</span>
-                </button>
-              );
-            })}
+                    <span className="ms-icon filled text-sm">shield_person</span>
+                    <span>نداء مباشر للأمن (CH-01)</span>
+                  </button>
+                )}
+            </div>
+
+            {canAllChannels && (
+              <p className="text-[11px] text-[var(--g-muted)] m-0 px-1 font-bold">
+                يمكنك الدخول على قناة أي رول (الكاشير، الصالة، المخزن، الدليفري، المشرفين، الأمن) لرؤية المتصلين والاستماع أو التحدث معهم مباشرةً.
+              </p>
+            )}
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {allowedChannels.map((ch) => {
+                const selected = ch.id === activeChannel;
+                const chSummary = channelActivitySummary?.[ch.id] || {
+                  count: selected ? activeUnits.length : 0,
+                  talkingCount: 0,
+                  talkingNames: [],
+                };
+                const isChTalking = chSummary.talkingCount > 0;
+                return (
+                  <button
+                    key={ch.id}
+                    type="button"
+                    onClick={() => selectChannel(ch.id)}
+                    className={`min-h-[54px] px-3 py-2 rounded-2xl border text-right flex flex-col justify-between gap-1 transition-all duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--g-primary)] ${
+                      selected
+                        ? ch.id === 'emergency'
+                          ? 'bg-[#3B0A0D] text-white border-[#FF453A] shadow-sm'
+                          : 'bg-[#0D1117] text-white border-[#00E676] shadow-sm'
+                        : isChTalking
+                        ? 'bg-[#07291A] text-white border-[#00E676] animate-pulse'
+                        : 'bg-[var(--g-surface)] text-[var(--g-text)] border-[var(--g-border)] hover:border-[var(--g-primary)]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1.5 w-full">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span
+                          style={{ color: selected || isChTalking ? ch.accent : undefined }}
+                          className={`ms-icon text-base shrink-0 ${selected || isChTalking ? 'filled' : ''}`}
+                        >
+                          {ch.icon}
+                        </span>
+                        <span className="text-xs font-black truncate">{ch.shortLabel}</span>
+                      </div>
+                      {chSummary.count > 0 && (
+                        <span
+                          className={`text-[10px] font-black px-1.5 py-0.5 rounded-full shrink-0 num-ltr ${
+                            isChTalking
+                              ? 'bg-[#FF3B30] text-white'
+                              : selected
+                              ? 'bg-[#00E676]/20 text-[#69F0AE]'
+                              : 'bg-[var(--g-green-bg)] text-[var(--g-green)]'
+                          }`}
+                        >
+                          {chSummary.count} متصل
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-1 text-[10px] w-full">
+                      {isChTalking ? (
+                        <span className="text-[#69F0AE] font-extrabold truncate">
+                          🎙️ يتحدث: {chSummary.talkingNames?.[0] || 'الآن'}
+                        </span>
+                      ) : (
+                        <span
+                          className={`truncate font-bold ${
+                            selected ? 'text-[#9BA5B4]' : 'text-[var(--g-muted)]'
+                          }`}
+                        >
+                          {ch.roleBadge || ch.freq}
+                        </span>
+                      )}
+                      {selected && (
+                        <span className="text-[9px] font-black text-[#00E676] shrink-0">
+                          النشطة ✓
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         )}
 

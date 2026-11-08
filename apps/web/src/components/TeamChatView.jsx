@@ -15,10 +15,11 @@ const CHANNELS = [
 ];
 
 const QUICK_CASHIER_ALERTS = [
+  { text: '🛡️ استدعاء فرد الأمن فوراً إلى منطقة الكاشير', channel: 'security', urgent: true },
+  { text: '🛡️ تنبيه للأمن: مراجعة فاتورة / عميل عند البوابة', channel: 'security', urgent: false },
   { text: '💵 محتاج فكة عاجلاً على الكاشير', channel: 'cashier', urgent: true },
   { text: '🛒 زحام شديد عند الكاشير — نحتاج فتح كاشير إضافي', channel: 'cashier', urgent: true },
   { text: '🏷️ استعلام عن سعر أو باركود صنف غير مقروء على الكاشير', channel: 'cashier', urgent: false },
-  { text: '🛡️ استدعاء مشرف الصالة / الأمن إلى منطقة الكاشير', channel: 'security', urgent: true },
   { text: '📦 استفسار من الكاشير عن توفر صنف بالمخزن', channel: 'general', urgent: false },
 ];
 
@@ -62,6 +63,7 @@ export default function TeamChatView({
     try {
       await sendTeamMessage({
         channel: quickPreset ? quickPreset.channel : sendChannel,
+        content,
         message: content,
         is_urgent: quickPreset ? quickPreset.urgent : isUrgent,
       });
@@ -122,12 +124,25 @@ export default function TeamChatView({
                 </h3>
               </div>
               <p className="text-xs text-[#9BA5B4] m-0 mt-0.5">
-                اضغط (تشغيل الخط الحي ON) لفتح اتصال صوتي مباشر متزامن مع كل أفراد الأمن ومراقب الكاميرات — يعمل في الخلفية وبمجرد الكلام يسمعك الجميع في نفس اللحظة
+                قناتك الخاصة + تواصل مباشر مع الأمن (CH-01) والطوارئ العامة (CH-09) — اضغط تشغيل الخط الحي أو افتح لوحة القنوات
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto justify-end flex-wrap">
+            {walkie.activeChannel !== 'security' && (
+              <button
+                type="button"
+                onClick={() => {
+                  walkie.selectChannel?.('security');
+                  walkie.setConsoleOpen?.(true);
+                }}
+                className="min-h-[44px] px-3.5 py-2 rounded-full bg-[#146C2E] hover:bg-[#0F5323] text-white text-xs font-black flex items-center gap-1.5 transition-colors duration-150 cursor-pointer shadow-xs"
+              >
+                <span className="ms-icon filled text-base">shield_person</span>
+                <span>كلم الأمن لاسلكياً (CH-01)</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => walkie.toggleLivePower?.()}
@@ -146,7 +161,7 @@ export default function TeamChatView({
               className="min-h-[44px] px-3.5 py-2 rounded-full bg-white/10 hover:bg-white/18 text-white border border-white/15 text-xs font-extrabold flex items-center gap-1.5 transition-colors duration-150 cursor-pointer"
             >
               <span className="ms-icon text-base">tune</span>
-              <span>لوحة اللاسلكي</span>
+              <span>لوحة القنوات ({walkie.allowedChannels?.length || 1})</span>
             </button>
             <button
               type="button"
@@ -233,7 +248,7 @@ export default function TeamChatView({
             >
               <div>
                 <span className="font-extrabold text-[var(--g-primary)]">{pm.sender_name}: </span>
-                <span className="font-bold">{pm.message}</span>
+                <span className="font-bold">{pm.content || pm.message}</span>
               </div>
               {canManage && (
                 <button
@@ -355,7 +370,7 @@ export default function TeamChatView({
 
                     <div className="flex items-center gap-2">
                       <span className="text-[11px] text-[var(--g-muted)] num-ltr">
-                        {formatTimeArabic(msg.created_at)}
+                        {formatTimeArabic(msg.timestamp || msg.created_at)}
                       </span>
                       {canManage && (
                         <button
@@ -385,7 +400,7 @@ export default function TeamChatView({
                   </div>
 
                   <p className="text-xs sm:text-sm font-bold m-0 text-[var(--g-text)] leading-relaxed">
-                    {msg.message}
+                    {msg.content || msg.message}
                   </p>
                 </div>
               );

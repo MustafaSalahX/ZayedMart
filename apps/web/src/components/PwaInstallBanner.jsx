@@ -96,12 +96,20 @@ export default function PwaInstallBanner({ compact = false, onToast }) {
                   كاملاً مع التخزين المحلي.
                 </p>
               ) : (
-                <p className="text-xs sm:text-sm text-[var(--g-muted)] leading-relaxed m-0">
-                  من أعلى متصفح <strong>Google Chrome</strong> اضغط على القائمة{' '}
-                  <strong>(⋮)</strong> ثم اختر{' '}
-                  <strong>تثبيت التطبيق (Install app)</strong> ليتم تنزيل تطبيق زايد مارت بقاعدة
-                  بيانات محلية تعمل أونلاين وأوفلاين.
-                </p>
+                <div className="space-y-2.5">
+                  <p className="text-xs sm:text-sm text-[var(--g-muted)] leading-relaxed m-0">
+                    يمكنك تنزيل تطبيق الأندرويد المباشر (<strong>APK</strong>) المتوافق مع جميع الهواتف،
+                    أو التثبيت السريع من قائمة متصفح <strong>Chrome (⋮)</strong>.
+                  </p>
+                  <a
+                    href="/zayed-mart.apk"
+                    download="zayed-mart-ops.apk"
+                    className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 shadow-xs hover:opacity-95 no-underline"
+                  >
+                    <span className="ms-icon filled text-base">android</span>
+                    <span>تحميل تطبيق الأندرويد المباشر (APK)</span>
+                  </a>
+                </div>
               )}
 
               <button
@@ -147,6 +155,17 @@ export default function PwaInstallBanner({ compact = false, onToast }) {
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
+          {!pwaState.isIOS && (
+            <a
+              href="/zayed-mart.apk"
+              download="zayed-mart-ops.apk"
+              title="تحميل ملف APK للأندرويد"
+              className="px-2.5 py-1.5 rounded-full bg-emerald-600 text-white text-[11px] font-extrabold hover:opacity-95 active:scale-95 no-underline flex items-center gap-1"
+            >
+              <span className="ms-icon text-xs">android</span>
+              <span>APK</span>
+            </a>
+          )}
           <button
             type="button"
             onClick={handleInstallClick}

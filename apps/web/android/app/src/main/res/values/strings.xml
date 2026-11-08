@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">زايد مارت</string>
+    <string name="title_activity_main">زايد مارت</string>
+    <string name="package_name">com.zayedmart.ops</string>
+    <string name="custom_url_scheme">com.zayedmart.ops</string>
+</resources>

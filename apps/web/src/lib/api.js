@@ -1,5 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
 import {
+  DEFAULT_ROLE_PERMISSIONS,
+  inferDefaultRoleFromDepartment,
+  ROLES_METADATA,
+  ZAYED_SUPABASE_ANON_KEY,
+  ZAYED_SUPABASE_URL,
+} from '@zayed-mart/shared';
+import {
   saveBootstrapToLocalDb,
   loadSnapshotFromLocalDb,
   loadFullLocalDatasetForRehydrate,
@@ -17,6 +24,11 @@ import {
 } from './supabaseRealtime.js';
 
 const DIRECT_CLOUD_KEY = 'zayed_mart_direct_cloud_v1';
+const API_BASE_URL_KEY = 'zayed_mart_api_base_url_v1';
+const LITE_MODE_KEY = 'zayed_mart_lite_mode_v1';
+const DEFAULT_CLOUD_API_BASE_URL = 'https://zayedmart.vercel.app';
+const DEFAULT_RPC_BRIDGE_KEY =
+  'zm_cloud_rpc_bridge_v2_efeioijgxjyyqplfusub_91a8f3c4e7b2d605';
 const AUTH_TOKEN_KEY = 'zayed_auth_token_v3';
 const AUTH_SESSION_KEY = 'zayed_auth_session_v3';
 const SNAPSHOT_CACHE_KEY = 'zayed_mart_last_snapshot';
@@ -24,7 +36,87 @@ const SNAPSHOT_CACHE_KEY = 'zayed_mart_last_snapshot';
 const authInvalidListeners = new Set();
 let activeFlushPromise = null;
 
+export function isNativeAndroidOrCapacitor() {
+  if (typeof window === 'undefined') return false;
+  if (window.Capacitor?.isNativePlatform?.()) return true;
+  const proto = window.location?.protocol || '';
+  if (proto === 'capacitor:' || proto === 'file:') return true;
+  const host = window.location?.hostname || '';
+  const port = window.location?.port || '';
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
+  if ((host === 'localhost' || host === '127.0.0.1') && !port && /Android|wv/i.test(ua)) {
+    return true;
+  }
+  return false;
+}
+
+export function detectLowEndDevice() {
+  if (typeof navigator === 'undefined') return false;
+  const mem = Number(navigator.deviceMemory || 0);
+  const cores = Number(navigator.hardwareConcurrency || 0);
+  const ua = navigator.userAgent || '';
+  if (mem > 0 && mem <= 2) return true;
+  if (cores > 0 && cores <= 4 && /Android [56789]\.|Android 10|Go Edition|; wv\)/i.test(ua)) {
+    return true;
+  }
+  return false;
+}
+
+export function getLiteModeEnabled() {
+  if (typeof window === 'undefined') return false;
+  const saved = localStorage.getItem(LITE_MODE_KEY);
+  if (saved === 'true') return true;
+  if (saved === 'false') return false;
+  return detectLowEndDevice();
+}
+
+export function setLiteModeEnabled(enabled) {
+  if (typeof window === 'undefined') return;
+  const flag = Boolean(enabled);
+  localStorage.setItem(LITE_MODE_KEY, String(flag));
+  if (typeof document !== 'undefined') {
+    document.documentElement.classList.toggle('lite-mode', flag);
+  }
+}
+
+export function getConfiguredApiBaseUrl() {
+  if (typeof window === 'undefined') return '';
+  return (localStorage.getItem(API_BASE_URL_KEY) || '').trim().replace(/\/+$/, '');
+}
+
+export function setConfiguredApiBaseUrl(rawUrl) {
+  if (typeof window === 'undefined') return '';
+  const clean = String(rawUrl || '').trim().replace(/\/+$/, '');
+  if (!clean) {
+    localStorage.removeItem(API_BASE_URL_KEY);
+    return '';
+  }
+  const normalized = /^https?:\/\//i.test(clean) ? clean : `http://${clean}`;
+  localStorage.setItem(API_BASE_URL_KEY, normalized);
+  return normalized;
+}
+
+export function resolveApiUrl(endpoint) {
+  if (!endpoint || typeof endpoint !== 'string') return endpoint;
+  if (/^https?:\/\//i.test(endpoint)) return endpoint;
+  const path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const customBase = getConfiguredApiBaseUrl();
+  if (customBase) return `${customBase}${path}`;
+  const envBase = (import.meta.env?.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (envBase) return `${envBase}${path}`;
+  if (isNativeAndroidOrCapacitor()) {
+    return `${DEFAULT_CLOUD_API_BASE_URL}${path}`;
+  }
+  return path;
+}
+
+export function isDirectCloudToken(token) {
+  if (!token) return false;
+  return token === 'DIRECT_CLOUD_OWNER' || String(token).startsWith('DIRECT_CLOUD_');
+}
+
 export const ALL_PERMISSION_IDS = [
+  'attendance:self',
   'attendance:kiosk',
   'attendance:read',
   'attendance:write',
@@ -54,6 +146,30 @@ export const ALL_PERMISSION_IDS = [
   'users:manage',
   'records:manage',
 ];
+
+export function computeShiftDurationHoursClient(shiftStart, shiftEnd) {
+  if (!shiftStart || !shiftEnd || !/^\d{2}:\d{2}$/.test(shiftStart) || !/^\d{2}:\d{2}$/.test(shiftEnd)) {
+    return 12;
+  }
+  const [sh, sm] = shiftStart.split(':').map(Number);
+  const [eh, em] = shiftEnd.split(':').map(Number);
+  const startMin = sh * 60 + sm;
+  let endMin = eh * 60 + em;
+  if (endMin <= startMin) {
+    endMin += 24 * 60;
+  }
+  const hours = (endMin - startMin) / 60;
+  if (hours <= 0 || hours >= 24) return 12;
+  return Math.round(hours * 10) / 10;
+}
+
+export function formatShiftDurationArabicClient(hours) {
+  const h = Number.isFinite(hours) && hours > 0 ? hours : 12;
+  if (h >= 3 && h <= 10 && Number.isInteger(h)) {
+    return `${h} ساعات`;
+  }
+  return `${h} ساعة`;
+}
 
 const ARABIC_INDIC = '٠١٢٣٤٥٦٧٨٩';
 const EXTENDED_ARABIC_INDIC = '۰۱۲۳۴۵۶۷۸۹';
@@ -171,7 +287,7 @@ function buildHeaders(includeJson = false) {
     headers['Content-Type'] = 'application/json';
   }
   const token = getAuthToken();
-  if (token && token !== 'DIRECT_CLOUD_OWNER') {
+  if (token && !isDirectCloudToken(token)) {
     headers.Authorization = `Bearer ${token}`;
   }
   return headers;
@@ -181,13 +297,14 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 5500) {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     throw new Error('Device is currently offline');
   }
+  const resolvedUrl = resolveApiUrl(url);
   if (typeof AbortController === 'undefined') {
-    return fetch(url, options);
+    return fetch(resolvedUrl, options);
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    return await fetch(resolvedUrl, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timer);
   }
@@ -195,7 +312,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 5500) {
 
 export async function fetchStorePublicInfo() {
   try {
-    const res = await fetch('/api/auth/store-info');
+    const res = await fetchWithTimeout('/api/auth/store-info', {}, 4500);
     const contentType = res.headers.get('content-type') || '';
     if (res.ok && contentType.includes('application/json')) {
       return await res.json();
@@ -225,11 +342,15 @@ export async function fetchStorePublicInfo() {
 export async function loginWithPassword(password) {
   const normalizedPassword = normalizeDigitsClient(password).trim();
   try {
-    const res = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: normalizedPassword }),
-    });
+    const res = await fetchWithTimeout(
+      '/api/auth/login',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: normalizedPassword }),
+      },
+      6000
+    );
     const contentType = res.headers.get('content-type') || '';
     if (contentType.includes('application/json')) {
       const json = await res.json();
@@ -244,21 +365,72 @@ export async function loginWithPassword(password) {
     throw new Error('Local server unavailable');
   } catch (err) {
     if (err.status) throw err;
-    // Direct Cloud fallback when owner opens remote link on phone without LAN server
+    // Direct Cloud fallback when phone or browser operates without local Node server
     if (getDirectCloudCredentials()) {
-      if (normalizedPassword !== '123') {
-        throw new Error('كلمة المرور غير صحيحة');
+      if (normalizedPassword === '123') {
+        const cloudUser = {
+          id: 'cloud_owner',
+          username: 'admin',
+          display_name: 'إدارة زايد مارت (سحابي)',
+          role: 'owner',
+          role_label: 'المالك / المدير العام',
+          avatar_color: '#7627BB',
+        };
+        setAuthSession('DIRECT_CLOUD_OWNER', cloudUser, ALL_PERMISSION_IDS);
+        return { ok: true, token: 'DIRECT_CLOUD_OWNER', user: cloudUser, permissions: ALL_PERMISSION_IDS };
       }
-      const cloudUser = {
-        id: 'cloud_owner',
-        username: 'admin',
-        display_name: 'إدارة زايد مارت (سحابي)',
-        role: 'owner',
-        role_label: 'المالك / المدير العام',
-        avatar_color: '#7627BB',
-      };
-      setAuthSession('DIRECT_CLOUD_OWNER', cloudUser, ALL_PERMISSION_IDS);
-      return { ok: true, token: 'DIRECT_CLOUD_OWNER', user: cloudUser, permissions: ALL_PERMISSION_IDS };
+
+      // Check active employees in Supabase Cloud via RPC bridge or local cached snapshot!
+      let matchedEmp = null;
+      try {
+        const rpcRows = await execDirectCloudSql(
+          "SELECT * FROM employees WHERE is_active = 1 AND emp_code = ? AND COALESCE(login_enabled, 1) = 1 AND COALESCE(system_role, '') != 'none' LIMIT 1",
+          [normalizedPassword]
+        );
+        if (rpcRows.length > 0) {
+          matchedEmp = rpcRows[0];
+        }
+      } catch {
+        // Fallback to local IndexedDB snapshot if offline
+      }
+
+      if (!matchedEmp) {
+        const localSnap = await loadSnapshotFromLocalDb().catch(() => null);
+        const cachedEmps = localSnap?.employees || [];
+        matchedEmp = cachedEmps.find(
+          (e) =>
+            Number(e.is_active ?? 1) === 1 &&
+            String(e.emp_code || '').trim() === normalizedPassword &&
+            Number(e.login_enabled ?? 1) !== 0 &&
+            e.system_role !== 'none'
+        );
+      }
+
+      if (matchedEmp) {
+        const resolvedRole =
+          matchedEmp.system_role && ROLES_METADATA[matchedEmp.system_role]
+            ? matchedEmp.system_role
+            : inferDefaultRoleFromDepartment(matchedEmp.department, matchedEmp.role_title);
+        const roleMeta = ROLES_METADATA[resolvedRole] || { label: resolvedRole };
+        const perms =
+          resolvedRole === 'owner'
+            ? ALL_PERMISSION_IDS
+            : DEFAULT_ROLE_PERMISSIONS[resolvedRole] || [];
+        const empUser = {
+          id: matchedEmp.id,
+          username: `emp_${matchedEmp.emp_code}`,
+          display_name: matchedEmp.name,
+          role: resolvedRole,
+          role_label: roleMeta.label,
+          avatar_color: matchedEmp.avatar_color || '#0B57D0',
+          employee_id: matchedEmp.id,
+        };
+        const token = `DIRECT_CLOUD_EMP_${matchedEmp.id}`;
+        setAuthSession(token, empUser, perms);
+        return { ok: true, token, user: empUser, permissions: perms };
+      }
+
+      throw new Error('كلمة المرور غير صحيحة');
     }
     throw new Error('تعذر الاتصال بخادم زايد مارت — تحقق من اتصال الإنترنت لتسجيل الدخول لأول مرة');
   }
@@ -267,11 +439,15 @@ export async function loginWithPassword(password) {
 export async function logoutSession() {
   try {
     const token = getAuthToken();
-    if (token && token !== 'DIRECT_CLOUD_OWNER') {
-      await fetch('/api/auth/logout', {
-        method: 'POST',
-        headers: buildHeaders(false),
-      });
+    if (token && !isDirectCloudToken(token)) {
+      await fetchWithTimeout(
+        '/api/auth/logout',
+        {
+          method: 'POST',
+          headers: buildHeaders(false),
+        },
+        3500
+      );
     }
   } catch {
     // Ignore offline logout error
@@ -281,17 +457,42 @@ export async function logoutSession() {
 }
 
 export async function lockDeviceToKiosk() {
-  const res = await fetch('/api/auth/lock-to-kiosk', {
-    method: 'POST',
-    headers: buildHeaders(false),
-  });
-  const json = await res.json();
-  if (!res.ok || !json.ok) {
-    if (res.status === 401) notifyAuthInvalidated();
-    throw new Error(json.error || 'تعذر قفل الجهاز على وضع الكشك');
+  try {
+    const res = await fetchWithTimeout(
+      '/api/auth/lock-to-kiosk',
+      {
+        method: 'POST',
+        headers: buildHeaders(false),
+      },
+      4500
+    );
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const json = await res.json();
+      if (!res.ok || !json.ok) {
+        if (res.status === 401) notifyAuthInvalidated();
+        throw new Error(json.error || 'تعذر قفل الجهاز على وضع الكشك');
+      }
+      setAuthSession(json.token, json.user, json.permissions);
+      return json;
+    }
+  } catch (err) {
+    if (err.message && err.message.includes('تعذر قفل')) throw err;
   }
-  setAuthSession(json.token, json.user, json.permissions);
-  return json;
+
+  // Fallback for Direct Cloud / Offline Android Kiosk Lock
+  const kioskUser = {
+    id: '__DEVICE_KIOSK__',
+    username: 'kiosk_device',
+    display_name: 'شاشة كشك حضور العمال',
+    role: 'kiosk',
+    role_label: ROLES_METADATA.kiosk?.label || 'كشك حضور العمال',
+    avatar_color: '#E37400',
+  };
+  const kioskPerms = DEFAULT_ROLE_PERMISSIONS.kiosk || ['attendance:kiosk'];
+  const kioskToken = 'DIRECT_CLOUD_KIOSK';
+  setAuthSession(kioskToken, kioskUser, kioskPerms);
+  return { ok: true, token: kioskToken, user: kioskUser, permissions: kioskPerms };
 }
 
 export function getDirectCloudCredentials() {
@@ -301,10 +502,10 @@ export function getDirectCloudCredentials() {
   } catch {
     // Ignore
   }
-  const envUrl = import.meta.env?.VITE_SUPABASE_URL;
-  const envKey = import.meta.env?.VITE_SUPABASE_ANON_KEY;
+  const envUrl = import.meta.env?.VITE_SUPABASE_URL || ZAYED_SUPABASE_URL;
+  const envKey = import.meta.env?.VITE_SUPABASE_ANON_KEY || ZAYED_SUPABASE_ANON_KEY;
   if (envUrl && envKey) {
-    return { url: envUrl, anonKey: envKey, storeName: 'زايد مارت (سحابي)' };
+    return { url: envUrl, anonKey: envKey, storeName: 'زايد مارت' };
   }
   return null;
 }
@@ -339,69 +540,145 @@ function getSupabaseDirectClient() {
   return createClient(creds.url, creds.anonKey, { auth: { persistSession: false } });
 }
 
-// Build bootstrap state directly from Supabase when owner opens app remotely without local server
+async function execDirectCloudSql(sql, params = []) {
+  const creds = getDirectCloudCredentials();
+  if (!creds?.url || !creds?.anonKey) {
+    throw new Error('لا يوجد اتصال سحابي');
+  }
+  const cleanUrl = creds.url.trim().replace(/\/+$/, '');
+  const res = await fetch(`${cleanUrl}/rest/v1/rpc/zayed_rpc_exec`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: creds.anonKey,
+      Authorization: `Bearer ${creds.anonKey}`,
+    },
+    body: JSON.stringify({
+      p_key: DEFAULT_RPC_BRIDGE_KEY,
+      p_sql: sql,
+      p_params: params.map((p) => (p === undefined ? null : p)),
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Supabase RPC HTTP ${res.status}`);
+  }
+  const json = await res.json();
+  return Array.isArray(json?.rows) ? json.rows : [];
+}
+
+// Build bootstrap state directly from Supabase when app runs remotely without local server
 async function fetchBootstrapFromDirectCloud(dateKey) {
-  const supabase = getSupabaseDirectClient();
-  if (!supabase) throw new Error('لا يوجد اتصال بالخادم المحلي أو السحابة');
+  const creds = getDirectCloudCredentials();
+  if (!creds) throw new Error('لا يوجد اتصال بالخادم المحلي أو السحابة');
 
   const targetDate = dateKey || getLocalDateKey();
+  let employees = [];
+  let attendanceLogs = [];
+  let suppliers = [];
+  let truckLogs = [];
+  let notes = [];
+  let handovers = [];
+  let shortages = [];
+  let productCatalog = [];
+  let teamMessages = [];
 
-  const [empRes, attRes, supRes, truckRes, notesRes, handRes, shortRes, catRes, chatRes] =
-    await Promise.all([
-      supabase.from('employees').select('*').eq('is_active', 1).order('department'),
-      supabase
-        .from('attendance_logs')
-        .select('*')
-        .or(`date_key.eq.${targetDate},shift_date_key.eq.${targetDate}`)
-        .order('timestamp', { ascending: false }),
-      supabase
-        .from('suppliers')
-        .select('*')
-        .eq('is_active', 1)
-        .order('has_pending_return', { ascending: false }),
-      supabase
-        .from('truck_logs')
-        .select('*')
-        .or(`status.eq.unloading,date_key.eq.${targetDate}`)
-        .order('arrival_time', { ascending: false }),
-      supabase
-        .from('notes')
-        .select('*')
-        .or(`is_open_handover.eq.1,date_key.eq.${targetDate}`)
-        .order('timestamp', { ascending: false }),
-      supabase
-        .from('shift_handovers')
-        .select('*')
-        .order('timestamp', { ascending: false })
-        .limit(20),
-      supabase
-        .from('shortages')
-        .select('*')
-        .or(`status.neq.resolved,date_key.eq.${targetDate}`)
-        .order('updated_at', { ascending: false }),
-      supabase
-        .from('product_catalog')
-        .select('*')
-        .eq('is_active', 1)
-        .order('usage_count', { ascending: false }),
-      supabase
-        .from('team_messages')
-        .select('*')
-        .order('timestamp', { ascending: false })
-        .limit(80),
-    ]);
+  try {
+    const [empRows, attRows, supRows, truckRows, notesRows, handRows, shortRows, catRows, chatRows] =
+      await Promise.all([
+        execDirectCloudSql('SELECT * FROM employees WHERE is_active = 1 ORDER BY department ASC'),
+        execDirectCloudSql(
+          'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp DESC',
+          [targetDate, targetDate]
+        ),
+        execDirectCloudSql(
+          'SELECT * FROM suppliers WHERE is_active = 1 ORDER BY has_pending_return DESC'
+        ),
+        execDirectCloudSql(
+          "SELECT * FROM truck_logs WHERE status = 'unloading' OR date_key = ? ORDER BY arrival_time DESC",
+          [targetDate]
+        ),
+        execDirectCloudSql(
+          'SELECT * FROM notes WHERE is_open_handover = 1 OR date_key = ? ORDER BY timestamp DESC',
+          [targetDate]
+        ),
+        execDirectCloudSql('SELECT * FROM shift_handovers ORDER BY timestamp DESC LIMIT 20'),
+        execDirectCloudSql(
+          "SELECT * FROM shortages WHERE status != 'resolved' OR date_key = ? ORDER BY updated_at DESC",
+          [targetDate]
+        ),
+        execDirectCloudSql(
+          'SELECT * FROM product_catalog WHERE is_active = 1 ORDER BY usage_count DESC'
+        ),
+        execDirectCloudSql('SELECT * FROM team_messages ORDER BY timestamp DESC LIMIT 80'),
+      ]);
+    employees = empRows;
+    attendanceLogs = attRows;
+    suppliers = supRows;
+    truckLogs = truckRows;
+    notes = notesRows;
+    handovers = handRows;
+    shortages = shortRows;
+    productCatalog = catRows;
+    teamMessages = chatRows;
+  } catch {
+    const supabase = getSupabaseDirectClient();
+    if (!supabase) throw new Error('لا يوجد اتصال بالخادم المحلي أو السحابة');
+    const [empRes, attRes, supRes, truckRes, notesRes, handRes, shortRes, catRes, chatRes] =
+      await Promise.all([
+        supabase.from('employees').select('*').eq('is_active', 1).order('department'),
+        supabase
+          .from('attendance_logs')
+          .select('*')
+          .or(`date_key.eq.${targetDate},shift_date_key.eq.${targetDate}`)
+          .order('timestamp', { ascending: false }),
+        supabase
+          .from('suppliers')
+          .select('*')
+          .eq('is_active', 1)
+          .order('has_pending_return', { ascending: false }),
+        supabase
+          .from('truck_logs')
+          .select('*')
+          .or(`status.eq.unloading,date_key.eq.${targetDate}`)
+          .order('arrival_time', { ascending: false }),
+        supabase
+          .from('notes')
+          .select('*')
+          .or(`is_open_handover.eq.1,date_key.eq.${targetDate}`)
+          .order('timestamp', { ascending: false }),
+        supabase
+          .from('shift_handovers')
+          .select('*')
+          .order('timestamp', { ascending: false })
+          .limit(20),
+        supabase
+          .from('shortages')
+          .select('*')
+          .or(`status.neq.resolved,date_key.eq.${targetDate}`)
+          .order('updated_at', { ascending: false }),
+        supabase
+          .from('product_catalog')
+          .select('*')
+          .eq('is_active', 1)
+          .order('usage_count', { ascending: false }),
+        supabase
+          .from('team_messages')
+          .select('*')
+          .order('timestamp', { ascending: false })
+          .limit(80),
+      ]);
 
-  if (empRes.error) throw new Error(empRes.error.message);
-
-  const employees = empRes.data || [];
-  const attendanceLogs = attRes.data || [];
-  const suppliers = supRes.data || [];
-  const truckLogs = truckRes.data || [];
-  const notes = notesRes.data || [];
-  const handovers = handRes.data || [];
-  const shortages = shortRes?.error ? [] : shortRes?.data || [];
-  const productCatalog = catRes?.error ? [] : catRes?.data || [];
-  const teamMessages = chatRes?.error ? [] : chatRes?.data || [];
+    if (empRes.error) throw new Error(empRes.error.message);
+    employees = empRes.data || [];
+    attendanceLogs = attRes.data || [];
+    suppliers = supRes.data || [];
+    truckLogs = truckRes.data || [];
+    notes = notesRes.data || [];
+    handovers = handRes.data || [];
+    shortages = shortRes?.error ? [] : shortRes?.data || [];
+    productCatalog = catRes?.error ? [] : catRes?.data || [];
+    teamMessages = chatRes?.error ? [] : chatRes?.data || [];
+  }
 
   const logsByEmp = new Map();
   for (let i = attendanceLogs.length - 1; i >= 0; i--) {
@@ -448,7 +725,6 @@ async function fetchBootstrapFromDirectCloud(dateKey) {
     };
   });
 
-  const creds = getDirectCloudCredentials();
   const cachedAuth = getCachedAuthSession();
 
   const snap = {
@@ -547,11 +823,15 @@ export async function flushOfflineQueue() {
       try {
         let body = { ...item.body };
         if (body._offlineDataUrl) {
-          const upRes = await fetch('/api/upload', {
-            method: 'POST',
-            headers: buildHeaders(true),
-            body: JSON.stringify({ dataUrl: body._offlineDataUrl, prefix: 'offline' }),
-          });
+          const upRes = await fetchWithTimeout(
+            '/api/upload',
+            {
+              method: 'POST',
+              headers: buildHeaders(true),
+              body: JSON.stringify({ dataUrl: body._offlineDataUrl, prefix: 'offline' }),
+            },
+            8000
+          );
           if (upRes.ok) {
             const upJson = await upRes.json();
             if (body._proofField) {
@@ -562,11 +842,15 @@ export async function flushOfflineQueue() {
           delete body._proofField;
         }
 
-        const res = await fetch(item.endpoint, {
-          method: item.method || 'POST',
-          headers: buildHeaders(true),
-          body: JSON.stringify(body),
-        });
+        const res = await fetchWithTimeout(
+          item.endpoint,
+          {
+            method: item.method || 'POST',
+            headers: buildHeaders(true),
+            body: JSON.stringify(body),
+          },
+          6000
+        );
 
         const contentType = res.headers.get('content-type') || '';
         if (res.ok && contentType.includes('application/json')) {
@@ -697,11 +981,15 @@ export async function fetchBootstrap(dateKey) {
 export async function uploadProofImage(dataUrl, prefix = 'proof') {
   if (!dataUrl) return '';
   try {
-    const res = await fetch('/api/upload', {
-      method: 'POST',
-      headers: buildHeaders(true),
-      body: JSON.stringify({ dataUrl, prefix }),
-    });
+    const res = await fetchWithTimeout(
+      '/api/upload',
+      {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify({ dataUrl, prefix }),
+      },
+      9000
+    );
     if (res.status === 401) {
       notifyAuthInvalidated();
       return '';
@@ -884,6 +1172,20 @@ export async function postActionWithOfflineSupport(endpoint, body, options = {})
 
     const session = getCachedAuthSession();
 
+    // Try Direct Cloud RPC if device is online but local LAN server is unreachable
+    if (
+      getDirectCloudCredentials() &&
+      (typeof navigator === 'undefined' || navigator.onLine !== false)
+    ) {
+      try {
+        const directRes = await executeDirectCloudMutation(endpoint, { ...body, id: recordId });
+        broadcastGlobalStoreChange(endpoint);
+        return directRes;
+      } catch {
+        // Fall through to offline outbox queue
+      }
+    }
+
     // Special local resolution for QR / Quick-Scan while offline!
     if (endpoint === '/api/attendance/quick-scan') {
       return await enqueueOfflineQuickScan(body, session);
@@ -910,9 +1212,12 @@ export async function postActionWithOfflineSupport(endpoint, body, options = {})
 }
 
 async function executeDirectCloudMutation(endpoint, body) {
-  const supabase = getSupabaseDirectClient();
-  if (!supabase) throw new Error('لا يوجد اتصال سحابي');
+  const creds = getDirectCloudCredentials();
+  if (!creds) throw new Error('لا يوجد اتصال سحابي');
 
+  const session = getCachedAuthSession();
+  const actorName = body.recorded_by || session?.user?.display_name || 'جهاز الموبايل (سحابي)';
+  const actorRole = session?.user?.role || 'owner';
   const now = new Date();
   const iso = body.timestamp || now.toISOString();
   const dateKey = getLocalDateKey(new Date(iso));
@@ -934,12 +1239,88 @@ async function executeDirectCloudMutation(endpoint, body) {
       break_reason: body.break_reason || '',
       note: body.note || '',
       proof_url: body.proof_url || '',
-      recorded_by: body.recorded_by || 'الإدارة (سحابي)',
+      recorded_by: actorName,
       verified_by_cctv: 0,
       synced: 1,
     };
-    const { error } = await supabase.from('attendance_logs').upsert(row, { onConflict: 'id' });
-    if (error) throw new Error(error.message);
+    try {
+      await execDirectCloudSql(
+        `INSERT INTO attendance_logs (
+          id, employee_id, employee_name, department, action_type, timestamp, date_key, shift_date_key,
+          late_minutes, allowed_break_minutes, break_duration_minutes, break_reason, note, proof_url,
+          recorded_by, verified_by_cctv, synced
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ON CONFLICT (id) DO NOTHING`,
+        [
+          row.id,
+          row.employee_id,
+          row.employee_name,
+          row.department,
+          row.action_type,
+          row.timestamp,
+          row.date_key,
+          row.shift_date_key,
+          row.late_minutes,
+          row.allowed_break_minutes,
+          row.break_duration_minutes,
+          row.break_reason,
+          row.note,
+          row.proof_url,
+          row.recorded_by,
+          row.verified_by_cctv,
+        ]
+      );
+    } catch {
+      const supabase = getSupabaseDirectClient();
+      const { error } = await supabase.from('attendance_logs').upsert(row, { onConflict: 'id' });
+      if (error) throw new Error(error.message);
+    }
+    return { ok: true, log: row };
+  }
+
+  if (endpoint === '/api/trucks/arrive') {
+    const row = {
+      id,
+      supplier_id: body.supplier_id || '',
+      supplier_name: body.supplier_name || 'مورد',
+      category: body.category || 'بقالة جافة',
+      plate_or_driver: body.plate_or_driver || '',
+      status: 'unloading',
+      arrival_time: iso,
+      departure_time: '',
+      duration_minutes: 0,
+      date_key: dateKey,
+      delivery_condition: 'pending',
+      invoice_number: body.invoice_number || '',
+      notes: body.notes || '',
+      arrival_proof_url: body.arrival_proof_url || '',
+      completion_proof_url: '',
+      recorded_by: actorName,
+      verified_by_cctv: 0,
+      synced: 1,
+    };
+    await execDirectCloudSql(
+      `INSERT INTO truck_logs (
+        id, supplier_id, supplier_name, category, plate_or_driver, status, arrival_time,
+        departure_time, duration_minutes, date_key, delivery_condition, invoice_number, notes,
+        arrival_proof_url, completion_proof_url, recorded_by, verified_by_cctv, synced
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, '', 0, ?, 'pending', ?, ?, ?, '', ?, 0, 1)
+      ON CONFLICT (id) DO NOTHING`,
+      [
+        row.id,
+        row.supplier_id,
+        row.supplier_name,
+        row.category,
+        row.plate_or_driver,
+        row.status,
+        row.arrival_time,
+        row.date_key,
+        row.invoice_number,
+        row.notes,
+        row.arrival_proof_url,
+        row.recorded_by,
+      ]
+    );
     return { ok: true, log: row };
   }
 
@@ -952,7 +1333,7 @@ async function executeDirectCloudMutation(endpoint, body) {
       dvr_timestamp: body.dvr_timestamp || now.toTimeString().slice(0, 8),
       content: body.content || 'ملاحظة إدارية',
       proof_url: body.proof_url || '',
-      recorded_by: body.recorded_by || 'الإدارة (عن بُعد)',
+      recorded_by: actorName,
       is_open_handover: body.is_open_handover ? 1 : 0,
       resolved_by: '',
       resolved_at: '',
@@ -960,8 +1341,32 @@ async function executeDirectCloudMutation(endpoint, body) {
       date_key: dateKey,
       synced: 1,
     };
-    const { error } = await supabase.from('notes').upsert(row, { onConflict: 'id' });
-    if (error) throw new Error(error.message);
+    try {
+      await execDirectCloudSql(
+        `INSERT INTO notes (
+          id, location_tag, category_tag, severity, dvr_timestamp, content, proof_url,
+          recorded_by, is_open_handover, resolved_by, resolved_at, timestamp, date_key, synced
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, ?, 1)
+        ON CONFLICT (id) DO NOTHING`,
+        [
+          row.id,
+          row.location_tag,
+          row.category_tag,
+          row.severity,
+          row.dvr_timestamp,
+          row.content,
+          row.proof_url,
+          row.recorded_by,
+          row.is_open_handover,
+          row.timestamp,
+          row.date_key,
+        ]
+      );
+    } catch {
+      const supabase = getSupabaseDirectClient();
+      const { error } = await supabase.from('notes').upsert(row, { onConflict: 'id' });
+      if (error) throw new Error(error.message);
+    }
     return { ok: true, note: row };
   }
 
@@ -985,8 +1390,8 @@ async function executeDirectCloudMutation(endpoint, body) {
       supplier_id: body.supplier_id || '',
       supplier_name: body.supplier_name || '',
       notes: body.notes || '',
-      recorded_by: body.recorded_by || 'الإدارة (عن بُعد)',
-      recorded_by_role: 'owner',
+      recorded_by: actorName,
+      recorded_by_role: actorRole,
       updated_by: '',
       resolved_by: '',
       resolved_at: '',
@@ -995,8 +1400,38 @@ async function executeDirectCloudMutation(endpoint, body) {
       date_key: dateKey,
       synced: 1,
     };
-    const { error } = await supabase.from('shortages').upsert(row, { onConflict: 'id' });
-    if (error) throw new Error(error.message);
+    try {
+      await execDirectCloudSql(
+        `INSERT INTO shortages (
+          id, product_id, item_name, category, requested_qty, unit, urgency, status, is_suggestion,
+          supplier_id, supplier_name, notes, recorded_by, recorded_by_role, updated_by, resolved_by,
+          resolved_at, timestamp, updated_at, date_key, synced
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, '', '', '', ?, ?, ?, 1)
+        ON CONFLICT (id) DO NOTHING`,
+        [
+          row.id,
+          row.product_id,
+          row.item_name,
+          row.category,
+          row.requested_qty,
+          row.unit,
+          row.urgency,
+          row.is_suggestion,
+          row.supplier_id,
+          row.supplier_name,
+          row.notes,
+          row.recorded_by,
+          row.recorded_by_role,
+          row.timestamp,
+          row.updated_at,
+          row.date_key,
+        ]
+      );
+    } catch {
+      const supabase = getSupabaseDirectClient();
+      const { error } = await supabase.from('shortages').upsert(row, { onConflict: 'id' });
+      if (error) throw new Error(error.message);
+    }
     return { ok: true, shortage: row };
   }
 
@@ -1004,9 +1439,9 @@ async function executeDirectCloudMutation(endpoint, body) {
     const row = {
       id,
       channel: body.channel || 'general',
-      sender_id: 'cloud_owner',
-      sender_name: body.sender_name || 'الإدارة',
-      sender_role: 'owner',
+      sender_id: session?.user?.id || 'cloud_owner',
+      sender_name: body.sender_name || actorName,
+      sender_role: actorRole,
       content: body.content || body.message || '',
       is_urgent: body.is_urgent || body.priority === 'urgent' ? 1 : 0,
       is_pinned: body.is_pinned ? 1 : 0,
@@ -1014,8 +1449,30 @@ async function executeDirectCloudMutation(endpoint, body) {
       date_key: dateKey,
       synced: 1,
     };
-    const { error } = await supabase.from('team_messages').upsert(row, { onConflict: 'id' });
-    if (error) throw new Error(error.message);
+    try {
+      await execDirectCloudSql(
+        `INSERT INTO team_messages (
+          id, channel, sender_id, sender_name, sender_role, content, is_urgent, is_pinned, timestamp, date_key, synced
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ON CONFLICT (id) DO NOTHING`,
+        [
+          row.id,
+          row.channel,
+          row.sender_id,
+          row.sender_name,
+          row.sender_role,
+          row.content,
+          row.is_urgent,
+          row.is_pinned,
+          row.timestamp,
+          row.date_key,
+        ]
+      );
+    } catch {
+      const supabase = getSupabaseDirectClient();
+      const { error } = await supabase.from('team_messages').upsert(row, { onConflict: 'id' });
+      if (error) throw new Error(error.message);
+    }
     return { ok: true, message: row };
   }
 
@@ -1033,8 +1490,37 @@ async function executeDirectCloudMutation(endpoint, body) {
       is_active: 1,
       updated_at: iso,
     };
-    const { error } = await supabase.from('employees').upsert(row, { onConflict: 'id' });
-    if (error) throw new Error(error.message);
+    try {
+      await execDirectCloudSql(
+        `INSERT INTO employees (
+          id, emp_code, name, department, role_title, shift_start, shift_end, avatar_color, phone, is_active, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        ON CONFLICT (id) DO UPDATE SET
+          name = EXCLUDED.name,
+          department = EXCLUDED.department,
+          role_title = EXCLUDED.role_title,
+          shift_start = EXCLUDED.shift_start,
+          shift_end = EXCLUDED.shift_end,
+          phone = EXCLUDED.phone,
+          updated_at = EXCLUDED.updated_at`,
+        [
+          row.id,
+          row.emp_code,
+          row.name,
+          row.department,
+          row.role_title,
+          row.shift_start,
+          row.shift_end,
+          row.avatar_color,
+          row.phone,
+          row.updated_at,
+        ]
+      );
+    } catch {
+      const supabase = getSupabaseDirectClient();
+      const { error } = await supabase.from('employees').upsert(row, { onConflict: 'id' });
+      if (error) throw new Error(error.message);
+    }
     return { ok: true, employee: row };
   }
 
@@ -1063,7 +1549,7 @@ export async function apiRequest(endpoint, method = 'GET', body) {
         notifyAuthInvalidated();
       }
       const serverErr = new Error(json.error || 'حدث خطأ غير متوقع');
-      serverErr.isServerResponse = true;
+      serverErr.isServerResponse = contentType.includes('application/json');
       serverErr.status = res.status;
       throw serverErr;
     }
@@ -1157,11 +1643,15 @@ export function createWalkieRealtimeChannel(channelName = 'zayed_walkie_live_v1'
 
 export async function updateWalkiePresence(payload) {
   try {
-    const res = await fetch('/api/walkie/presence', {
-      method: 'POST',
-      headers: buildHeaders(true),
-      body: JSON.stringify(payload || {}),
-    });
+    const res = await fetchWithTimeout(
+      '/api/walkie/presence',
+      {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify(payload || {}),
+      },
+      4500
+    );
     const contentType = res.headers.get('content-type') || '';
     if (res.ok && contentType.includes('application/json')) {
       return await res.json();
@@ -1180,11 +1670,15 @@ export async function updateWalkiePresence(payload) {
 
 export async function sendWalkieSignal(payload) {
   try {
-    const res = await fetch('/api/walkie/signal', {
-      method: 'POST',
-      headers: buildHeaders(true),
-      body: JSON.stringify(payload || {}),
-    });
+    const res = await fetchWithTimeout(
+      '/api/walkie/signal',
+      {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify(payload || {}),
+      },
+      4500
+    );
     const contentType = res.headers.get('content-type') || '';
     if (res.ok && contentType.includes('application/json')) {
       return await res.json();
@@ -1203,11 +1697,15 @@ export async function sendWalkieSignal(payload) {
 
 export async function sendWalkieLiveFrame(payload) {
   try {
-    const res = await fetch('/api/walkie/live-frame', {
-      method: 'POST',
-      headers: buildHeaders(true),
-      body: JSON.stringify(payload || {}),
-    });
+    const res = await fetchWithTimeout(
+      '/api/walkie/live-frame',
+      {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify(payload || {}),
+      },
+      3500
+    );
     const contentType = res.headers.get('content-type') || '';
     if (res.ok && contentType.includes('application/json')) {
       return await res.json();
@@ -1225,38 +1723,63 @@ export async function transmitWalkieCall(payload) {
   const callId = payload?.id || makeClientUuid();
   const finalPayload = { ...payload, id: callId };
   try {
-    const res = await fetch('/api/walkie/transmit', {
-      method: 'POST',
-      headers: buildHeaders(true),
-      body: JSON.stringify(finalPayload),
-    });
+    const res = await fetchWithTimeout(
+      '/api/walkie/transmit',
+      {
+        method: 'POST',
+        headers: buildHeaders(true),
+        body: JSON.stringify(finalPayload),
+      },
+      7500
+    );
     const contentType = res.headers.get('content-type') || '';
     if (res.ok && contentType.includes('application/json')) {
       return await res.json();
     }
     if (getDirectCloudCredentials() && !contentType.includes('application/json')) {
-      const supabase = getSupabaseDirectClient();
-      if (supabase) {
-        const session = getCachedAuthSession();
-        const now = new Date();
-        const row = {
-          id: callId,
-          channel: finalPayload.channel || 'security',
-          kind: finalPayload.kind || 'voice',
-          sender_id: session?.user?.id || 'cloud_owner',
-          sender_name: session?.user?.display_name || 'الأمن',
-          sender_role: session?.user?.role || 'security',
-          audio_data: finalPayload.audio_data || '',
-          mime_type: finalPayload.mime_type || 'audio/webm',
-          duration_sec: Number(finalPayload.duration_sec) || 0,
-          is_emergency: finalPayload.is_emergency ? 1 : 0,
-          timestamp: now.toISOString(),
-          date_key: getLocalDateKey(now),
-          synced: 1,
-        };
-        await supabase.from('walkie_calls').upsert(row, { onConflict: 'id' });
-        return { ok: true, call: row, activeUnits: [] };
+      const session = getCachedAuthSession();
+      const now = new Date();
+      const row = {
+        id: callId,
+        channel: finalPayload.channel || 'security',
+        kind: finalPayload.kind || 'voice',
+        sender_id: session?.user?.id || 'cloud_owner',
+        sender_name: session?.user?.display_name || 'الأمن',
+        sender_role: session?.user?.role || 'security',
+        audio_data: finalPayload.audio_data || '',
+        mime_type: finalPayload.mime_type || 'audio/webm',
+        duration_sec: Number(finalPayload.duration_sec) || 0,
+        is_emergency: finalPayload.is_emergency ? 1 : 0,
+        timestamp: now.toISOString(),
+        date_key: getLocalDateKey(now),
+        synced: 1,
+      };
+      try {
+        await execDirectCloudSql(
+          `INSERT INTO walkie_calls (
+            id, channel, kind, sender_id, sender_name, sender_role, audio_data, mime_type, duration_sec, is_emergency, timestamp, date_key, synced
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+          ON CONFLICT (id) DO NOTHING`,
+          [
+            row.id,
+            row.channel,
+            row.kind,
+            row.sender_id,
+            row.sender_name,
+            row.sender_role,
+            row.audio_data,
+            row.mime_type,
+            row.duration_sec,
+            row.is_emergency,
+            row.timestamp,
+            row.date_key,
+          ]
+        );
+      } catch {
+        const supabase = getSupabaseDirectClient();
+        await supabase?.from('walkie_calls').upsert(row, { onConflict: 'id' });
       }
+      return { ok: true, call: row, activeUnits: [] };
     }
     const errJson = contentType.includes('application/json') ? await res.json() : {};
     if (res.status === 401) notifyAuthInvalidated();
@@ -1285,9 +1808,13 @@ export async function pollWalkieChannel({
   }
 
   try {
-    const res = await fetch(`/api/walkie/poll?${params.toString()}`, {
-      headers: buildHeaders(false),
-    });
+    const res = await fetchWithTimeout(
+      `/api/walkie/poll?${params.toString()}`,
+      {
+        headers: buildHeaders(false),
+      },
+      4500
+    );
     const contentType = res.headers.get('content-type') || '';
     if (res.ok && contentType.includes('application/json')) {
       return await res.json();
@@ -1307,28 +1834,28 @@ export async function pollWalkieChannel({
       return { ok: false, calls: [], signals: [], liveFrames: [], activeUnits: [] };
     }
     if (getDirectCloudCredentials() && !contentType.includes('application/json')) {
-      const supabase = getSupabaseDirectClient();
-      if (supabase) {
-        let query = supabase
-          .from('walkie_calls')
-          .select('*')
-          .or(`channel.eq.${channel},channel.eq.emergency`);
-        if (since) {
-          query = query.gt('timestamp', since).order('timestamp', { ascending: true }).limit(20);
-        } else {
-          query = query.order('timestamp', { ascending: false }).limit(20);
-        }
-        const { data } = await query;
+      try {
+        const rows = since
+          ? await execDirectCloudSql(
+              "SELECT * FROM walkie_calls WHERE (channel = ? OR channel = 'emergency') AND timestamp > ? ORDER BY timestamp ASC LIMIT 20",
+              [channel, since]
+            )
+          : await execDirectCloudSql(
+              "SELECT * FROM walkie_calls WHERE (channel = ? OR channel = 'emergency') ORDER BY timestamp DESC LIMIT 20",
+              [channel]
+            );
         return {
           ok: true,
           serverTime: new Date().toISOString(),
           channel,
           allowedChannels: ['security', 'warehouse', 'floor', 'emergency'],
-          calls: data || [],
+          calls: rows || [],
           signals: [],
           liveFrames: [],
           activeUnits: [],
         };
+      } catch {
+        // ignore
       }
     }
     return { ok: false, calls: [], signals: [], liveFrames: [], activeUnits: [] };

@@ -101,13 +101,14 @@ export class WalkieController {
   }
 
   private async upsertPersistentPresence(entry: WalkiePresenceEntry) {
-    const nowIso = new Date(entry.updated_at_ms).toISOString();
+    const presenceKey = `${entry.user_id}::${entry.peer_id}`;
     try {
       await this.db.execute(
         `INSERT INTO walkie_presence (
-          peer_id, user_id, display_name, role, role_label, avatar_color, channel, status, live_on, mic_mode, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (peer_id) DO UPDATE SET
+          presence_key, peer_id, user_id, display_name, role, role_label, avatar_color, channel, status, live_on, mic_mode, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (presence_key) DO UPDATE SET
+          peer_id = EXCLUDED.peer_id,
           user_id = EXCLUDED.user_id,
           display_name = EXCLUDED.display_name,
           role = EXCLUDED.role,
@@ -117,8 +118,9 @@ export class WalkieController {
           status = EXCLUDED.status,
           live_on = EXCLUDED.live_on,
           mic_mode = EXCLUDED.mic_mode,
-          updated_at = EXCLUDED.updated_at`,
+          updated_at_ms = EXCLUDED.updated_at_ms`,
         [
+          presenceKey,
           entry.peer_id,
           entry.user_id,
           entry.display_name,
@@ -129,7 +131,7 @@ export class WalkieController {
           entry.status,
           entry.live_on ? 1 : 0,
           entry.mic_mode,
-          nowIso,
+          entry.updated_at_ms,
         ]
       );
     } catch {
@@ -164,11 +166,11 @@ export class WalkieController {
     }
 
     try {
-      const cutoffIso = new Date(now - staleCutoffMs).toISOString();
-      await this.db.execute('DELETE FROM walkie_presence WHERE updated_at < ?', [cutoffIso]);
+      const cutoffMs = now - staleCutoffMs;
+      await this.db.execute('DELETE FROM walkie_presence WHERE updated_at_ms < ?', [cutoffMs]);
       const dbRows = await this.db.queryAll<any>(
-        'SELECT * FROM walkie_presence WHERE updated_at >= ? ORDER BY updated_at DESC LIMIT 60',
-        [cutoffIso]
+        'SELECT * FROM walkie_presence WHERE updated_at_ms >= ? ORDER BY updated_at_ms DESC LIMIT 60',
+        [cutoffMs]
       );
       for (const r of dbRows) {
         if (!mergedByPeer.has(r.peer_id)) {
@@ -183,7 +185,7 @@ export class WalkieController {
             status: r.status || 'listening',
             live_on: Boolean(Number(r.live_on)),
             mic_mode: r.mic_mode || 'vad',
-            updated_at_ms: new Date(r.updated_at).getTime() || now,
+            updated_at_ms: Number(r.updated_at_ms) || now,
           });
         }
       }
@@ -218,6 +220,30 @@ export class WalkieController {
       return String(a.display_name || '').localeCompare(String(b.display_name || ''), 'ar');
     });
     return active;
+  }
+
+  private buildChannelActivitySummary(
+    allUnits: any[],
+    allowedChannels: WalkieChannelId[]
+  ): Record<
+    string,
+    { count: number; talkingCount: number; talkingNames: string[]; units: any[] }
+  > {
+    const summary: Record<
+      string,
+      { count: number; talkingCount: number; talkingNames: string[]; units: any[] }
+    > = {};
+    for (const chId of allowedChannels) {
+      const chUnits = allUnits.filter((u) => u.channel === chId);
+      const talkingUnits = chUnits.filter((u) => u.status === 'talking');
+      summary[chId] = {
+        count: chUnits.length,
+        talkingCount: talkingUnits.length,
+        talkingNames: talkingUnits.map((u) => u.display_name),
+        units: chUnits,
+      };
+    }
+    return summary;
   }
 
   @Post('presence')
@@ -294,14 +320,19 @@ export class WalkieController {
       this.walkiePresenceMap.set(presenceKey, entry);
       await this.upsertPersistentPresence(entry);
 
-      const activeUnits = await this.getActiveUnits(rawChannel);
+      const allActiveUnits = await this.getActiveUnits('all');
+      const activeUnits = allActiveUnits.filter((u) => u.channel === rawChannel);
+      const channelActivitySummary = this.buildChannelActivitySummary(
+        allActiveUnits,
+        allowedChannels
+      );
       await this.realtime.broadcastWalkieEvent(
         'walkie_presence',
-        { channel: rawChannel, activeUnits },
+        { channel: rawChannel, activeUnits, channelActivitySummary },
         rawChannel,
         false
       );
-      return res.json({ ok: true, channel: rawChannel, activeUnits });
+      return res.json({ ok: true, channel: rawChannel, activeUnits, channelActivitySummary });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }
@@ -809,7 +840,12 @@ export class WalkieController {
           )
         : [];
 
-      const activeUnits = await this.getActiveUnits(activeChannel);
+      const allActiveUnits = await this.getActiveUnits('all');
+      const activeUnits = allActiveUnits.filter((u) => u.channel === activeChannel);
+      const channelActivitySummary = this.buildChannelActivitySummary(
+        allActiveUnits,
+        allowedChannels
+      );
 
       return res.json({
         ok: true,
@@ -821,6 +857,7 @@ export class WalkieController {
         liveFrames,
         latestFrameSeq: this.walkieLiveSeqCounter,
         activeUnits,
+        channelActivitySummary,
       });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });

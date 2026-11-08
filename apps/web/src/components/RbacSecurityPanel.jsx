@@ -128,6 +128,34 @@ export default function RbacSecurityPanel({
     }
   }
 
+  async function handleResetRolePolicy() {
+    if (selectedMatrixRole === 'owner' || savingPolicy) return;
+    setSavingPolicy(true);
+    try {
+      const res = await apiRequest(`/api/rbac/policies/${selectedMatrixRole}/reset`, 'POST');
+      if (Array.isArray(res?.permissions)) {
+        setDraftPerms(res.permissions);
+      }
+      onToast?.('تم استعادة الصلاحيات الافتراضية لهذا الدور بنجاح ✓');
+      await loadRbac();
+      onRefreshParent?.();
+    } catch (err) {
+      onToast?.(err.message, 'error');
+    } finally {
+      setSavingPolicy(false);
+    }
+  }
+
+  function handleSelectAllRolePerms() {
+    if (selectedMatrixRole === 'owner') return;
+    setDraftPerms((overview.permissionsCatalog || []).map((p) => p.id));
+  }
+
+  function handleClearAllRolePerms() {
+    if (selectedMatrixRole === 'owner') return;
+    setDraftPerms([]);
+  }
+
   async function handleCreatePassword(e) {
     e.preventDefault();
     if (!newPassword.trim()) return;
@@ -580,15 +608,42 @@ export default function RbacSecurityPanel({
             </div>
 
             {selectedMatrixRole !== 'owner' && (
-              <button
-                type="button"
-                disabled={savingPolicy}
-                onClick={handleSaveRolePolicy}
-                className="px-5 py-2.5 rounded-full bg-[var(--g-primary)] text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 shrink-0 shadow-xs"
-              >
-                <span className="ms-icon filled text-lg">save</span>
-                <span>{savingPolicy ? 'جاري الحفظ...' : 'حفظ صلاحيات الدور ✓'}</span>
-              </button>
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <button
+                  type="button"
+                  disabled={savingPolicy}
+                  onClick={handleSelectAllRolePerms}
+                  className="px-3 py-2 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-xs font-extrabold hover:border-[var(--g-primary)]"
+                >
+                  تحديد الكل
+                </button>
+                <button
+                  type="button"
+                  disabled={savingPolicy}
+                  onClick={handleClearAllRolePerms}
+                  className="px-3 py-2 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-xs font-extrabold hover:border-[var(--g-red)]"
+                >
+                  إلغاء الكل
+                </button>
+                <button
+                  type="button"
+                  disabled={savingPolicy}
+                  onClick={handleResetRolePolicy}
+                  className="px-3.5 py-2 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-extrabold flex items-center gap-1"
+                >
+                  <span className="ms-icon text-sm">restart_alt</span>
+                  <span>استعادة الافتراضي</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={savingPolicy}
+                  onClick={handleSaveRolePolicy}
+                  className="px-5 py-2.5 rounded-full bg-[var(--g-primary)] text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 shrink-0 shadow-xs"
+                >
+                  <span className="ms-icon filled text-lg">save</span>
+                  <span>{savingPolicy ? 'جاري الحفظ...' : 'حفظ صلاحيات الدور ✓'}</span>
+                </button>
+              </div>
             )}
           </div>
 

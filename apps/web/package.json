@@ -7,9 +7,15 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "generate:icons": "node scripts/generate-pwa-icons.js"
+    "generate:icons": "node scripts/generate-pwa-icons.js",
+    "android:sync": "vite build && cap sync android",
+    "android:apk": "node scripts/build-apk.js",
+    "android:open": "cap open android"
   },
   "dependencies": {
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/core": "^8.6.0",
     "@supabase/supabase-js": "^2.49.1",
     "@zayed-mart/shared": "*",
     "jsqr": "^1.4.0",
@@ -18,6 +24,7 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.6.0",
     "@tailwindcss/vite": "^4.0.9",
     "@vitejs/plugin-react": "^4.3.4",
     "tailwindcss": "^4.0.9",

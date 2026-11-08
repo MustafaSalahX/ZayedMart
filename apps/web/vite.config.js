@@ -26,5 +26,7 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    target: ['es2018', 'chrome64'],
+    cssTarget: 'chrome64',
   },
 });

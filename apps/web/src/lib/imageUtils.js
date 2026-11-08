@@ -3,7 +3,13 @@
  * بدون استخدام أي بث كاميرا ويب حي (getUserMedia غير مستخدم إطلاقاً)
  */
 
-export function compressImageFile(file, maxDimension = 1280, quality = 0.8) {
+export function compressImageFile(file, maxDimension, quality) {
+  const isLite =
+    typeof document !== 'undefined' &&
+    document.documentElement.classList.contains('lite-mode');
+  const resolvedMaxDim = maxDimension || (isLite ? 900 : 1280);
+  const resolvedQuality = quality || (isLite ? 0.68 : 0.8);
+
   return new Promise((resolve, reject) => {
     if (!file || !file.type.startsWith('image/')) {
       reject(new Error('الملف المختار ليس صورة صالحة'));
@@ -17,13 +23,13 @@ export function compressImageFile(file, maxDimension = 1280, quality = 0.8) {
       img.onerror = () => reject(new Error('تعذر معالجة الصورة'));
       img.onload = () => {
         let { width, height } = img;
-        if (width > maxDimension || height > maxDimension) {
+        if (width > resolvedMaxDim || height > resolvedMaxDim) {
           if (width >= height) {
-            height = Math.round((height * maxDimension) / width);
-            width = maxDimension;
+            height = Math.round((height * resolvedMaxDim) / width);
+            width = resolvedMaxDim;
           } else {
-            width = Math.round((width * maxDimension) / height);
-            height = maxDimension;
+            width = Math.round((width * resolvedMaxDim) / height);
+            height = resolvedMaxDim;
           }
         }
 
@@ -35,7 +41,7 @@ export function compressImageFile(file, maxDimension = 1280, quality = 0.8) {
         ctx.fillRect(0, 0, width, height);
         ctx.drawImage(img, 0, 0, width, height);
 
-        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        const dataUrl = canvas.toDataURL('image/jpeg', resolvedQuality);
         resolve(dataUrl);
       };
       img.src = ev.target.result;

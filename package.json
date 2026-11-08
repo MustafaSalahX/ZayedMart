@@ -18,7 +18,9 @@
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
-    "start": "npm run start --workspace=@zayed-mart/api"
+    "start": "npm run start --workspace=@zayed-mart/api",
+    "android:sync": "npm run build && npm run android:sync --workspace=@zayed-mart/web",
+    "android:apk": "npm run build && npm run android:apk --workspace=@zayed-mart/web"
   },
   "devDependencies": {
     "turbo": "^2.4.4",

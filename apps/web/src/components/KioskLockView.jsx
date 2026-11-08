@@ -49,9 +49,9 @@ export default function KioskLockView({
         actionType === 'check_in'
           ? 'حضور'
           : actionType === 'break_start'
-          ? 'بداية استراحة'
+          ? 'بداية بريك'
           : actionType === 'break_end'
-          ? 'عودة للعمل'
+          ? 'عودة من البريك'
           : 'انصراف';
 
       playSuccessChime(actionType === 'check_out' ? 'out' : 'in');
@@ -65,6 +65,9 @@ export default function KioskLockView({
       });
       setTimeout(() => setSuccessBanner(null), 2600);
       onRefresh?.();
+    } catch (err) {
+      speakArabicConfirmation(err?.message || 'عفواً، لا يمكن تنفيذ هذه الحركة حالياً', true);
+      alert(err?.message || 'عفواً، لا يمكن تنفيذ هذه الحركة حالياً');
     } finally {
       setSubmitting(false);
     }
@@ -194,9 +197,11 @@ export default function KioskLockView({
                 {emp.currentStatus === 'present'
                   ? 'حاضر الآن ✓'
                   : emp.currentStatus === 'on_break'
-                  ? 'في استراحة ☕'
+                  ? 'في بريك ☕'
                   : emp.currentStatus === 'checked_out'
-                  ? 'انصرف'
+                  ? emp.nextCheckInAvailability?.allowed
+                    ? 'جاهز للشفت الجديد'
+                    : `منصرف ✓ (يفتح ${emp.nextCheckInAvailability?.nextWindowStartHHMM || emp.shift_start || '08:00'})`
                   : 'اضغط للحضور'}
               </span>
             </button>
@@ -226,8 +231,7 @@ export default function KioskLockView({
             </div>
 
             <div className="grid grid-cols-1 gap-3">
-              {(selectedEmp.currentStatus === 'absent' ||
-                selectedEmp.currentStatus === 'checked_out') && (
+              {(!selectedEmp.currentStatus || selectedEmp.currentStatus === 'absent') && (
                 <button
                   type="button"
                   disabled={submitting}
@@ -241,6 +245,10 @@ export default function KioskLockView({
 
               {selectedEmp.currentStatus === 'present' && (
                 <>
+                  <div className="py-2.5 px-4 rounded-2xl bg-[#E6F4EA] text-[#146C2E] font-extrabold text-sm flex items-center justify-center gap-1.5">
+                    <span className="ms-icon filled text-lg">check_circle</span>
+                    <span>حاضر الآن في الشفت ✓</span>
+                  </div>
                   <button
                     type="button"
                     disabled={submitting}
@@ -248,7 +256,7 @@ export default function KioskLockView({
                     className="py-4 rounded-full bg-[#C25E00] hover:bg-[#9A4A00] text-white text-lg font-extrabold flex items-center justify-center gap-2"
                   >
                     <span className="ms-icon filled text-2xl">free_breakfast</span>
-                    <span>استراحة / إذن ☕</span>
+                    <span>بداية بريك ☕</span>
                   </button>
                   <button
                     type="button"
@@ -264,6 +272,10 @@ export default function KioskLockView({
 
               {selectedEmp.currentStatus === 'on_break' && (
                 <>
+                  <div className="py-2.5 px-4 rounded-2xl bg-[#FEF7E0] text-[#B06000] font-extrabold text-sm flex items-center justify-center gap-1.5">
+                    <span className="ms-icon filled text-lg">coffee</span>
+                    <span>في بريك حالياً ☕</span>
+                  </div>
                   <button
                     type="button"
                     disabled={submitting}
@@ -271,7 +283,7 @@ export default function KioskLockView({
                     className="py-5 rounded-full bg-[#0B57D0] text-white text-xl font-extrabold flex items-center justify-center gap-2"
                   >
                     <span className="ms-icon filled text-3xl">play_arrow</span>
-                    <span>عودة للعمل ▶️</span>
+                    <span>عودة من البريك ▶️</span>
                   </button>
                   <button
                     type="button"
@@ -282,6 +294,33 @@ export default function KioskLockView({
                     <span className="ms-icon filled text-2xl">logout</span>
                     <span>تسجيل انصراف 🏠</span>
                   </button>
+                </>
+              )}
+
+              {selectedEmp.currentStatus === 'checked_out' && (
+                <>
+                  {selectedEmp.nextCheckInAvailability?.allowed ? (
+                    <button
+                      type="button"
+                      disabled={submitting}
+                      onClick={() => recordKioskAction(selectedEmp, 'check_in')}
+                      className="py-5 rounded-full bg-[#146C2E] text-white text-xl font-extrabold flex items-center justify-center gap-3 shadow-md"
+                    >
+                      <span className="ms-icon filled text-3xl">waving_hand</span>
+                      <span>تسجيل حضور الشفت الجديد 👋</span>
+                    </button>
+                  ) : (
+                    <div className="p-4 rounded-2xl bg-[#FCE8E6] text-[#B3261E] border border-[#B3261E]/25 space-y-1.5">
+                      <div className="font-extrabold text-base flex items-center justify-center gap-1.5">
+                        <span className="ms-icon filled text-xl">lock_clock</span>
+                        <span>تم تسجيل انصرافك من هذا الشفت ✓</span>
+                      </div>
+                      <p className="text-xs font-bold m-0">
+                        {selectedEmp.nextCheckInAvailability?.reasonArabic ||
+                          `يفتح تسجيل الحضور للشفت القادم الساعة ${selectedEmp.nextCheckInAvailability?.nextWindowStartHHMM || selectedEmp.shift_start || '08:00'}`}
+                      </p>
+                    </div>
+                  )}
                 </>
               )}
 

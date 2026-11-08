@@ -53,13 +53,43 @@ function escapeHtml(val) {
     .replace(/"/g, '&quot;');
 }
 
-export function downloadExcelCsv(filename, headers, rows) {
-  const lines = [
-    headers.map(escapeCsvCell).join(','),
-    ...rows.map((r) => r.map(escapeCsvCell).join(',')),
-  ];
-  const csvContent = '\uFEFF' + lines.join('\r\n');
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+function triggerBlobDownloadOrAndroidShare(blob, filename, mimeType) {
+  try {
+    if (
+      typeof window !== 'undefined' &&
+      window.ZayedAndroidBridge?.shareOrSaveFile &&
+      typeof FileReader !== 'undefined'
+    ) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64 = String(reader.result || '').split(',')[1] || '';
+        if (base64) {
+          window.ZayedAndroidBridge.shareOrSaveFile(filename, mimeType, base64);
+        }
+      };
+      reader.readAsDataURL(blob);
+      return;
+    }
+  } catch {
+    // Fallback below
+  }
+
+  try {
+    const isAndroidWv =
+      typeof navigator !== 'undefined' &&
+      /Android/i.test(navigator.userAgent || '') &&
+      (window.Capacitor?.isNativePlatform?.() || /; wv\)/i.test(navigator.userAgent || ''));
+    if (isAndroidWv && typeof navigator.share === 'function' && typeof File !== 'undefined') {
+      const file = new File([blob], filename, { type: mimeType });
+      if (!navigator.canShare || navigator.canShare({ files: [file] })) {
+        navigator.share({ files: [file], title: filename }).catch(() => {});
+        return;
+      }
+    }
+  } catch {
+    // Fallback below
+  }
+
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -67,7 +97,18 @@ export function downloadExcelCsv(filename, headers, rows) {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+export function downloadExcelCsv(filename, headers, rows) {
+  const safeFilename = filename.endsWith('.csv') ? filename : `${filename}.csv`;
+  const lines = [
+    headers.map(escapeCsvCell).join(','),
+    ...rows.map((r) => r.map(escapeCsvCell).join(',')),
+  ];
+  const csvContent = '\uFEFF' + lines.join('\r\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  triggerBlobDownloadOrAndroidShare(blob, safeFilename, 'text/csv');
 }
 
 export function downloadWordDoc(filename, title, subtitle, sections = []) {
@@ -135,17 +176,18 @@ export function downloadWordDoc(filename, title, subtitle, sections = []) {
   const blob = new Blob(['\uFEFF', html], {
     type: 'application/msword;charset=utf-8',
   });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = safeFilename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  triggerBlobDownloadOrAndroidShare(blob, safeFilename, 'application/msword');
 }
 
 export function openWhatsAppShare(text) {
+  try {
+    if (typeof window !== 'undefined' && window.ZayedAndroidBridge?.shareWhatsApp) {
+      window.ZayedAndroidBridge.shareWhatsApp(String(text || ''));
+      return;
+    }
+  } catch {
+    // Fallback below
+  }
   const url = `https://wa.me/?text=${encodeURIComponent(text)}`;
   window.open(url, '_blank', 'noopener,noreferrer');
 }

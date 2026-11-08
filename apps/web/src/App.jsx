@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import TopBar from './components/TopBar.jsx';
 import BottomNav from './components/BottomNav.jsx';
 import SmartAlertsAndHandoverBar from './components/SmartAlertsAndHandoverBar.jsx';
@@ -25,6 +25,10 @@ import {
   lockDeviceToKiosk,
   hasPermission,
   hasAnyPermission,
+  resolveApiUrl,
+  isDirectCloudToken,
+  getLiteModeEnabled,
+  setLiteModeEnabled,
 } from './lib/api.js';
 import { subscribeSyncState } from './lib/localDb.js';
 import { subscribeGlobalStoreSync } from './lib/supabaseRealtime.js';
@@ -41,6 +45,7 @@ function getTodayLocalKey() {
 
 function getPreferredAllowedTab(role, perms = []) {
   const canAtt = hasAnyPermission(perms, role, [
+    'attendance:self',
     'attendance:read',
     'attendance:write',
     'attendance:kiosk',
@@ -98,6 +103,8 @@ export default function App() {
   const [voiceConfirmEnabled, setVoiceConfirmEnabled] = useState(
     () => localStorage.getItem('zayed_voice_confirm') !== 'false'
   );
+  const [liteMode, setLiteMode] = useState(() => getLiteModeEnabled());
+  const lastBackPressRef = useRef(0);
 
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -186,10 +193,10 @@ export default function App() {
     if (!authSession?.token) return undefined;
 
     let es = null;
-    if (authSession.token !== 'DIRECT_CLOUD_OWNER') {
+    if (!isDirectCloudToken(authSession.token)) {
       try {
         es = new EventSource(
-          `/api/events?token=${encodeURIComponent(authSession.token)}`
+          resolveApiUrl(`/api/events?token=${encodeURIComponent(authSession.token)}`)
         );
         es.addEventListener('update', () => {
           loadData();
@@ -361,7 +368,99 @@ export default function App() {
     localStorage.setItem('zayed_font_scale', fontScale);
   }, [fontScale]);
 
+  useEffect(() => {
+    setLiteModeEnabled(liteMode);
+  }, [liteMode]);
+
+  // Native Android Hardware Back Button handler (closes open sheets/modals before exiting)
+  useEffect(() => {
+    const handleAndroidBack = (ev) => {
+      if (previewModal) {
+        ev?.preventDefault?.();
+        setPreviewModal(null);
+        return;
+      }
+      if (walkie.consoleOpen) {
+        ev?.preventDefault?.();
+        walkie.setConsoleOpen(false);
+        return;
+      }
+      if (qrModalTab) {
+        ev?.preventDefault?.();
+        setQrModalTab(null);
+        return;
+      }
+      if (showHandoverModal) {
+        ev?.preventDefault?.();
+        setShowHandoverModal(false);
+        return;
+      }
+      if (showProfileModal) {
+        ev?.preventDefault?.();
+        setShowProfileModal(false);
+        return;
+      }
+      if (personLogTarget) {
+        ev?.preventDefault?.();
+        setPersonLogTarget(null);
+        return;
+      }
+      if (role === 'kiosk') {
+        ev?.preventDefault?.();
+        showToast('وضع الكشك المقيد مفعّل — استخدم زر الخروج العلوي لتغيير الحساب');
+        return;
+      }
+      const homeTab = getPreferredAllowedTab(role, permissions);
+      if (authSession?.token && activeTab !== homeTab) {
+        ev?.preventDefault?.();
+        setActiveTab(homeTab);
+        return;
+      }
+      const now = Date.now();
+      if (now - lastBackPressRef.current < 2200) {
+        window.ZayedAndroidBridge?.exitApp?.();
+        window.Capacitor?.Plugins?.App?.exitApp?.();
+      } else {
+        ev?.preventDefault?.();
+        lastBackPressRef.current = now;
+        showToast('اضغط زر الرجوع مرة أخرى للخروج من التطبيق');
+      }
+    };
+
+    window.addEventListener('zayed:android-back', handleAndroidBack);
+    let capListener = null;
+    try {
+      const capApp = window.Capacitor?.Plugins?.App;
+      if (capApp?.addListener) {
+        capListener = capApp.addListener('backButton', () => handleAndroidBack());
+      }
+    } catch {
+      // ignore
+    }
+    return () => {
+      window.removeEventListener('zayed:android-back', handleAndroidBack);
+      try {
+        capListener?.remove?.();
+      } catch {
+        // ignore
+      }
+    };
+  }, [
+    previewModal,
+    walkie,
+    qrModalTab,
+    showHandoverModal,
+    showProfileModal,
+    personLogTarget,
+    role,
+    permissions,
+    authSession?.token,
+    activeTab,
+    showToast,
+  ]);
+
   const canAttendance = hasAnyPermission(permissions, role, [
+    'attendance:self',
     'attendance:read',
     'attendance:write',
     'attendance:kiosk',
@@ -447,6 +546,18 @@ export default function App() {
       <AuthLoginScreen
         darkMode={darkMode}
         onToggleDarkMode={() => setDarkMode((d) => !d)}
+        liteMode={liteMode}
+        onToggleLiteMode={() => {
+          setLiteMode((l) => {
+            const next = !l;
+            showToast(
+              next
+                ? 'تم تفعيل وضع الأداء الخفيف للهواتف الاقتصادية ⚡'
+                : 'تم تفعيل الوضع البصري الكامل'
+            );
+            return next;
+          });
+        }}
         onLoginSuccess={(session) => {
           setAuthSessionState(session);
           setActiveTab(getPreferredAllowedTab(session.user?.role || '', session.permissions || []));
@@ -506,6 +617,7 @@ export default function App() {
     'attendance:write',
     'attendance:kiosk',
   ]);
+  const canSelfAttendance = hasPermission(permissions, role, 'attendance:self');
   const canReadAttendance = hasPermission(permissions, role, 'attendance:read');
   const canPrintCards = hasAnyPermission(permissions, role, [
     'staff:manage',
@@ -576,6 +688,18 @@ export default function App() {
         onToast={showToast}
         darkMode={darkMode}
         onToggleDarkMode={() => setDarkMode((d) => !d)}
+        liteMode={liteMode}
+        onToggleLiteMode={() => {
+          setLiteMode((l) => {
+            const next = !l;
+            showToast(
+              next
+                ? 'تم تفعيل وضع الأداء الخفيف للهواتف الاقتصادية ⚡'
+                : 'تم تفعيل الوضع البصري الكامل'
+            );
+            return next;
+          });
+        }}
         fontScale={fontScale}
         onCycleFontScale={cycleFontScale}
         fontFamily={fontFamily}
@@ -619,8 +743,10 @@ export default function App() {
             maxBreakMinutes={data?.settings?.max_break_minutes || 30}
             actorName={actorName}
             actorRole={role}
+            myProfile={data?.myProfile}
             filterRequest={attendanceFilterRequest}
             canWrite={canWriteAttendance}
+            canSelfAttendance={canSelfAttendance}
             canVerify={canVerify}
             canReadLogs={canReadAttendance}
             canPrintCards={canPrintCards}

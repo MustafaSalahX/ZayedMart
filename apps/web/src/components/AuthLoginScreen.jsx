@@ -1,11 +1,19 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { fetchStorePublicInfo, loginWithPassword, normalizeDigitsClient } from '../lib/api.js';
+import {
+  fetchStorePublicInfo,
+  getConfiguredApiBaseUrl,
+  loginWithPassword,
+  normalizeDigitsClient,
+  setConfiguredApiBaseUrl,
+} from '../lib/api.js';
 import { playSuccessChime } from '../lib/audio.js';
 import PwaInstallBanner from './PwaInstallBanner.jsx';
 
 export default function AuthLoginScreen({
   darkMode,
   onToggleDarkMode,
+  liteMode = false,
+  onToggleLiteMode,
   onLoginSuccess,
 }) {
   const [storeInfo, setStoreInfo] = useState({
@@ -16,6 +24,9 @@ export default function AuthLoginScreen({
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [loginError, setLoginError] = useState('');
+  const [showServerConfig, setShowServerConfig] = useState(false);
+  const [serverUrlInput, setServerUrlInput] = useState(() => getConfiguredApiBaseUrl());
+  const [serverSavedMsg, setServerSavedMsg] = useState('');
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -72,16 +83,38 @@ export default function AuthLoginScreen({
           <span className="truncate">دخول لمرة واحدة — تحديد الدور تلقائياً</span>
         </div>
 
-        <button
-          type="button"
-          onClick={onToggleDarkMode}
-          title={darkMode ? 'الوضع النهاري' : 'الوضع الليلي المريح'}
-          className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] flex items-center justify-center shrink-0 hover:border-[var(--g-primary)]"
-        >
-          <span className="ms-icon filled text-lg">
-            {darkMode ? 'light_mode' : 'dark_mode'}
-          </span>
-        </button>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {onToggleLiteMode && (
+            <button
+              type="button"
+              onClick={onToggleLiteMode}
+              title={
+                liteMode
+                  ? 'وضع الهواتف الاقتصادية مفعّل (سريع وخفيف على الرام والبطارية)'
+                  : 'تفعيل الوضع الخفيف للهواتف الاقتصادية الضعيفة'
+              }
+              className={`h-9 sm:h-10 px-3 rounded-full border text-xs font-extrabold flex items-center justify-center gap-1 shrink-0 ${
+                liteMode
+                  ? 'bg-[var(--g-green-bg)] text-[var(--g-green)] border-[var(--g-green)]/40'
+                  : 'bg-[var(--g-surface)] text-[var(--g-text)] border-[var(--g-border)]'
+              }`}
+            >
+              <span className="ms-icon filled text-base">bolt</span>
+              <span>{liteMode ? 'أداء خفيف ⚡' : 'وضع خفيف'}</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={onToggleDarkMode}
+            title={darkMode ? 'الوضع النهاري' : 'الوضع الليلي المريح'}
+            className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] flex items-center justify-center shrink-0 hover:border-[var(--g-primary)]"
+          >
+            <span className="ms-icon filled text-lg">
+              {darkMode ? 'light_mode' : 'dark_mode'}
+            </span>
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 flex flex-col items-center justify-center px-3 sm:px-6 py-3 sm:py-6">
@@ -182,9 +215,80 @@ export default function AuthLoginScreen({
             </button>
           </div>
 
-          <div className="pt-2 border-t border-[var(--g-border)] text-center text-[11px] text-[var(--g-muted)] flex items-center justify-center gap-1.5 leading-snug">
-            <span className="ms-icon text-sm text-[var(--g-green)]">verified_user</span>
-            <span>يبقى الجهاز مسجلاً تلقائياً ولا يطلب كلمة المرور مرة أخرى إلا عند تسجيل الخروج</span>
+          <div className="pt-2 border-t border-[var(--g-border)] space-y-2">
+            <div className="text-center text-[11px] text-[var(--g-muted)] flex items-center justify-center gap-1.5 leading-snug">
+              <span className="ms-icon text-sm text-[var(--g-green)]">verified_user</span>
+              <span>يبقى الجهاز مسجلاً تلقائياً ولا يطلب كلمة المرور مرة أخرى إلا عند تسجيل الخروج</span>
+            </div>
+
+            <div className="flex items-center justify-center">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowServerConfig((v) => !v);
+                  setServerSavedMsg('');
+                }}
+                className="text-[11px] font-bold text-[var(--g-primary)] hover:underline flex items-center gap-1"
+              >
+                <span className="ms-icon text-sm">settings_ethernet</span>
+                <span>
+                  {serverUrlInput
+                    ? `متصل بسيرفر مخصص (${serverUrlInput})`
+                    : 'إعدادات اتصال السيرفر / الشبكة (تلقائي سحابي)'}
+                </span>
+              </button>
+            </div>
+
+            {showServerConfig && (
+              <div className="p-3 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] space-y-2 text-xs">
+                <div className="font-extrabold text-[var(--g-text)]">
+                  عنوان سيرفر الفرع (اتركه فارغاً للاتصال السحابي التلقائي):
+                </div>
+                <input
+                  type="text"
+                  dir="ltr"
+                  value={serverUrlInput}
+                  onChange={(e) => setServerUrlInput(e.target.value)}
+                  placeholder="مثال: http://192.168.1.100:3001 أو https://zayedmart.vercel.app"
+                  className="g-input text-xs num-ltr py-2 px-3"
+                />
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const saved = setConfiguredApiBaseUrl(serverUrlInput);
+                      setServerUrlInput(saved);
+                      setServerSavedMsg(
+                        saved
+                          ? 'تم حفظ عنوان السيرفر بنجاح ✓'
+                          : 'تم الضبط على الاتصال السحابي التلقائي ✓'
+                      );
+                    }}
+                    className="flex-1 py-2 px-3 rounded-xl bg-[var(--g-primary)] text-white font-extrabold"
+                  >
+                    حفظ الاتصال
+                  </button>
+                  {serverUrlInput && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConfiguredApiBaseUrl('');
+                        setServerUrlInput('');
+                        setServerSavedMsg('تمت استعادة الاتصال السحابي التلقائي ✓');
+                      }}
+                      className="py-2 px-3 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)] font-extrabold"
+                    >
+                      تلقائي سحابي
+                    </button>
+                  )}
+                </div>
+                {serverSavedMsg && (
+                  <div className="text-[11px] font-extrabold text-[var(--g-green)] text-center">
+                    {serverSavedMsg}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </form>
       </div>

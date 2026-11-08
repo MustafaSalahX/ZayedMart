@@ -7,6 +7,8 @@ import {
   hasPermission,
   formatRequestedQty,
   purgeFakeData,
+  computeShiftDurationHoursClient,
+  formatShiftDurationArabicClient,
 } from '../lib/api.js';
 import {
   exportDailyReportCsv,
@@ -993,29 +995,36 @@ export default function AdminDashboard({
                     <div className="sm:col-span-2 space-y-1.5">
                       <div className="flex items-center justify-between flex-wrap gap-1">
                         <span className="text-[11px] font-bold text-[var(--g-muted)]">
-                          مواعيد الشفت (نظام 12 ساعة):
+                          مواعيد الشفت المرن (المدة المحسوبة:{' '}
+                          <strong className="text-[var(--g-primary)]">
+                            {formatShiftDurationArabicClient(empShiftStart, empShiftEnd)}
+                          </strong>
+                          ):
                         </span>
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEmpShiftStart('08:00');
-                              setEmpShiftEnd('20:00');
-                            }}
-                            className="px-2 py-0.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] text-[10px] font-extrabold"
-                          >
-                            ☀️ صباحي 12س (08:00 → 20:00)
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEmpShiftStart('20:00');
-                              setEmpShiftEnd('08:00');
-                            }}
-                            className="px-2 py-0.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] text-[10px] font-extrabold"
-                          >
-                            🌙 مسائي 12س (20:00 → 08:00)
-                          </button>
+                        <div className="flex items-center gap-1 flex-wrap">
+                          {[
+                            { label: '☀️ 8س صباحي', start: '08:00', end: '16:00' },
+                            { label: '🌆 8س مسائي', start: '16:00', end: '00:00' },
+                            { label: '⏱️ 10 ساعات', start: '08:00', end: '18:00' },
+                            { label: '☀️ 12س صباحي', start: '08:00', end: '20:00' },
+                            { label: '🌙 12س مسائي', start: '20:00', end: '08:00' },
+                          ].map((preset) => (
+                            <button
+                              key={preset.label}
+                              type="button"
+                              onClick={() => {
+                                setEmpShiftStart(preset.start);
+                                setEmpShiftEnd(preset.end);
+                              }}
+                              className={`px-2 py-0.5 rounded-full border text-[10px] font-extrabold transition-all ${
+                                empShiftStart === preset.start && empShiftEnd === preset.end
+                                  ? 'bg-[var(--g-primary)] text-white border-transparent'
+                                  : 'bg-[var(--g-surface)] border-[var(--g-border)] text-[var(--g-text)]'
+                              }`}
+                            >
+                              {preset.label} ({preset.start}→{preset.end})
+                            </button>
+                          ))}
                         </div>
                       </div>
                       <div className="grid grid-cols-2 gap-2">
@@ -1176,7 +1185,8 @@ export default function AdminDashboard({
                           </div>
                           <div className="text-xs text-[var(--g-muted)] truncate">
                             {emp.department}
-                            {emp.role_title ? ` • ${emp.role_title}` : ''} • الشفت (12س){' '}
+                            {emp.role_title ? ` • ${emp.role_title}` : ''} • الشفت (
+                            {emp.shiftDurationLabel || formatShiftDurationArabicClient(emp.shift_start, emp.shift_end)}){' '}
                             <span className="num-ltr">
                               {emp.shift_start} - {emp.shift_end || '20:00'}
                             </span>
@@ -1861,28 +1871,71 @@ export default function AdminDashboard({
                   ))}
                 </select>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-xs font-bold mb-1">من</label>
-                  <input
-                    type="time"
-                    value={editingEmployee.shift_start || '08:00'}
-                    onChange={(e) =>
-                      setEditingEmployee((p) => ({ ...p, shift_start: e.target.value }))
-                    }
-                    className="g-input w-full num-ltr text-xs"
-                  />
+              <div className="sm:col-span-2 space-y-2">
+                <div className="flex items-center justify-between flex-wrap gap-1">
+                  <span className="text-xs font-bold text-[var(--g-muted)]">
+                    مواعيد الشفت المرن (المدة المحسوبة:{' '}
+                    <strong className="text-[var(--g-primary)]">
+                      {formatShiftDurationArabicClient(
+                        editingEmployee.shift_start || '08:00',
+                        editingEmployee.shift_end || '20:00'
+                      )}
+                    </strong>
+                    ):
+                  </span>
+                  <div className="flex items-center gap-1 flex-wrap">
+                    {[
+                      { label: '☀️ 8س صباحي', start: '08:00', end: '16:00' },
+                      { label: '🌆 8س مسائي', start: '16:00', end: '00:00' },
+                      { label: '⏱️ 10 ساعات', start: '08:00', end: '18:00' },
+                      { label: '☀️ 12س صباحي', start: '08:00', end: '20:00' },
+                      { label: '🌙 12س مسائي', start: '20:00', end: '08:00' },
+                    ].map((preset) => (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        onClick={() =>
+                          setEditingEmployee((p) => ({
+                            ...p,
+                            shift_start: preset.start,
+                            shift_end: preset.end,
+                          }))
+                        }
+                        className={`px-2 py-0.5 rounded-full border text-[10px] font-extrabold transition-all ${
+                          editingEmployee.shift_start === preset.start &&
+                          editingEmployee.shift_end === preset.end
+                            ? 'bg-[var(--g-primary)] text-white border-transparent'
+                            : 'bg-[var(--g-surface)] border-[var(--g-border)] text-[var(--g-text)]'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-xs font-bold mb-1">إلى</label>
-                  <input
-                    type="time"
-                    value={editingEmployee.shift_end || '17:00'}
-                    onChange={(e) =>
-                      setEditingEmployee((p) => ({ ...p, shift_end: e.target.value }))
-                    }
-                    className="g-input w-full num-ltr text-xs"
-                  />
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs font-bold mb-1">من</label>
+                    <input
+                      type="time"
+                      value={editingEmployee.shift_start || '08:00'}
+                      onChange={(e) =>
+                        setEditingEmployee((p) => ({ ...p, shift_start: e.target.value }))
+                      }
+                      className="g-input w-full num-ltr text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold mb-1">إلى</label>
+                    <input
+                      type="time"
+                      value={editingEmployee.shift_end || '17:00'}
+                      onChange={(e) =>
+                        setEditingEmployee((p) => ({ ...p, shift_end: e.target.value }))
+                      }
+                      className="g-input w-full num-ltr text-xs"
+                    />
+                  </div>
                 </div>
               </div>
             </div>

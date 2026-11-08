@@ -1,7 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import jsQR from 'jsqr';
-import { apiRequest, normalizeDigitsClient } from '../lib/api.js';
+import {
+  apiRequest,
+  normalizeDigitsClient,
+  computeShiftDurationHoursClient,
+  formatShiftDurationArabicClient,
+} from '../lib/api.js';
 import { playSuccessChime, speakArabicConfirmation } from '../lib/audio.js';
 
 const ACTION_AR = {
@@ -89,6 +94,7 @@ export default function QrQuickModal({
     let stream = null;
     let rafId = null;
     let active = true;
+    let lastDecodeMs = 0;
 
     async function startScanner() {
       setCameraError('');
@@ -96,11 +102,26 @@ export default function QrQuickModal({
         setCameraError('الكاميرا غير متاحة على هذا المتصفح — استخدم تصوير صورة الكرت بالأسفل أو الرمز السريع.');
         return;
       }
+      const isLite =
+        typeof document !== 'undefined' &&
+        document.documentElement.classList.contains('lite-mode');
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
-          audio: false,
-        });
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: 'environment' },
+              width: { ideal: isLite ? 360 : 640 },
+              height: { ideal: isLite ? 240 : 480 },
+            },
+            audio: false,
+          });
+        } catch {
+          // Fallback for budget/older Android cameras that reject resolution/facingMode constraints
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
+        }
         if (!active) {
           stream.getTracks().forEach((t) => t.stop());
           return;
@@ -118,9 +139,20 @@ export default function QrQuickModal({
 
     function tickScan() {
       if (!active) return;
+      const nowMs = Date.now();
+      const isLite =
+        typeof document !== 'undefined' &&
+        document.documentElement.classList.contains('lite-mode');
+      const minInterval = isLite ? 160 : 110;
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      if (video && canvas && video.readyState === video.HAVE_ENOUGH_DATA) {
+      if (
+        nowMs - lastDecodeMs >= minInterval &&
+        video &&
+        canvas &&
+        video.readyState === video.HAVE_ENOUGH_DATA
+      ) {
+        lastDecodeMs = nowMs;
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -230,6 +262,8 @@ export default function QrQuickModal({
       .map((emp) => {
         const qrSrc = qrMap[emp.id] || '';
         const shiftText = `${emp.shift_start || '08:00'} -> ${emp.shift_end || '20:00'}`;
+        const shiftDurLabel =
+          emp.shiftDurationLabel || formatShiftDurationArabicClient(emp.shift_start, emp.shift_end);
         return `
           <div class="badge-card">
             <div class="badge-info">
@@ -239,7 +273,7 @@ export default function QrQuickModal({
               </div>
               <div class="badge-name">${emp.name}</div>
               <div class="badge-dept">${emp.department}${emp.role_title ? ` • ${emp.role_title}` : ''}</div>
-              <div class="badge-shift">⏰ شفت 12 ساعة: <span dir="ltr">${shiftText}</span></div>
+              <div class="badge-shift">⏰ شفت (${shiftDurLabel}): <span dir="ltr">${shiftText}</span></div>
               <div class="badge-footer">🔒 بطاقة QR مشفرة (بدون رقم سري)</div>
             </div>
             <div class="badge-qr-wrap">
@@ -752,7 +786,7 @@ export default function QrQuickModal({
                         {emp.role_title ? ` • ${emp.role_title}` : ''}
                       </div>
                       <div className="text-[11px] text-[#5F6368] mt-0.5 num-ltr">
-                        ⏰ {emp.shift_start || '08:00'} → {emp.shift_end || '20:00'} (12h)
+                        ⏰ {emp.shift_start || '08:00'} → {emp.shift_end || '20:00'} ({emp.shiftDurationHours || computeShiftDurationHoursClient(emp.shift_start, emp.shift_end)}h)
                       </div>
                       <div className="mt-2 flex items-center gap-1.5">
                         <span className="inline-block px-2.5 py-0.5 rounded-lg bg-[#E8F0FE] text-[#0B57D0] text-[11px] font-extrabold">

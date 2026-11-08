@@ -15,6 +15,7 @@ export default function BottomNav({
 }) {
   const role = authUser?.role || '';
   const canAttendance = hasAnyPermission(permissions, role, [
+    'attendance:self',
     'attendance:read',
     'attendance:write',
     'attendance:kiosk',

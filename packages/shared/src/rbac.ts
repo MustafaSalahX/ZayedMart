@@ -14,15 +14,24 @@ export interface PermissionItem {
 }
 
 export interface WalkieChannelMeta {
-  id: 'security' | 'warehouse' | 'floor' | 'emergency';
+  id: 'security' | 'cashier' | 'floor' | 'warehouse' | 'delivery' | 'supervisor' | 'emergency';
   code: string;
   label: string;
   shortLabel: string;
   freq: string;
   color: string;
+  roleHint?: string;
 }
 
-export const VALID_WALKIE_CHANNELS = ['security', 'warehouse', 'floor', 'emergency'] as const;
+export const VALID_WALKIE_CHANNELS = [
+  'security',
+  'cashier',
+  'floor',
+  'warehouse',
+  'delivery',
+  'supervisor',
+  'emergency',
+] as const;
 export type WalkieChannelId = (typeof VALID_WALKIE_CHANNELS)[number];
 
 export const WALKIE_CHANNELS: Record<WalkieChannelId, WalkieChannelMeta> = {
@@ -33,30 +42,61 @@ export const WALKIE_CHANNELS: Record<WalkieChannelId, WalkieChannelMeta> = {
     shortLabel: 'الأمن CH-01',
     freq: '462.5625 MHz',
     color: '#146C2E',
+    roleHint: 'تواصل مباشر مع الأمن من جميع الأقسام',
   },
-  warehouse: {
-    id: 'warehouse',
+  cashier: {
+    id: 'cashier',
     code: 'CH-02',
-    label: 'قناة المخزن والرصيف (CH-02)',
-    shortLabel: 'المخزن CH-02',
-    freq: '462.6125 MHz',
-    color: '#8430CE',
+    label: 'قناة الكاشيرية وخدمة العملاء (CH-02)',
+    shortLabel: 'الكاشير CH-02',
+    freq: '462.5875 MHz',
+    color: '#D93025',
+    roleHint: 'قناة مخصصة للكاشيرية ومراجعات الأسعار',
   },
   floor: {
     id: 'floor',
     code: 'CH-03',
-    label: 'قناة الصالة والكاشير (CH-03)',
+    label: 'قناة الصالة والممرات (CH-03)',
     shortLabel: 'الصالة CH-03',
-    freq: '462.6625 MHz',
+    freq: '462.6125 MHz',
     color: '#007B83',
+    roleHint: 'قناة مخصصة لمنسقي الصالة والممرات',
+  },
+  warehouse: {
+    id: 'warehouse',
+    code: 'CH-04',
+    label: 'قناة المخزن والرصيف (CH-04)',
+    shortLabel: 'المخزن CH-04',
+    freq: '462.6375 MHz',
+    color: '#8430CE',
+    roleHint: 'قناة مخصصة لأمناء المخزن واستلام البضاعة',
+  },
+  delivery: {
+    id: 'delivery',
+    code: 'CH-05',
+    label: 'قناة الدليفري والتوصيل (CH-05)',
+    shortLabel: 'الدليفري CH-05',
+    freq: '462.6625 MHz',
+    color: '#C26401',
+    roleHint: 'قناة مخصصة لطيارين الدليفري والطلبات الخارجية',
+  },
+  supervisor: {
+    id: 'supervisor',
+    code: 'CH-06',
+    label: 'قناة المشرفين والإدارة (CH-06)',
+    shortLabel: 'المشرفين CH-06',
+    freq: '462.6875 MHz',
+    color: '#0B57D0',
+    roleHint: 'قناة مخصصة لمشرفي الصالة والإدارة والكاميرات',
   },
   emergency: {
     id: 'emergency',
     code: 'CH-09',
-    label: 'قناة الطوارئ العامة (CH-09)',
+    label: 'قناة الطوارئ العامة للكل (CH-09)',
     shortLabel: 'الطوارئ CH-09',
     freq: '462.9500 MHz',
-    color: '#D93025',
+    color: '#B3261E',
+    roleHint: 'نداء طوارئ عام يصل لجميع الأدوار فوراً',
   },
 };
 
@@ -144,9 +184,10 @@ export const ROLES_METADATA: Record<string, RoleMetadata> = {
 };
 
 export const ALL_PERMISSIONS: PermissionItem[] = [
+  { id: 'attendance:self', label: 'تسجيل الحضور والبريك والانصراف الشخصي', group: 'الحضور والانصراف' },
   { id: 'attendance:kiosk', label: 'تسجيل حضور كشك العمال / QR', group: 'الحضور والانصراف' },
   { id: 'attendance:read', label: 'عرض سجل الحضور التفصيلي والبريك', group: 'الحضور والانصراف' },
-  { id: 'attendance:write', label: 'تسجيل حضور وانصراف وتحديد مدة البريك', group: 'الحضور والانصراف' },
+  { id: 'attendance:write', label: 'تسجيل حضور وانصراف للجميع وتحديد مدة البريك', group: 'الحضور والانصراف' },
   { id: 'attendance:verify', label: 'ختم مطابقة مراقب الكاميرات ✓', group: 'الحضور والانصراف' },
   { id: 'trucks:read', label: 'عرض سجل عربيات البضاعة', group: 'الموردون والطلبيات' },
   { id: 'trucks:write', label: 'تسجيل وصول وإنهاء استلام العربيات', group: 'الموردون والطلبيات' },
@@ -161,7 +202,7 @@ export const ALL_PERMISSIONS: PermissionItem[] = [
   { id: 'chat:read', label: 'عرض رسائل وتنبيهات الكاشيرية والتيم', group: 'التواصل والبروفايل' },
   { id: 'chat:write', label: 'إرسال رسائل ونداءات سريعة للكاشيرية والتيم', group: 'التواصل والبروفايل' },
   { id: 'walkie:use', label: 'استخدام جهاز اللاسلكي الفوري (Push-To-Talk)', group: 'التواصل والبروفايل' },
-  { id: 'walkie:all_channels', label: 'التبديل بين جميع قنوات اللاسلكي والنداء العام', group: 'التواصل والبروفايل' },
+  { id: 'walkie:all_channels', label: 'الدخول والاستماع والتحدث في جميع قنوات اللاسلكي', group: 'التواصل والبروفايل' },
   { id: 'profile:view', label: 'عرض البروفايل الشخصي والباسورد والسجل الفردي', group: 'التواصل والبروفايل' },
   { id: 'reports:view', label: 'عرض لوحة التقارير الشاملة والسجل الزمني الموحد', group: 'الإدارة والأمان' },
   { id: 'reports:export', label: 'تصدير تقارير Excel و Word و WhatsApp', group: 'الإدارة والأمان' },
@@ -177,6 +218,7 @@ export const ALL_PERMISSIONS: PermissionItem[] = [
 export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
   owner: ALL_PERMISSIONS.map((p) => p.id),
   manager: [
+    'attendance:self',
     'attendance:kiosk',
     'attendance:read',
     'attendance:write',
@@ -205,6 +247,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'settings:manage',
   ],
   supervisor: [
+    'attendance:self',
     'attendance:kiosk',
     'attendance:read',
     'attendance:write',
@@ -231,6 +274,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'audit:view',
   ],
   cashier: [
+    'attendance:self',
     'attendance:read',
     'shortages:read',
     'shortages:write',
@@ -243,6 +287,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'profile:view',
   ],
   cctv: [
+    'attendance:self',
     'attendance:kiosk',
     'attendance:read',
     'attendance:write',
@@ -263,6 +308,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'reports:export',
   ],
   security: [
+    'attendance:self',
     'attendance:kiosk',
     'attendance:read',
     'attendance:write',
@@ -276,11 +322,15 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'chat:read',
     'chat:write',
     'walkie:use',
+    'walkie:all_channels',
     'profile:view',
   ],
   hall: [
+    'attendance:self',
     'shortages:read',
     'shortages:write',
+    'notes:read',
+    'notes:write',
     'handover:manage',
     'chat:read',
     'chat:write',
@@ -288,6 +338,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'profile:view',
   ],
   warehouse: [
+    'attendance:self',
     'attendance:kiosk',
     'trucks:read',
     'trucks:write',
@@ -304,6 +355,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'profile:view',
   ],
   delivery: [
+    'attendance:self',
     'attendance:kiosk',
     'shortages:read',
     'notes:read',
@@ -316,6 +368,27 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
   kiosk: ['attendance:kiosk'],
 };
 
+export function getPrimaryWalkieChannelForRole(role: string): WalkieChannelId {
+  switch (role) {
+    case 'security':
+      return 'security';
+    case 'cashier':
+      return 'cashier';
+    case 'warehouse':
+      return 'warehouse';
+    case 'delivery':
+      return 'delivery';
+    case 'owner':
+    case 'manager':
+    case 'supervisor':
+    case 'cctv':
+      return 'supervisor';
+    case 'hall':
+    default:
+      return 'floor';
+  }
+}
+
 export function resolveAllowedWalkieChannels(
   role: string,
   permissions: string[] = []
@@ -327,13 +400,15 @@ export function resolveAllowedWalkieChannels(
   if (hasPerm('walkie:all_channels') || role === 'owner') {
     return [...VALID_WALKIE_CHANNELS];
   }
-  if (role === 'security') {
-    return ['security', 'emergency'];
+  const primary = getPrimaryWalkieChannelForRole(role);
+  const channels: WalkieChannelId[] = [primary];
+  if (!channels.includes('security')) {
+    channels.push('security');
   }
-  if (role === 'warehouse') {
-    return ['warehouse', 'emergency'];
+  if (!channels.includes('emergency')) {
+    channels.push('emergency');
   }
-  return ['floor', 'emergency'];
+  return channels;
 }
 
 export function inferDefaultRoleFromDepartment(department = '', roleTitle = ''): string {

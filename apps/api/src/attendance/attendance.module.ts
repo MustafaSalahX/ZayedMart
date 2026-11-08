@@ -30,7 +30,7 @@ export class AttendanceController {
   ) {}
 
   @Post()
-  @RequireAnyPermission(['attendance:write', 'attendance:kiosk'])
+  @RequireAnyPermission(['attendance:write', 'attendance:kiosk', 'attendance:self'])
   async recordAttendance(
     @Body() body: any,
     @CurrentAuth() auth: AuthContext,
@@ -47,6 +47,7 @@ export class AttendanceController {
         timestamp,
         allowed_break_minutes = 0,
         break_reason = '',
+        allow_reopen_shift = false,
       } = body || {};
 
       const validActions = ['check_in', 'break_start', 'break_end', 'check_out'];
@@ -63,19 +64,41 @@ export class AttendanceController {
       }
 
       const isFullWrite = auth.has('attendance:write');
+      const isKiosk = auth.has('attendance:kiosk');
+
+      if (!isFullWrite && !isKiosk) {
+        // User only has attendance:self — verify they are acting on their own employee record
+        const userRow = await this.db.queryOne<any>(
+          'SELECT employee_id, display_name FROM system_users WHERE id = ? LIMIT 1',
+          [auth.user.id]
+        );
+        const isOwnEmployee =
+          (userRow?.employee_id && userRow.employee_id === emp.id) ||
+          String(emp.name || '').trim() === String(auth.user.display_name || '').trim();
+        if (!isOwnEmployee) {
+          return res.status(403).json({
+            error: 'صلاحيتك تسمح بتسجيل حضورك وبريكك الشخصي فقط وليس لباقي الموظفين',
+          });
+        }
+      }
+
       const autoVerified = auth.has('attendance:verify');
+      const canReopen = Boolean(allow_reopen_shift) && (auth.has('records:manage') || isFullWrite);
 
       const created = await this.db.insertAttendanceLog({
         id: clientId,
         emp,
         action_type,
-        note: isFullWrite ? String(note || '').slice(0, 300) : '',
+        note: isFullWrite
+          ? String(note || (canReopen ? 'إعادة فتح حضور الشفت استثنائياً' : '')).slice(0, 300)
+          : '',
         proof_url: isFullWrite ? proof_url : '',
         recorded_by: auth.actorLabel,
         autoVerified,
         timestamp: isFullWrite ? timestamp : undefined,
-        allowed_break_minutes: isFullWrite ? allowed_break_minutes : 0,
-        break_reason: isFullWrite ? break_reason : '',
+        allowed_break_minutes: isFullWrite || auth.has('attendance:self') ? allowed_break_minutes : 0,
+        break_reason: isFullWrite || auth.has('attendance:self') ? break_reason : '',
+        allow_reopen_shift: canReopen,
         actorUser: auth.user,
         ip: getClientIp(req),
       });
@@ -83,12 +106,13 @@ export class AttendanceController {
       await this.realtime.broadcastStoreUpdate('attendance');
       return res.status(201).json({ ok: true, log: created });
     } catch (err: any) {
-      return res.status(500).json({ error: err.message });
+      const status = typeof err?.getStatus === 'function' ? err.getStatus() : err?.status || 500;
+      return res.status(status).json({ error: err.message });
     }
   }
 
   @Post('quick-scan')
-  @RequireAnyPermission(['attendance:kiosk', 'attendance:write'])
+  @RequireAnyPermission(['attendance:kiosk', 'attendance:write', 'attendance:self'])
   async quickScan(
     @Body() body: any,
     @CurrentAuth() auth: AuthContext,
@@ -101,6 +125,7 @@ export class AttendanceController {
         preferred_action = '',
         allowed_break_minutes = 0,
         break_reason = '',
+        allow_reopen_shift = false,
       } = body || {};
 
       const raw = normalizeDigits(String(code_or_qr || '').trim());
@@ -134,6 +159,21 @@ export class AttendanceController {
         return res
           .status(404)
           .json({ error: `لم يتم العثور على موظف بالكود (${raw})` });
+      }
+
+      if (!auth.has('attendance:write') && !auth.has('attendance:kiosk')) {
+        const userRow = await this.db.queryOne<any>(
+          'SELECT employee_id, display_name FROM system_users WHERE id = ? LIMIT 1',
+          [auth.user.id]
+        );
+        const isOwnEmployee =
+          (userRow?.employee_id && userRow.employee_id === emp.id) ||
+          String(emp.name || '').trim() === String(auth.user.display_name || '').trim();
+        if (!isOwnEmployee) {
+          return res.status(403).json({
+            error: 'صلاحيتك تسمح بمسح الكود الخاص بك فقط',
+          });
+        }
       }
 
       const todayKey = getLocalDateKey();
@@ -170,6 +210,9 @@ export class AttendanceController {
         }
       }
 
+      const canReopen =
+        Boolean(allow_reopen_shift) && (auth.has('records:manage') || auth.has('attendance:write'));
+
       const created = await this.db.insertAttendanceLog({
         emp,
         action_type: actionType,
@@ -178,6 +221,7 @@ export class AttendanceController {
         autoVerified: auth.has('attendance:verify'),
         allowed_break_minutes,
         break_reason,
+        allow_reopen_shift: canReopen,
         actorUser: auth.user,
         ip: getClientIp(req),
       });
@@ -191,7 +235,8 @@ export class AttendanceController {
         log: created,
       });
     } catch (err: any) {
-      return res.status(500).json({ error: err.message });
+      const status = typeof err?.getStatus === 'function' ? err.getStatus() : err?.status || 500;
+      return res.status(status).json({ error: err.message });
     }
   }
 

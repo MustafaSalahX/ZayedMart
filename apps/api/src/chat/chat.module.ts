@@ -14,7 +14,12 @@ import { getLocalDateKey } from '@zayed-mart/shared';
 import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import { getClientIp } from '../common/crypto.util';
-import { AuthContext, CurrentAuth } from '../common/decorators';
+import {
+  AuthContext,
+  CurrentAuth,
+  RequireAnyPermission,
+  RequirePermission,
+} from '../common/decorators';
 import { DatabaseService } from '../database/database.service';
 import { RealtimeService } from '../realtime/realtime.service';
 
@@ -26,6 +31,7 @@ export class ChatController {
   ) {}
 
   @Get()
+  @RequireAnyPermission(['chat:read', 'chat:write'])
   async getMessages(@Query('channel') rawChannel: string | undefined, @Res() res: Response) {
     try {
       const channel = String(rawChannel || '').trim();
@@ -45,6 +51,7 @@ export class ChatController {
   }
 
   @Post()
+  @RequirePermission('chat:write')
   async createMessage(
     @Body() body: any,
     @CurrentAuth() auth: AuthContext,
@@ -71,7 +78,7 @@ export class ChatController {
         return res.status(400).json({ error: 'يرجى كتابة نص الرسالة أو اختيار تنبيه سريع' });
       }
 
-      const validChannels = ['cashier', 'general', 'security'];
+      const validChannels = ['cashier', 'general', 'security', 'warehouse', 'delivery', 'hall'];
       const finalChannel = validChannels.includes(channel) ? channel : 'general';
       const finalUrgent = Boolean(is_urgent || priority === 'urgent');
       const now = new Date();
@@ -110,6 +117,10 @@ export class ChatController {
           ? 'قناة الكاشيرية'
           : finalChannel === 'security'
           ? 'قناة الأمن والبوابة'
+          : finalChannel === 'warehouse'
+          ? 'قناة المخزن'
+          : finalChannel === 'delivery'
+          ? 'قناة الدليفري'
           : 'قناة التيم العام';
 
       await this.db.recordAuditLog({
@@ -131,6 +142,7 @@ export class ChatController {
   }
 
   @Post(':id/pin')
+  @RequireAnyPermission(['records:manage', 'users:manage', 'chat:write'])
   async togglePin(@Param('id') id: string, @Res() res: Response) {
     try {
       const existing = await this.db.queryOne<any>(

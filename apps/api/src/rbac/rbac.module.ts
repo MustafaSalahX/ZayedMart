@@ -11,7 +11,12 @@ import {
   Req,
   Res,
 } from '@nestjs/common';
-import { ALL_PERMISSIONS, normalizeDigits, ROLES_METADATA } from '@zayed-mart/shared';
+import {
+  ALL_PERMISSIONS,
+  DEFAULT_ROLE_PERMISSIONS,
+  normalizeDigits,
+  ROLES_METADATA,
+} from '@zayed-mart/shared';
 import crypto from 'node:crypto';
 import type { Request, Response } from 'express';
 import {
@@ -89,6 +94,7 @@ export class RbacController {
       rolesMeta: ROLES_METADATA,
       permissionsCatalog: ALL_PERMISSIONS,
       policies,
+      defaultPolicies: DEFAULT_ROLE_PERMISSIONS,
       users,
       activeSessionsCount: Number(activeSessionsRow?.c || 0),
       auditLogs,
@@ -418,6 +424,48 @@ export class RbacController {
 
       await this.realtime.broadcastStoreUpdate('rbac_policy_update');
       return res.json({ ok: true, permissions: sanitized });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  @Post('rbac/policies/:role/reset')
+  @RequirePermission('users:manage')
+  async resetRolePolicy(
+    @Param('role') role: string,
+    @CurrentAuth() auth: AuthContext,
+    @Req() req: Request,
+    @Res() res: Response
+  ) {
+    try {
+      if (role === 'owner') {
+        return res.status(400).json({ error: 'دور المالك يحتفظ دائماً بكافة الصلاحيات' });
+      }
+      if (!ROLES_METADATA[role]) {
+        return res.status(400).json({ error: 'الدور غير معروف' });
+      }
+      const defaults = DEFAULT_ROLE_PERMISSIONS[role] || [];
+      const nowIso = new Date().toISOString();
+
+      await this.db.execute(
+        `INSERT INTO role_policies (role, permissions_json, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT (role) DO UPDATE SET permissions_json = EXCLUDED.permissions_json, updated_at = EXCLUDED.updated_at`,
+        [role, JSON.stringify(defaults), nowIso]
+      );
+
+      await this.db.recordAuditLog({
+        userId: auth.user.id,
+        userName: auth.user.display_name,
+        role: auth.user.role,
+        action: 'استعادة الصلاحيات الافتراضية للدور',
+        details: `إعادة ضبط صلاحيات دور (${ROLES_METADATA[role].label}) إلى الإعدادات الافتراضية (${defaults.length} صلاحية)`,
+        ip: getClientIp(req),
+        severity: 'info',
+      });
+
+      await this.realtime.broadcastStoreUpdate('rbac_policy_reset');
+      return res.json({ ok: true, permissions: defaults });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }

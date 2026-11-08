@@ -1,8 +1,11 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import {
   ALL_PERMISSIONS,
   computeLateMinutes,
+  computeShiftDurationHours,
   DEFAULT_ROLE_PERMISSIONS,
+  evaluateNextCheckInAvailability,
+  formatShiftDurationArabic,
   getLocalDateKey,
   getPreviousDateKey,
   inferDefaultRoleFromDepartment,
@@ -552,6 +555,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         if (res.rows[0]?.value) {
           this.cachedSessionSecret = res.rows[0].value;
           this.storageMode = 'supabase_postgres';
+          await this.ensureRolePoliciesUpToDate(new Date().toISOString()).catch(() => {});
           return;
         }
       } catch {
@@ -605,46 +609,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
 
     const nowIso = new Date().toISOString();
-    for (const [role, perms] of Object.entries(DEFAULT_ROLE_PERMISSIONS)) {
-      await this.execute(
-        'INSERT INTO role_policies (role, permissions_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (role) DO NOTHING',
-        [role, JSON.stringify(perms), nowIso]
-      );
-    }
-
-    // Ensure walkie permissions exist in existing role policies
-    const migratedWalkieV37 = await this.queryOne<{ value: string }>(
-      "SELECT value FROM settings WHERE key = 'migration_walkie_v37'"
-    );
-    if (!migratedWalkieV37?.value) {
-      const additions: Record<string, string[]> = {
-        manager: ['walkie:use', 'walkie:all_channels'],
-        supervisor: ['walkie:use', 'walkie:all_channels'],
-        cctv: ['walkie:use', 'walkie:all_channels'],
-        security: ['walkie:use'],
-      };
-      for (const [roleId, extraPerms] of Object.entries(additions)) {
-        const row = await this.queryOne<{ permissions_json: string }>(
-          'SELECT permissions_json FROM role_policies WHERE role = ?',
-          [roleId]
-        );
-        if (row?.permissions_json) {
-          try {
-            const parsed = JSON.parse(row.permissions_json);
-            if (Array.isArray(parsed)) {
-              const merged = Array.from(new Set([...parsed, ...extraPerms]));
-              await this.execute(
-                'UPDATE role_policies SET permissions_json = ?, updated_at = ? WHERE role = ?',
-                [JSON.stringify(merged), nowIso, roleId]
-              );
-            }
-          } catch {
-            // ignore
-          }
-        }
-      }
-      await this.upsertSetting('migration_walkie_v37', 'done');
-    }
+    await this.ensureRolePoliciesUpToDate(nowIso);
 
     // Ensure default Owner ('123') exists
     const ownerRow = await this.queryOne<{ id: string }>(
@@ -673,6 +638,75 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       }
     } catch {
       // ignore non-fatal startup sync
+    }
+  }
+
+  private async ensureRolePoliciesUpToDate(nowIso: string): Promise<void> {
+    for (const [role, perms] of Object.entries(DEFAULT_ROLE_PERMISSIONS)) {
+      await this.execute(
+        'INSERT INTO role_policies (role, permissions_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (role) DO NOTHING',
+        [role, JSON.stringify(perms), nowIso]
+      );
+    }
+
+    const migratedV38 = await this.queryOne<{ value: string }>(
+      "SELECT value FROM settings WHERE key = 'migration_rbac_walkie_v38'"
+    );
+    if (!migratedV38?.value) {
+      const additions: Record<string, string[]> = {
+        manager: ['attendance:self', 'walkie:use', 'walkie:all_channels', 'profile:view', 'chat:read', 'chat:write'],
+        supervisor: ['attendance:self', 'walkie:use', 'walkie:all_channels', 'profile:view', 'chat:read', 'chat:write'],
+        cctv: ['attendance:self', 'walkie:use', 'walkie:all_channels', 'profile:view', 'chat:read', 'chat:write'],
+        security: ['attendance:self', 'walkie:use', 'walkie:all_channels', 'shortages:read', 'notes:read', 'notes:write', 'profile:view', 'chat:read', 'chat:write'],
+        cashier: [
+          'attendance:self',
+          'attendance:read',
+          'shortages:read',
+          'shortages:write',
+          'notes:read',
+          'notes:write',
+          'handover:manage',
+          'chat:read',
+          'chat:write',
+          'walkie:use',
+          'profile:view',
+        ],
+        hall: [
+          'attendance:self',
+          'shortages:read',
+          'shortages:write',
+          'notes:read',
+          'notes:write',
+          'handover:manage',
+          'chat:read',
+          'chat:write',
+          'walkie:use',
+          'profile:view',
+        ],
+        warehouse: ['attendance:self', 'walkie:use', 'profile:view', 'chat:read', 'chat:write'],
+        delivery: ['attendance:self', 'walkie:use', 'profile:view', 'chat:read', 'chat:write'],
+      };
+      for (const [roleId, extraPerms] of Object.entries(additions)) {
+        const row = await this.queryOne<{ permissions_json: string }>(
+          'SELECT permissions_json FROM role_policies WHERE role = ?',
+          [roleId]
+        );
+        if (row?.permissions_json) {
+          try {
+            const parsed = JSON.parse(row.permissions_json);
+            if (Array.isArray(parsed)) {
+              const merged = Array.from(new Set([...parsed, ...extraPerms]));
+              await this.execute(
+                'UPDATE role_policies SET permissions_json = ?, updated_at = ? WHERE role = ?',
+                [JSON.stringify(merged), nowIso, roleId]
+              );
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+      await this.upsertSetting('migration_rbac_walkie_v38', 'done');
     }
   }
 
@@ -732,8 +766,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    const extra = role !== 'kiosk' ? ['profile:view', 'chat:read', 'chat:write'] : [];
-    return Array.from(new Set([...basePerms, ...customPerms, ...extra]));
+    return Array.from(new Set([...basePerms, ...customPerms]));
   }
 
   async recordAuditLog({
@@ -1127,6 +1160,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     timestamp,
     allowed_break_minutes = 0,
     break_reason = '',
+    allow_reopen_shift = false,
     actorUser = null,
     ip = '',
   }: {
@@ -1140,6 +1174,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     timestamp?: string;
     allowed_break_minutes?: number | string;
     break_reason?: string;
+    allow_reopen_shift?: boolean;
     actorUser?: any;
     ip?: string;
   }) {
@@ -1156,9 +1191,69 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     const dateKey = getLocalDateKey(eventDate);
     const openShift = await this.findOpenShiftForEmployee(emp.id, eventDate);
 
+    // Strict Attendance State Machine Validation (when not replaying a historical offline timestamp)
+    if (!timestamp) {
+      if (openShift.isOpen) {
+        const lastAction = openShift.latestLog?.action_type;
+        if (lastAction === 'break_start') {
+          if (action_type === 'break_start') {
+            throw new BadRequestException(
+              'الموظف في استراحة (بريك) بالفعل حالياً — لا يمكن إعطاء بريك فوق البريك، يجب تسجيل "عودة من البريك" أولاً'
+            );
+          }
+          if (action_type === 'check_in') {
+            throw new BadRequestException(
+              'الموظف مسجل حضور بالفعل وحالياً في بريك — يرجى الضغط على "عودة من البريك"'
+            );
+          }
+        } else if (lastAction === 'check_in' || lastAction === 'break_end') {
+          if (action_type === 'check_in') {
+            throw new BadRequestException('الموظف مسجل "حاضر" بالفعل في الوردية الحالية');
+          }
+          if (action_type === 'break_end') {
+            throw new BadRequestException('الموظف ليس في بريك حالياً لتسجيل عودة من البريك');
+          }
+        }
+      } else {
+        if (action_type === 'break_start') {
+          throw new BadRequestException('لا يمكن بدء بريك لموظف غير حاضر — يجب تسجيل الحضور أولاً');
+        }
+        if (action_type === 'break_end') {
+          throw new BadRequestException('الموظف ليس في بريك حالياً');
+        }
+        if (action_type === 'check_out') {
+          throw new BadRequestException('الموظف منصرف بالفعل أو لم يسجل حضور في هذه الوردية');
+        }
+        if (action_type === 'check_in' && openShift.latestLog?.action_type === 'check_out') {
+          if (!allow_reopen_shift) {
+            const lastShiftKey =
+              openShift.latestLog.shift_date_key || openShift.latestLog.date_key || dateKey;
+            const lastCheckIn = await this.queryOne<any>(
+              `SELECT timestamp FROM attendance_logs
+               WHERE employee_id = ? AND (shift_date_key = ? OR date_key = ?) AND action_type = 'check_in'
+               ORDER BY timestamp DESC LIMIT 1`,
+              [emp.id, lastShiftKey, lastShiftKey]
+            );
+            const availability = evaluateNextCheckInAvailability({
+              shiftStart: emp.shift_start,
+              shiftEnd: emp.shift_end,
+              lastCheckInAt: lastCheckIn?.timestamp || null,
+              lastCheckOutAt: openShift.latestLog.timestamp,
+              now: eventDate,
+            });
+            if (!availability.canCheckIn) {
+              throw new BadRequestException(availability.lockReasonArabic);
+            }
+          }
+        }
+      }
+    }
+
     const shiftDateKey =
       action_type === 'check_in'
-        ? dateKey
+        ? allow_reopen_shift && openShift.latestLog?.shift_date_key
+          ? openShift.latestLog.shift_date_key
+          : dateKey
         : openShift.isOpen
         ? openShift.shiftDateKey
         : dateKey;
@@ -1325,6 +1420,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
     const canAttendance =
       isInternalSnap ||
+      auth!.has('attendance:self') ||
       auth!.has('attendance:read') ||
       auth!.has('attendance:write') ||
       auth!.has('attendance:kiosk') ||
@@ -1655,6 +1751,35 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           )
         : 0;
 
+      const shiftDurationHours = computeShiftDurationHours(emp.shift_start, emp.shift_end);
+      const shiftDurationLabel = formatShiftDurationArabic(shiftDurationHours);
+      const scheduledShiftMinutes = Math.round(shiftDurationHours * 60);
+      const netWorkedMinutes = Math.max(0, shiftDurationMinutes - totalBreakMinutes);
+      const overtimeMinutes =
+        currentStatus === 'checked_out' && netWorkedMinutes > scheduledShiftMinutes + 15
+          ? netWorkedMinutes - scheduledShiftMinutes
+          : 0;
+      const earlyLeaveMinutes =
+        currentStatus === 'checked_out' && netWorkedMinutes + 15 < scheduledShiftMinutes
+          ? scheduledShiftMinutes - netWorkedMinutes
+          : 0;
+
+      const nextCheckInAvailability =
+        currentStatus === 'checked_out'
+          ? evaluateNextCheckInAvailability({
+              shiftStart: emp.shift_start,
+              shiftEnd: emp.shift_end,
+              lastCheckInAt: firstCheckIn ? firstCheckIn.timestamp : null,
+              lastCheckOutAt: checkOutLog ? checkOutLog.timestamp : null,
+            })
+          : {
+              canCheckIn: currentStatus === 'absent',
+              nextShiftStartStr: emp.shift_start || '08:00',
+              windowOpenTimeStr: emp.shift_start || '08:00',
+              remainingMinutes: 0,
+              lockReasonArabic: '',
+            };
+
       if (auth && !canReadAttendanceLogs && !auth.has('staff:manage')) {
         return {
           id: emp.id,
@@ -1662,9 +1787,19 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           name: emp.name,
           department: emp.department,
           avatar_color: emp.avatar_color,
+          shift_start: emp.shift_start || '08:00',
+          shift_end: emp.shift_end || '20:00',
+          shiftDurationHours,
+          shiftDurationLabel,
           currentStatus,
           isCrossDayShift,
           shiftDateKey: activeShiftKey,
+          activeBreakStart: currentStatus === 'on_break' && latestLog ? latestLog.timestamp : null,
+          allowedBreakMinutes:
+            currentStatus === 'on_break' && latestLog
+              ? Number(latestLog.allowed_break_minutes) || defaultMaxBreak
+              : defaultMaxBreak,
+          nextCheckInAvailability,
         };
       }
 
@@ -1680,6 +1815,13 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         login_password: canManageStaffOrUsers
           ? linkedInfo?.password || emp.emp_code || ''
           : undefined,
+        shiftDurationHours,
+        shiftDurationLabel,
+        scheduledShiftMinutes,
+        netWorkedMinutes,
+        overtimeMinutes,
+        earlyLeaveMinutes,
+        nextCheckInAvailability,
         currentStatus,
         isCrossDayShift,
         shiftDateKey: activeShiftKey,
@@ -1878,6 +2020,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         ? decryptPasswordForAdmin(userRow.pin_cipher, secretHex) || empRow?.emp_code || ''
         : '';
 
+      const enrichedSelfEmp = empRow
+        ? enrichedEmployees.find((e) => e.id === empRow.id) || null
+        : null;
+      const selfShiftHours = computeShiftDurationHours(
+        empRow?.shift_start || '08:00',
+        empRow?.shift_end || '20:00'
+      );
+
       myProfile = {
         user_id: auth.user.id,
         username: auth.user.username,
@@ -1892,6 +2042,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         role_title: empRow?.role_title || ROLES_METADATA[auth.user.role]?.label || '',
         shift_start: empRow?.shift_start || '08:00',
         shift_end: empRow?.shift_end || '20:00',
+        shiftDurationHours: selfShiftHours,
+        shiftDurationLabel: formatShiftDurationArabic(selfShiftHours),
+        currentStatus: enrichedSelfEmp?.currentStatus || 'absent',
+        activeBreakStart: enrichedSelfEmp?.activeBreakStart || null,
+        allowedBreakMinutes: enrichedSelfEmp?.allowedBreakMinutes || defaultMaxBreak,
+        checkInTime: enrichedSelfEmp?.checkInTime || null,
+        checkOutTime: enrichedSelfEmp?.checkOutTime || null,
+        nextCheckInAvailability: enrichedSelfEmp?.nextCheckInAvailability || null,
         phone: empRow?.phone || '',
         qr_payload: empRow ? `ZMART:EMP:${empRow.id}` : '',
       };

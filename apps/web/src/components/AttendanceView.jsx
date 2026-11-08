@@ -1,7 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ProofUploader from './ProofUploader.jsx';
 import VoiceMicButton from './VoiceMicButton.jsx';
-import { postActionWithOfflineSupport, apiRequest } from '../lib/api.js';
+import {
+  postActionWithOfflineSupport,
+  apiRequest,
+  computeShiftDurationHoursClient,
+  formatShiftDurationArabicClient,
+} from '../lib/api.js';
 import { playSuccessChime, speakArabicConfirmation } from '../lib/audio.js';
 import { formatTimeArabic, formatTimeWithSeconds } from '../lib/exportUtils.js';
 
@@ -24,7 +29,7 @@ const DEPT_ICONS = {
 const CALL_ALLOWED_ROLES = new Set(['owner', 'manager', 'supervisor', 'cctv', 'security']);
 
 const QUICK_ATTENDANCE_NOTES = [
-  'حضور منتظم (شفت 12 ساعة)',
+  'حضور منتظم بالموعد',
   'بإذن مسبق من الإدارة',
   'تأخير مواصلات',
   'استراحة غداء / صلاة',
@@ -50,15 +55,15 @@ const ACTION_META = {
     badge: 'bg-[var(--g-green-bg)] text-[var(--g-green)]',
   },
   break_start: {
-    label: 'استراحة / إذن',
-    btnLabel: 'بداية استراحة محددة المدة',
+    label: 'في بريك',
+    btnLabel: 'بداية بريك محدد المدة',
     icon: 'free_breakfast',
     bg: 'bg-[#C25E00] hover:bg-[#9A4A00] text-white',
     badge: 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]',
   },
   break_end: {
-    label: 'عودة للعمل',
-    btnLabel: 'عودة من الاستراحة (حساب المدة)',
+    label: 'عودة من البريك',
+    btnLabel: 'عودة من البريك للعمل',
     icon: 'play_arrow',
     bg: 'bg-[#0B57D0] hover:bg-[#0842A0] text-white',
     badge: 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]',
@@ -78,8 +83,10 @@ export default function AttendanceView({
   maxBreakMinutes = 30,
   actorName = 'الأمن',
   actorRole = '',
+  myProfile = null,
   filterRequest = null,
   canWrite = true,
+  canSelfAttendance = false,
   canVerify = false,
   canReadLogs = true,
   canPrintCards = true,
@@ -109,6 +116,17 @@ export default function AttendanceView({
   const cardsSectionRef = useRef(null);
   const canCallPhone = CALL_ALLOWED_ROLES.has(actorRole) || canReadLogs;
   const isOwner = actorRole === 'owner';
+
+  function isOwnEmployeeRecord(emp) {
+    if (!emp) return false;
+    if (myProfile?.employee_id && myProfile.employee_id === emp.id) return true;
+    return String(emp.name || '').trim() === String(actorName || '').trim();
+  }
+
+  function canActOnEmployee(emp) {
+    if (canWrite) return true;
+    return Boolean(canSelfAttendance && isOwnEmployeeRecord(emp));
+  }
 
   // Respond to Smart Alert [عرض الاستراحات] button immediately!
   useEffect(() => {
@@ -158,12 +176,12 @@ export default function AttendanceView({
   }
 
   function openEmployeeModal(emp, defaultBreakMins = null) {
-    if (!canWrite) {
+    if (!canActOnEmployee(emp)) {
       if (onOpenPersonLog && canReadLogs) {
         onOpenPersonLog(emp.id, emp.name);
         return;
       }
-      onToast?.('عرض فقط — حسابك الحالي لا يملك صلاحية تسجيل حضور', 'error');
+      onToast?.('عرض فقط — يمكنك تسجيل حضورك الشخصي فقط أو مراجعة الآدمن لمنحك الصلاحية', 'error');
       return;
     }
     setActiveEmployee(emp);
@@ -174,7 +192,11 @@ export default function AttendanceView({
     setProofDataUrl('');
   }
 
-  async function submitAttendance(actionType, customBreakOverride = null) {
+  async function submitAttendance(
+    actionType,
+    customBreakOverride = null,
+    allowReopenShift = false
+  ) {
     if (!activeEmployee || submitting) return;
     setSubmitting(true);
     try {
@@ -201,6 +223,7 @@ export default function AttendanceView({
           note: note.trim() || (actionType === 'break_start' ? breakReason : ''),
           allowed_break_minutes: finalBreakMins,
           break_reason: actionType === 'break_start' ? breakReason : '',
+          allow_reopen_shift: Boolean(allowReopenShift),
           recorded_by: actorName,
           ...(manualIso ? { timestamp: manualIso } : {}),
         },
@@ -238,9 +261,15 @@ export default function AttendanceView({
     }
   }
 
-  async function handleQuickCardAction(emp, actionType, e, customBreakMinutes = null) {
+  async function handleQuickCardAction(
+    emp,
+    actionType,
+    e,
+    customBreakMinutes = null,
+    allowReopenShift = false
+  ) {
     e?.stopPropagation();
-    if (!canWrite || submitting) return;
+    if (!canActOnEmployee(emp) || submitting) return;
     setSubmitting(true);
     try {
       const res = await postActionWithOfflineSupport('/api/attendance', {
@@ -249,7 +278,8 @@ export default function AttendanceView({
         allowed_break_minutes:
           actionType === 'break_start' ? Number(customBreakMinutes || maxBreakMinutes || 30) : 0,
         break_reason: actionType === 'break_start' ? 'استراحة' : '',
-        note: '',
+        allow_reopen_shift: Boolean(allowReopenShift),
+        note: allowReopenShift ? 'إعادة فتح الشفت استثنائياً بقرار الإدارة' : '',
         recorded_by: actorName,
       });
       playSuccessChime(actionType === 'check_out' ? 'out' : 'in');
@@ -390,31 +420,31 @@ export default function AttendanceView({
         {[
           {
             id: 'all',
-            label: 'إجمالي الموظفين (شفت 12س)',
+            label: 'إجمالي الموظفين (شفتات مرنة)',
             count: employees.length,
             icon: 'groups',
             tone: 'text-[var(--g-primary)] bg-[var(--g-primary-container)]',
           },
           {
             id: 'present',
-            label: 'متواجد الآن بالشفت',
+            label: 'حاضر الآن بالشفت ✓',
             count: employees.filter((e) => e.currentStatus === 'present').length,
             icon: 'how_to_reg',
             tone: 'text-[var(--g-green)] bg-[var(--g-green-bg)]',
           },
           {
             id: 'on_break',
-            label: 'في استراحة حالياً',
+            label: 'في بريك حالياً ☕',
             count: employees.filter((e) => e.currentStatus === 'on_break').length,
             icon: 'free_breakfast',
             tone: 'text-[var(--g-yellow)] bg-[var(--g-yellow-bg)]',
           },
           {
-            id: 'absent',
-            label: 'لم يحضر بعد',
-            count: employees.filter((e) => e.currentStatus === 'absent').length,
-            icon: 'person_off',
-            tone: 'text-[var(--g-muted)] bg-[var(--g-surface-variant)]',
+            id: 'checked_out',
+            label: 'تم الانصراف ✓',
+            count: employees.filter((e) => e.currentStatus === 'checked_out').length,
+            icon: 'logout',
+            tone: 'text-[var(--g-red)] bg-[var(--g-red-bg)]',
           },
         ].map((card) => {
           const selected = statusFilter === card.id;
@@ -479,7 +509,7 @@ export default function AttendanceView({
                 قاعدة البيانات نظيفة وجاهزة لإدخال موظفي زايد مارت الحقيقيين
               </h3>
               <p className="text-xs sm:text-sm text-[var(--g-muted)] m-0 mt-1 max-w-lg mx-auto">
-                أضف موظفي الماركت والكاشيرية والأمن الحقيقيين (شفت 12 ساعة) ليتم تفعيل حساباتهم وكروت الـ QR لهم فوراً.
+                أضف موظفي الماركت والكاشيرية والأمن الحقيقيين (شفت 8 أو 10 أو 12 ساعة أو مخصص) ليتم تفعيل حساباتهم وكروت الـ QR لهم فوراً.
               </p>
             </div>
             {canManageStaff && (
@@ -518,6 +548,16 @@ export default function AttendanceView({
               const empAllowedBreak = emp.allowedBreakMinutes || maxBreakMinutes || 30;
               const breakExceeded = emp.currentStatus === 'on_break' && breakMins > empAllowedBreak;
               const needsCctvVerify = emp.latestLogId && !emp.latestVerified && canVerify;
+              const canEmpWrite = canActOnEmployee(emp);
+              const isSelfCard = isOwnEmployeeRecord(emp);
+              const shiftHours =
+                emp.shiftDurationHours ||
+                computeShiftDurationHoursClient(emp.shift_start, emp.shift_end);
+              const shiftLabel =
+                emp.shiftDurationLabel || formatShiftDurationArabicClient(shiftHours);
+              const canCheckInAfterCheckout = Boolean(emp.nextCheckInAvailability?.canCheckIn);
+              const nextWindowTimeStr =
+                emp.nextCheckInAvailability?.windowOpenTimeStr || emp.shift_start || '08:00';
               const initials = emp.name
                 .split(' ')
                 .slice(0, 2)
@@ -533,7 +573,7 @@ export default function AttendanceView({
                   onKeyDown={(e) => e.key === 'Enter' && openEmployeeModal(emp)}
                   className={`g-card g-card-interactive p-4 text-right flex flex-col justify-between gap-3 cursor-pointer ${
                     breakExceeded ? 'g-smart-timer-orange' : ''
-                  }`}
+                  } ${isSelfCard ? 'ring-2 ring-[var(--g-primary)]/40' : ''}`}
                 >
                   <div className="flex items-start justify-between gap-2 w-full">
                     <div className="flex items-center gap-3 min-w-0">
@@ -544,8 +584,13 @@ export default function AttendanceView({
                         {initials}
                       </div>
                       <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="font-extrabold text-base truncate">{emp.name}</span>
+                          {isSelfCard && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-[var(--g-primary-container)] text-[var(--g-primary)] font-black shrink-0">
+                              أنت
+                            </span>
+                          )}
                           {isOwner && emp.emp_code && (
                             <span
                               title="الرمز السري (يظهر للأدمن فقط)"
@@ -559,8 +604,8 @@ export default function AttendanceView({
                           {emp.department}
                           {emp.role_title ? ` • ${emp.role_title}` : ''}
                         </div>
-                        <div className="text-[11px] text-[var(--g-muted)] num-ltr mt-0.5">
-                          ⏰ {emp.shift_start || '08:00'} → {emp.shift_end || '20:00'} (12h)
+                        <div className="text-[11px] text-[var(--g-muted)] num-ltr mt-0.5 font-semibold">
+                          ⏰ {emp.shift_start || '08:00'} → {emp.shift_end || '20:00'} ({shiftLabel})
                         </div>
                       </div>
                     </div>
@@ -580,11 +625,11 @@ export default function AttendanceView({
                         }`}
                       >
                         {emp.currentStatus === 'present'
-                          ? 'متواجد ✓'
+                          ? 'حاضر ✓'
                           : emp.currentStatus === 'on_break'
-                          ? `استراحة ${breakMins}/${empAllowedBreak} د`
+                          ? `في بريك ${breakMins}/${empAllowedBreak} د`
                           : emp.currentStatus === 'checked_out'
-                          ? 'انصرف'
+                          ? 'منصرف ✓'
                           : 'لم يحضر'}
                       </span>
 
@@ -601,11 +646,11 @@ export default function AttendanceView({
                     <div className="px-2.5 py-1.5 rounded-xl bg-[var(--g-surface-variant)] flex items-center justify-between text-[11px] font-bold">
                       {emp.currentStatus === 'on_break' ? (
                         <span className={breakExceeded ? 'text-[var(--g-orange-text)] font-extrabold' : 'text-[var(--g-yellow)]'}>
-                          ☕ في استراحة منذ {breakMins} د (مسموح {empAllowedBreak} د)
+                          ☕ في بريك منذ {breakMins} د (مسموح {empAllowedBreak} د)
                         </span>
                       ) : (
                         <span className="text-[var(--g-muted)]">
-                          ☕ إجمالي الاستراحات بالشفت: {emp.totalBreakMinutes} دقيقة ({emp.breaksCount || 1} مرة)
+                          ☕ إجمالي البريك بالشفت: {emp.totalBreakMinutes} دقيقة ({emp.breaksCount || 1} مرة)
                         </span>
                       )}
                       {breakExceeded && (
@@ -651,13 +696,13 @@ export default function AttendanceView({
                     </div>
                   )}
 
-                  {canWrite && (
+                  {canEmpWrite && (
                     <div
                       onClick={(e) => e.stopPropagation()}
                       className="space-y-1.5 pt-2 border-t border-[var(--g-border)] w-full"
                     >
                       <div className="flex flex-wrap items-center gap-1.5 w-full">
-                        {(emp.currentStatus === 'absent' || emp.currentStatus === 'checked_out') && (
+                        {emp.currentStatus === 'absent' && (
                           <button
                             type="button"
                             disabled={submitting}
@@ -665,27 +710,34 @@ export default function AttendanceView({
                             className="flex-1 min-h-[40px] px-3 py-1.5 rounded-xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-xs sm:text-sm font-black flex items-center justify-center gap-1.5 active:scale-95 transition-all shadow-2xs"
                           >
                             <span className="ms-icon filled text-base">login</span>
-                            <span>تسجيل حضور ✓</span>
+                            <span>تسجيل حضور</span>
                           </button>
                         )}
 
                         {emp.currentStatus === 'present' && (
                           <>
+                            <span
+                              title="الموظف حاضر الآن في الشفت"
+                              className="min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-green-bg)] text-[var(--g-green)] border border-[var(--g-green)]/30 text-xs font-black flex items-center justify-center gap-1 shrink-0"
+                            >
+                              <span className="ms-icon filled text-base">check_circle</span>
+                              <span>حاضر ✓</span>
+                            </span>
                             <button
                               type="button"
                               disabled={submitting}
                               onClick={() => openEmployeeModal(emp, 30)}
                               className="flex-1 min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] border border-[var(--g-yellow-border)]/35 text-xs font-extrabold flex items-center justify-center gap-1 active:scale-95"
-                              title="تحديد مدة الاستراحة للموظف"
+                              title="بدء بريك وتحديد المدة"
                             >
                               <span className="ms-icon text-base">coffee</span>
-                              <span>إعطاء استراحة ⏱️</span>
+                              <span>بداية بريك</span>
                             </button>
                             <button
                               type="button"
                               disabled={submitting}
                               onClick={(e) => handleQuickCardAction(emp, 'check_out', e)}
-                              className="flex-1 min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-red-bg)] text-[var(--g-red)] border border-[var(--g-red-border)]/30 text-xs font-extrabold flex items-center justify-center gap-1 active:scale-95"
+                              className="min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-red-bg)] text-[var(--g-red)] border border-[var(--g-red-border)]/30 text-xs font-extrabold flex items-center justify-center gap-1 active:scale-95"
                             >
                               <span className="ms-icon text-base">logout</span>
                               <span>انصراف</span>
@@ -699,10 +751,10 @@ export default function AttendanceView({
                               type="button"
                               disabled={submitting}
                               onClick={(e) => handleQuickCardAction(emp, 'break_end', e)}
-                              className="flex-1 min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-primary)] text-white text-xs font-extrabold flex items-center justify-center gap-1 active:scale-95"
+                              className="flex-1 min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-primary)] text-white text-xs font-extrabold flex items-center justify-center gap-1 active:scale-95 shadow-2xs"
                             >
                               <span className="ms-icon text-base">work_history</span>
-                              <span>عودة ({breakMins} د) ✓</span>
+                              <span>عودة من البريك ({breakMins} د) ✓</span>
                             </button>
                             <button
                               type="button"
@@ -713,6 +765,35 @@ export default function AttendanceView({
                               <span className="ms-icon text-base">logout</span>
                               <span>انصراف</span>
                             </button>
+                          </>
+                        )}
+
+                        {emp.currentStatus === 'checked_out' && (
+                          <>
+                            {canCheckInAfterCheckout ? (
+                              <button
+                                type="button"
+                                disabled={submitting}
+                                onClick={(e) => handleQuickCardAction(emp, 'check_in', e)}
+                                className="flex-1 min-h-[40px] px-3 py-1.5 rounded-xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-xs font-black flex items-center justify-center gap-1.5 active:scale-95 transition-all shadow-2xs"
+                              >
+                                <span className="ms-icon filled text-base">login</span>
+                                <span>تسجيل حضور للشفت الجديد ✓</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled
+                                title={
+                                  emp.nextCheckInAvailability?.lockReasonArabic ||
+                                  'تم الانصراف ولا يمكن تسجيل حضور جديد قبل موعد الشفت القادم'
+                                }
+                                className="flex-1 min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-surface-variant)] text-[var(--g-muted)] border border-[var(--g-border)] text-[11px] font-extrabold flex items-center justify-center gap-1 opacity-85 cursor-not-allowed"
+                              >
+                                <span className="ms-icon text-sm">lock_clock</span>
+                                <span>منصرف ✓ (يفتح {nextWindowTimeStr})</span>
+                              </button>
+                            )}
                           </>
                         )}
 
@@ -731,6 +812,30 @@ export default function AttendanceView({
                           </button>
                         )}
                       </div>
+
+                      {emp.currentStatus === 'checked_out' &&
+                        !canCheckInAfterCheckout &&
+                        canManageRecords && (
+                          <div className="pt-1">
+                            <button
+                              type="button"
+                              disabled={submitting}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (
+                                  window.confirm(
+                                    `هل تريد إعادة فتح حضور الشفت الحالي استثنائياً للموظف "${emp.name}"؟`
+                                  )
+                                ) {
+                                  handleQuickCardAction(emp, 'check_in', e, null, true);
+                                }
+                              }}
+                              className="w-full py-1 px-2 rounded-lg bg-[var(--g-surface-variant)] hover:bg-[var(--g-primary-container)] text-[10px] font-extrabold text-[var(--g-primary)] border border-dashed border-[var(--g-primary)]/40"
+                            >
+                              🔓 إعادة فتح حضور الشفت استثنائياً (للآدمن)
+                            </button>
+                          </div>
+                        )}
 
                       {/* Quick 1-Tap Break Duration Pills for Security & Supervisors */}
                       {emp.currentStatus === 'present' && (
@@ -798,7 +903,7 @@ export default function AttendanceView({
               </h2>
             </div>
             <span className="text-xs text-[var(--g-muted)] font-bold">
-              🔄 يدعم مزامنة شفت الـ 12 ساعة الممتد لليوم التالي تلقائياً
+              🔄 يدعم الشفتات المرنة (8 / 10 / 12 ساعة) والشفتات الليلية الممتدة تلقائياً
             </span>
           </div>
 
@@ -959,9 +1064,14 @@ export default function AttendanceView({
                   {activeEmployee.name[0]}
                 </div>
                 <div>
-                  <h3 className="text-lg font-extrabold m-0">{activeEmployee.name}</h3>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-lg font-extrabold m-0">{activeEmployee.name}</h3>
+                    <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold ${STATUS_META[activeEmployee.currentStatus || 'absent']?.chipClass || ''}`}>
+                      {STATUS_META[activeEmployee.currentStatus || 'absent']?.label}
+                    </span>
+                  </div>
                   <p className="text-xs text-[var(--g-muted)] m-0">
-                    {activeEmployee.department} • شفت 12 ساعة:{' '}
+                    {activeEmployee.department} • شفت ({activeEmployee.shiftDurationLabel || formatShiftDurationArabicClient(activeEmployee.shift_start, activeEmployee.shift_end)}):{' '}
                     <span className="num-ltr font-bold">
                       {activeEmployee.shift_start || '08:00'} → {activeEmployee.shift_end || '20:00'}
                     </span>
@@ -1003,13 +1113,13 @@ export default function AttendanceView({
               </button>
             </div>
 
-            {/* Smart Break Duration & Reason Selector (for Security / Supervisor / Admin) */}
-            {(canManageRecords || activeEmployee.currentStatus === 'present') && (
+            {/* Smart Break Duration & Reason Selector (shown only when present and ready to start a break) */}
+            {activeEmployee.currentStatus === 'present' && (
               <div className="p-3.5 rounded-2xl bg-[var(--g-yellow-bg)]/50 border border-[var(--g-yellow-border)]/40 space-y-2.5">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-extrabold text-[var(--g-yellow)] flex items-center gap-1">
                     <span className="ms-icon text-base">timer</span>
-                    <span>تحديد مدة وسبب الاستراحة (للأمن والمشرف):</span>
+                    <span>تحديد مدة وسبب البريك:</span>
                   </span>
                   <span className="text-xs font-black num-ltr text-[var(--g-yellow)]">
                     {allowedBreakMins} دقيقة
@@ -1121,24 +1231,24 @@ export default function AttendanceView({
             )}
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
-              {(canManageRecords ||
-                activeEmployee.currentStatus === 'absent' ||
-                activeEmployee.currentStatus === 'checked_out') && (
+              {(!activeEmployee.currentStatus || activeEmployee.currentStatus === 'absent') && (
                 <button
                   type="button"
                   disabled={submitting}
                   onClick={() => submitAttendance('check_in')}
-                  className={`${
-                    canManageRecords ? '' : 'sm:col-span-2'
-                  } py-4 px-5 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.check_in.bg}`}
+                  className={`sm:col-span-2 py-4 px-5 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.check_in.bg}`}
                 >
                   <span className="ms-icon filled text-2xl">waving_hand</span>
                   <span>{ACTION_META.check_in.btnLabel}</span>
                 </button>
               )}
 
-              {(canManageRecords || activeEmployee.currentStatus === 'present') && (
+              {activeEmployee.currentStatus === 'present' && (
                 <>
+                  <div className="sm:col-span-2 py-2.5 px-4 rounded-2xl bg-[var(--g-green-bg)] text-[var(--g-green)] border border-[var(--g-green)]/30 font-extrabold text-sm flex items-center justify-center gap-1.5">
+                    <span className="ms-icon filled text-lg">check_circle</span>
+                    <span>الموظف حاضر حالياً في الشفت ✓ — يمكنك بدء بريك أو تسجيل انصراف</span>
+                  </div>
                   <button
                     type="button"
                     disabled={submitting}
@@ -1146,33 +1256,7 @@ export default function AttendanceView({
                     className={`py-4 px-4 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.break_start.bg}`}
                   >
                     <span className="ms-icon filled text-2xl">free_breakfast</span>
-                    <span>استراحة ({allowedBreakMins} د)</span>
-                  </button>
-
-                  {!canManageRecords && (
-                    <button
-                      type="button"
-                      disabled={submitting}
-                      onClick={() => submitAttendance('check_out')}
-                      className={`py-4 px-4 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.check_out.bg}`}
-                    >
-                      <span className="ms-icon filled text-2xl">logout</span>
-                      <span>تسجيل انصراف</span>
-                    </button>
-                  )}
-                </>
-              )}
-
-              {(canManageRecords || activeEmployee.currentStatus === 'on_break') && (
-                <>
-                  <button
-                    type="button"
-                    disabled={submitting}
-                    onClick={() => submitAttendance('break_end')}
-                    className={`py-4 px-4 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.break_end.bg}`}
-                  >
-                    <span className="ms-icon filled text-2xl">play_arrow</span>
-                    <span>عودة للعمل (حساب البريك)</span>
+                    <span>بداية بريك ({allowedBreakMins} د)</span>
                   </button>
 
                   <button
@@ -1184,6 +1268,74 @@ export default function AttendanceView({
                     <span className="ms-icon filled text-2xl">logout</span>
                     <span>تسجيل انصراف</span>
                   </button>
+                </>
+              )}
+
+              {activeEmployee.currentStatus === 'on_break' && (
+                <>
+                  <div className="sm:col-span-2 py-2.5 px-4 rounded-2xl bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] border border-[var(--g-yellow-border)]/40 font-extrabold text-sm flex items-center justify-center gap-1.5">
+                    <span className="ms-icon filled text-lg">coffee</span>
+                    <span>الموظف في بريك حالياً ☕ — لا يمكن إعطاء بريك جديد قبل العودة من البريك</span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => submitAttendance('break_end')}
+                    className={`py-4 px-4 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.break_end.bg}`}
+                  >
+                    <span className="ms-icon filled text-2xl">play_arrow</span>
+                    <span>عودة من البريك</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => submitAttendance('check_out')}
+                    className={`py-4 px-4 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.check_out.bg}`}
+                  >
+                    <span className="ms-icon filled text-2xl">logout</span>
+                    <span>تسجيل انصراف</span>
+                  </button>
+                </>
+              )}
+
+              {activeEmployee.currentStatus === 'checked_out' && (
+                <>
+                  {activeEmployee.nextCheckInAvailability?.allowed ? (
+                    <button
+                      type="button"
+                      disabled={submitting}
+                      onClick={() => submitAttendance('check_in')}
+                      className={`sm:col-span-2 py-4 px-5 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.check_in.bg}`}
+                    >
+                      <span className="ms-icon filled text-2xl">waving_hand</span>
+                      <span>تسجيل حضور الشفت الجديد</span>
+                    </button>
+                  ) : (
+                    <div className="sm:col-span-2 space-y-2.5">
+                      <div className="p-3.5 rounded-2xl bg-[var(--g-purple-bg)]/80 text-[var(--g-purple)] border border-[var(--g-purple)]/30 text-center space-y-1">
+                        <div className="font-extrabold text-sm flex items-center justify-center gap-1.5">
+                          <span className="ms-icon filled text-base">lock_clock</span>
+                          <span>تم تسجيل انصراف الموظف من هذا الشفت ✓</span>
+                        </div>
+                        <p className="text-xs font-bold m-0">
+                          {activeEmployee.nextCheckInAvailability?.reasonArabic ||
+                            `يفتح تسجيل الحضور للشفت القادم الساعة ${activeEmployee.nextCheckInAvailability?.nextWindowStartHHMM || activeEmployee.shift_start || '08:00'}`}
+                        </p>
+                      </div>
+                      {canManageRecords && (
+                        <button
+                          type="button"
+                          disabled={submitting}
+                          onClick={() => submitAttendance('check_in', true)}
+                          className="w-full py-3 px-4 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-[var(--g-text)] font-extrabold text-xs flex items-center justify-center gap-1.5 hover:bg-[var(--g-primary)] hover:text-white transition-all"
+                        >
+                          <span className="ms-icon text-base">restart_alt</span>
+                          <span>إعادة فتح الشفت استثنائياً (تجاوز للأدمن فقط)</span>
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
             </div>
