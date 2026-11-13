@@ -16,7 +16,13 @@ import PersonLogModal from './components/PersonLogModal.jsx';
 import WalkieFloatingDock from './components/WalkieFloatingDock.jsx';
 import WalkieTalkieConsole from './components/WalkieTalkieConsole.jsx';
 import {
+  SkeletonKpiStrip,
+  SkeletonList,
+  SmartFab,
+} from './components/ui/index.js';
+import {
   fetchBootstrap,
+  fetchBootstrapIfNeeded,
   flushOfflineQueue,
   getOfflineQueue,
   getCachedAuthSession,
@@ -150,6 +156,23 @@ export default function App() {
     });
   }, []);
 
+  const applyBootstrapSnapshot = useCallback((snap) => {
+    if (!snap) return;
+    setData(snap);
+    if (snap.auth?.user) {
+      setAuthSessionState((prev) =>
+        prev
+          ? {
+              ...prev,
+              user: snap.auth.user,
+              permissions: snap.auth.permissions || [],
+            }
+          : prev
+      );
+    }
+    setOfflineQueueCount(getOfflineQueue().length);
+  }, []);
+
   const loadData = useCallback(async () => {
     if (!authSession?.token) {
       setLoading(false);
@@ -157,19 +180,7 @@ export default function App() {
     }
     try {
       const snap = await fetchBootstrap(selectedDate);
-      setData(snap);
-      if (snap.auth?.user) {
-        setAuthSessionState((prev) =>
-          prev
-            ? {
-                ...prev,
-                user: snap.auth.user,
-                permissions: snap.auth.permissions || [],
-              }
-            : prev
-        );
-      }
-      setOfflineQueueCount(getOfflineQueue().length);
+      applyBootstrapSnapshot(snap);
     } catch (err) {
       if (err.code !== 'UNAUTHENTICATED') {
         showToast(err.message || 'تعذر تحميل البيانات', 'error');
@@ -177,7 +188,19 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [authSession?.token, selectedDate, showToast]);
+  }, [authSession?.token, selectedDate, showToast, applyBootstrapSnapshot]);
+
+  const loadDataIfChanged = useCallback(async () => {
+    if (!authSession?.token) return;
+    try {
+      const snap = await fetchBootstrapIfNeeded(selectedDate);
+      if (snap) {
+        applyBootstrapSnapshot(snap);
+      }
+    } catch {
+      // Background digest poll errors stay silent until next SSE/manual reload
+    }
+  }, [authSession?.token, selectedDate, applyBootstrapSnapshot]);
 
   useEffect(() => {
     if (authSession?.token) {
@@ -251,7 +274,7 @@ export default function App() {
     });
 
     const pollInterval = setInterval(() => {
-      loadData();
+      loadDataIfChanged();
     }, 15000);
 
     // Fast 5-second auto-reconnect probe whenever Phone is in Offline Mode or has pending offline items to upload
@@ -568,18 +591,24 @@ export default function App() {
 
   if (loading && !data) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-3 p-6 text-center">
-        <img
-          src="/Logo.png"
-          onError={(e) => {
-            if (e.currentTarget.src.endsWith('/Logo.png')) {
-              e.currentTarget.src = '/logo.jpeg';
-            }
-          }}
-          alt="زايد مارت"
-          className="w-16 h-16 rounded-3xl object-cover border-2 border-[var(--g-border)] shadow-sm animate-pulse bg-white"
-        />
-        <div className="font-extrabold text-lg">جاري فتح نظام زايد مارت الآمن...</div>
+      <div className="min-h-[100dvh] bg-[var(--g-bg)] px-3 sm:px-6 py-4 space-y-5 max-w-7xl mx-auto">
+        <div className="h-14 rounded-2xl bg-[var(--g-surface)] border border-[var(--g-border)] px-4 flex items-center gap-3">
+          <img
+            src="/Logo.png"
+            onError={(e) => {
+              if (e.currentTarget.src.endsWith('/Logo.png')) {
+                e.currentTarget.src = '/logo.jpeg';
+              }
+            }}
+            alt="زايد مارت"
+            className="w-9 h-9 rounded-xl object-cover border border-[var(--g-border)] bg-white"
+          />
+          <div className="font-extrabold text-sm sm:text-base text-[var(--g-text)]">
+            جاري تجهيز لوحة زايد مارت...
+          </div>
+        </div>
+        <SkeletonKpiStrip count={4} />
+        <SkeletonList rows={5} />
       </div>
     );
   }
@@ -859,6 +888,40 @@ export default function App() {
         authUser={authUser}
         permissions={permissions}
         summary={data?.summary}
+        onOpenQrModal={() => setQrModalTab('code')}
+        onOpenHandoverModal={() => setShowHandoverModal(true)}
+        onOpenWalkieModal={() => walkie.setConsoleOpen(true)}
+        canUseWalkie={walkie.canUseWalkie}
+      />
+
+      {/* Context-Aware Smart FAB + Quick Dial (right thumb-zone, opposite WalkieFloatingDock) */}
+      <SmartFab
+        activeTab={activeTab}
+        hasBottomNav={permittedTabsCount > 1}
+        canWriteAttendance={canWriteAttendance}
+        canQr={canWriteAttendance || canSelfAttendance || canPrintCards}
+        canWriteShortages={canWriteShortages}
+        canWriteTrucks={canWriteTrucks}
+        canWriteNotes={canWriteNotes}
+        canHandover={canHandover}
+        onOpenQr={() => setQrModalTab('code')}
+        onOpenHandover={() => setShowHandoverModal(true)}
+        onPrimaryAction={(action) => {
+          const tabMap = {
+            shortage_add: 'shortages',
+            truck_arrive: 'trucks',
+            note_add: 'notes',
+          };
+          const targetTab = tabMap[action];
+          if (targetTab && activeTab !== targetTab) {
+            setActiveTab(targetTab);
+            setTimeout(() => {
+              window.dispatchEvent(new CustomEvent('zayed:open-composer', { detail: { action } }));
+            }, 60);
+          } else if (action) {
+            window.dispatchEvent(new CustomEvent('zayed:open-composer', { detail: { action } }));
+          }
+        }}
       />
 
       {/* Floating Tactical Walkie-Talkie Quick-PTT Dock */}

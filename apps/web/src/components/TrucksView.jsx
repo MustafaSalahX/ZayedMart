@@ -14,10 +14,26 @@ const QUICK_TRUCK_NOTES = [
 ];
 
 const CONDITION_META = {
-  pending: { label: 'جاري التنزيل', badge: 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]' },
-  complete: { label: 'سليمة وكاملة ✓', badge: 'bg-[var(--g-green-bg)] text-[var(--g-green)]' },
-  shortage: { label: 'يوجد نواقص ⚠️', badge: 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]' },
-  return_damaged: { label: 'مرتجع / تالف 🔄', badge: 'bg-[var(--g-red-bg)] text-[var(--g-red)]' },
+  pending: {
+    label: 'جاري التنزيل',
+    icon: 'hourglass_top',
+    badge: 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]',
+  },
+  complete: {
+    label: 'سليمة وكاملة',
+    icon: 'check_circle',
+    badge: 'bg-[var(--g-green-bg)] text-[var(--g-green)]',
+  },
+  shortage: {
+    label: 'يوجد نواقص',
+    icon: 'warning',
+    badge: 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]',
+  },
+  return_damaged: {
+    label: 'مرتجع / تالف',
+    icon: 'sync_problem',
+    badge: 'bg-[var(--g-red-bg)] text-[var(--g-red)]',
+  },
 };
 
 const CALL_ALLOWED_ROLES = new Set(['owner', 'manager', 'supervisor', 'cctv', 'security']);
@@ -58,6 +74,21 @@ export default function TrucksView({
     const t = setInterval(() => setTick((n) => n + 1), 15000);
     return () => clearInterval(t);
   }, []);
+
+  // SmartFab hook: open custom truck arrival modal from anywhere on Trucks tab
+  useEffect(() => {
+    function handleOpenComposer(ev) {
+      if (ev?.detail?.action === 'truck_arrive' && canWrite) {
+        openArrivalModal({
+          isCustom: true,
+          name: 'مورد عام / طلبية',
+          category: 'بقالة جافة',
+        });
+      }
+    }
+    window.addEventListener('zayed:open-composer', handleOpenComposer);
+    return () => window.removeEventListener('zayed:open-composer', handleOpenComposer);
+  }, [canWrite]);
 
   const activeUnloading = truckLogs.filter((t) => t.status === 'unloading');
   const completedToday = truckLogs.filter((t) => t.status === 'completed');
@@ -300,13 +331,14 @@ export default function TrucksView({
                       )}
                     </div>
                     <span
-                      className={`px-3 py-1 rounded-full text-xs font-extrabold num-ltr shrink-0 ${
+                      className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-extrabold num-ltr shrink-0 ${
                         delayed
                           ? 'bg-[#C25E00] text-white'
                           : 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]'
                       }`}
                     >
-                      ⏱ {elapsed} د
+                      <span className="ms-icon text-sm">timer</span>
+                      <span>{elapsed} د</span>
                     </span>
                   </div>
 
@@ -477,8 +509,9 @@ export default function TrucksView({
                 </div>
               </div>
 
-              <span className="px-3 py-1.5 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-extrabold shrink-0">
-                وصلت 🚛
+              <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-extrabold shrink-0">
+                <span>وصلت</span>
+                <span className="ms-icon text-sm">local_shipping</span>
               </span>
             </div>
 
@@ -548,9 +581,10 @@ export default function TrucksView({
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-extrabold text-sm sm:text-base">{t.supplier_name}</span>
                       <span
-                        className={`px-2.5 py-0.5 rounded-full text-xs font-extrabold ${cond.badge}`}
+                        className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-extrabold ${cond.badge}`}
                       >
-                        {cond.label}
+                        <span className="ms-icon text-sm">{cond.icon}</span>
+                        <span>{cond.label}</span>
                       </span>
                       <span className="text-xs text-[var(--g-muted)]">({t.category})</span>
                     </div>
@@ -570,8 +604,9 @@ export default function TrucksView({
                       {t.invoice_number && <span>• فاتورة: {t.invoice_number}</span>}
                     </div>
                     {t.notes && (
-                      <div className="text-xs mt-1 font-semibold text-[var(--g-text)]">
-                        📝 {t.notes}
+                      <div className="flex items-start gap-1 text-xs mt-1 font-semibold text-[var(--g-text)]">
+                        <span className="ms-icon text-sm text-[var(--g-text-muted)] shrink-0">notes</span>
+                        <span>{t.notes}</span>
                       </div>
                     )}
                   </div>
@@ -862,7 +897,7 @@ export default function TrucksView({
                   className="py-3.5 px-4 rounded-full bg-[#C25E00] hover:bg-[#9A4A00] text-white font-extrabold text-sm flex items-center justify-center gap-1.5"
                 >
                   <span className="ms-icon filled">report_problem</span>
-                  <span>يوجد نواقص ⚠️</span>
+                  <span>يوجد نواقص</span>
                 </button>
 
                 <button
@@ -872,7 +907,7 @@ export default function TrucksView({
                   className="py-3.5 px-4 rounded-full bg-[#B3261E] hover:bg-[#8C1D18] text-white font-extrabold text-sm flex items-center justify-center gap-1.5"
                 >
                   <span className="ms-icon filled">assignment_return</span>
-                  <span>مرتجع / تالف 🔄</span>
+                  <span>مرتجع / تالف</span>
                 </button>
               </div>
             </div>
@@ -941,8 +976,8 @@ export default function TrucksView({
                 >
                   <option value="pending">قيد التنزيل</option>
                   <option value="complete">سليمة وكاملة ✓</option>
-                  <option value="shortage">يوجد نواقص ⚠️</option>
-                  <option value="return_damaged">مرتجع / تالف 🔄</option>
+                  <option value="shortage">يوجد نواقص</option>
+                  <option value="return_damaged">مرتجع / تالف</option>
                 </select>
               </div>
             </div>

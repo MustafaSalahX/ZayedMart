@@ -90,6 +90,16 @@ export class BootstrapController {
     }
   }
 
+  @Get('sync-check')
+  async syncCheck(@Query('date') date: string | undefined, @Res() res: Response) {
+    try {
+      const info = await this.db.getSyncDigest(date);
+      return res.json({ ok: true, ...info });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
   @Post('upload')
   @RequireAnyPermission([
     'attendance:write',

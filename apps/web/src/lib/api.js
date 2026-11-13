@@ -35,6 +35,8 @@ const SNAPSHOT_CACHE_KEY = 'zayed_mart_last_snapshot';
 
 const authInvalidListeners = new Set();
 let activeFlushPromise = null;
+let lastKnownSyncDigest = '';
+let lastKnownSyncDate = '';
 
 export function isNativeAndroidOrCapacitor() {
   if (typeof window === 'undefined') return false;
@@ -862,10 +864,16 @@ export async function flushOfflineQueue() {
           // Drop invalid/unauthorized items so they never block the queue forever
           if (res.status === 401) notifyAuthInvalidated();
         } else {
-          remaining.push(item);
+          const nextRetries = (item.retryCount || 0) + 1;
+          if (nextRetries <= 5) {
+            remaining.push({ ...item, retryCount: nextRetries });
+          }
         }
       } catch {
-        remaining.push(item);
+        const nextRetries = (item.retryCount || 0) + 1;
+        if (nextRetries <= 5) {
+          remaining.push({ ...item, retryCount: nextRetries });
+        }
       }
     }
 
@@ -886,6 +894,58 @@ export async function flushOfflineQueue() {
   } finally {
     activeFlushPromise = null;
   }
+}
+
+export async function checkServerSyncDigest(dateKey) {
+  const qs = dateKey ? `?date=${encodeURIComponent(dateKey)}` : '';
+  const res = await fetchWithTimeout(
+    `/api/sync-check${qs}`,
+    {
+      headers: buildHeaders(false),
+    },
+    3500
+  );
+  if (res.status === 401) {
+    notifyAuthInvalidated();
+    const authErr = new Error('يلزم تسجيل الدخول');
+    authErr.code = 'UNAUTHENTICATED';
+    authErr.isServerResponse = true;
+    throw authErr;
+  }
+  if (!res.ok) {
+    throw new Error('Sync check failed');
+  }
+  const json = await res.json();
+  const nextDigest = String(json?.digest || '');
+  const changed = !nextDigest || lastKnownSyncDate !== (dateKey || '') || lastKnownSyncDigest !== nextDigest;
+  return { changed, digest: nextDigest };
+}
+
+export async function fetchBootstrapIfNeeded(dateKey, { force = false } = {}) {
+  const token = getAuthToken();
+  if (!token) return null;
+  if (
+    !force &&
+    lastKnownSyncDigest &&
+    lastKnownSyncDate === (dateKey || '') &&
+    !isDirectCloudToken(token) &&
+    typeof navigator !== 'undefined' &&
+    navigator.onLine !== false
+  ) {
+    const outbox = await loadOutboxItems();
+    if (outbox.length === 0) {
+      try {
+        const check = await checkServerSyncDigest(dateKey);
+        if (!check.changed) {
+          return null;
+        }
+      } catch (err) {
+        if (err?.code === 'UNAUTHENTICATED') throw err;
+        // Fall through to full fetchBootstrap on transient check failure
+      }
+    }
+  }
+  return await fetchBootstrap(dateKey);
 }
 
 export async function fetchBootstrap(dateKey) {
@@ -934,6 +994,14 @@ export async function fetchBootstrap(dateKey) {
       );
 
       await saveBootstrapToLocalDb(merged);
+      lastKnownSyncDate = dateKey || '';
+      if (!isDirectCloudToken(getAuthToken())) {
+        checkServerSyncDigest(dateKey)
+          .then((res) => {
+            if (res?.digest) lastKnownSyncDigest = res.digest;
+          })
+          .catch(() => {});
+      }
       updateSyncState({
         online: true,
         connectionMode: resolvedConnMode,

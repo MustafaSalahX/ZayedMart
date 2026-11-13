@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import ProofUploader from './ProofUploader.jsx';
-import VoiceMicButton from './VoiceMicButton.jsx';
+import React, { useEffect, useState } from 'react';
+import NoteComposerForm from './notes/NoteComposerForm.jsx';
+import { BottomSheet } from './ui/index.js';
 import { postActionWithOfflineSupport, apiRequest } from '../lib/api.js';
 import { playSuccessChime } from '../lib/audio.js';
 import { formatTimeArabic, formatTimeWithSeconds } from '../lib/exportUtils.js';
@@ -110,6 +110,18 @@ export default function CctvNotesView({
   const [proofDataUrl, setProofDataUrl] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [editingNote, setEditingNote] = useState(null);
+  const [composerSheetOpen, setComposerSheetOpen] = useState(false);
+
+  // SmartFab hook: open mobile composer BottomSheet when 'note_add' action fires
+  useEffect(() => {
+    function handleOpenComposer(ev) {
+      if (ev?.detail?.action === 'note_add' && canWrite) {
+        setComposerSheetOpen(true);
+      }
+    }
+    window.addEventListener('zayed:open-composer', handleOpenComposer);
+    return () => window.removeEventListener('zayed:open-composer', handleOpenComposer);
+  }, [canWrite]);
 
   async function handleSaveNote(e) {
     e.preventDefault();
@@ -144,6 +156,7 @@ export default function CctvNotesView({
       setDvrTimestamp(nowHMS());
       setKeepOpenForHandover(false);
       setSeverity('normal');
+      setComposerSheetOpen(false);
       onRefresh?.();
     } catch (err) {
       onToast?.(err.message || 'تعذر حفظ الملاحظة', 'error');
@@ -215,174 +228,97 @@ export default function CctvNotesView({
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-      {/* Right Column: Google Keep Style Composer */}
-      <div className="lg:col-span-5 space-y-4">
-        <form onSubmit={handleSaveNote} className="g-card p-4 sm:p-5 space-y-4">
-          <div className="flex items-center justify-between gap-2 border-b border-[var(--g-border)] pb-3">
-            <div className="flex items-center gap-2.5">
-              <div className="w-10 h-10 rounded-2xl bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] flex items-center justify-center shrink-0">
-                <span className="ms-icon filled text-xl">edit_note</span>
-              </div>
-              <div>
-                <h2 className="text-base sm:text-lg font-extrabold m-0">
-                  تسجيل ملاحظة (لمس أو صوتي)
-                </h2>
-                <p className="text-xs text-[var(--g-muted)] m-0">
-                  بدون كيبورد: اختر الوسم أو اضغط الإملاء الصوتي 🎤
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {/* 1. Location Quick Chips */}
-          <div>
-            <label className="block text-xs font-bold text-[var(--g-muted)] mb-1.5">
-              1. المكان داخل الماركت:
-            </label>
-            <div className="flex flex-wrap gap-1.5">
-              {LOCATION_TAGS.map((loc) => (
-                <button
-                  key={loc}
-                  type="button"
-                  onClick={() => setLocationTag(loc)}
-                  className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs border transition-all active:scale-95 ${
-                    locationTag === loc
-                      ? 'bg-[var(--g-primary)] text-white border-[var(--g-primary)] font-extrabold shadow-2xs'
-                      : 'bg-[var(--g-surface-variant)] border-[var(--g-border)] font-semibold'
-                  }`}
-                >
-                  {loc}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* 2. Category Quick Chips */}
-          <div>
-            <label className="block text-xs font-bold text-[var(--g-muted)] mb-1.5">
-              2. نوع الملاحظة:
-            </label>
-            <div className="flex flex-wrap gap-1.5">
-              {CATEGORY_TAGS.map((cat) => (
-                <button
-                  key={cat}
-                  type="button"
-                  onClick={() => setCategoryTag(cat)}
-                  className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs border transition-all active:scale-95 ${
-                    categoryTag === cat
-                      ? 'g-pill-active border-transparent shadow-2xs'
-                      : 'bg-[var(--g-surface-variant)] border-[var(--g-border)] font-semibold'
-                  }`}
-                >
-                  {cat}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* 3. Severity + Reference Timestamp */}
-          <div className="space-y-3">
-            <div>
-              <label className="block text-xs font-bold text-[var(--g-muted)] mb-1.5">
-                3. درجة الأهمية:
-              </label>
-              <div className="grid grid-cols-3 gap-2">
-                {SEVERITIES.map((sev) => (
-                  <button
-                    key={sev.id}
-                    type="button"
-                    onClick={() => setSeverity(sev.id)}
-                    className={`min-h-[50px] py-2 px-1.5 rounded-2xl border text-xs font-extrabold flex flex-col sm:flex-row items-center justify-center gap-1 text-center leading-tight transition-all min-w-0 active:scale-95 ${
-                      severity === sev.id
-                        ? sev.activeStyle
-                        : 'bg-[var(--g-surface-variant)] border-[var(--g-border)] text-[var(--g-muted)]'
-                    }`}
-                  >
-                    <span className="ms-icon text-base">{sev.icon}</span>
-                    <span className="truncate max-w-full">{sev.label}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-center">
-              <div>
-                <label className="block text-xs font-bold text-[var(--g-muted)] mb-1">
-                  وقت الواقعة بالثانية (مرجع التسجيل):
-                </label>
-                <div className="flex items-center gap-1.5">
-                  <input
-                    type="text"
-                    value={dvrTimestamp}
-                    onChange={(e) => setDvrTimestamp(e.target.value)}
-                    className="g-input w-full text-sm font-extrabold num-ltr text-center"
-                    placeholder="HH:MM:SS"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setDvrTimestamp(nowHMS())}
-                    className="px-3 py-2.5 rounded-xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-xs font-extrabold shrink-0"
-                  >
-                    الآن
-                  </button>
-                </div>
-              </div>
-
-              <label className="flex items-center gap-2 p-3 rounded-2xl bg-[var(--g-surface-variant)] text-xs font-bold cursor-pointer sm:mt-5">
-                <input
-                  type="checkbox"
-                  checked={keepOpenForHandover}
-                  onChange={(e) => setKeepOpenForHandover(e.target.checked)}
-                  className="w-4 h-4 accent-[#0B57D0]"
-                />
-                <span>نقل للوردية التالية للمتابعة</span>
-              </label>
-            </div>
-          </div>
-
-          {/* 4. Feature #2: Prominent Arabic Voice-to-Text + Textarea */}
-          <div>
-            <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-              <label className="text-xs font-bold text-[var(--g-muted)]">
-                تفاصيل الملاحظة:
-              </label>
-              <VoiceMicButton
-                onToast={onToast}
-                onTranscript={(spoken) =>
-                  setContent((prev) => (prev ? `${prev} ${spoken}` : spoken))
-                }
-              />
-            </div>
-            <textarea
-              rows={3}
-              value={content}
-              onChange={(e) => setContent(e.target.value)}
-              placeholder="اضغط زر (إملاء صوتي 🎤) وتحدث بالعامية ليكتب النظام تلقائياً، أو اتركها فارغة لحفظ الوسوم المختارة..."
-              className="g-input w-full resize-none"
-            />
-          </div>
-
-          {/* 5. Optional Screenshot / Phone Photo */}
-          <ProofUploader
-            value={proofDataUrl}
-            onChange={setProofDataUrl}
-            label="سكرين شوت (Ctrl+V) أو صورة من الفون"
-            compact
-          />
-
-          <button
-            type="submit"
-            disabled={submitting || !canWrite}
-            className="w-full py-3.5 rounded-full bg-[var(--g-primary)] text-white font-extrabold text-base flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
-          >
-            <span className="ms-icon filled">add_task</span>
-            <span>{canWrite ? 'حفظ الملاحظة الآن' : 'عرض فقط (بدون صلاحية إضافة)'}</span>
-          </button>
-        </form>
+      {/* Right Column: Inline Note Composer on Desktop */}
+      <div className="hidden lg:block lg:col-span-5 space-y-4">
+        <NoteComposerForm
+          locationTags={LOCATION_TAGS}
+          categoryTags={CATEGORY_TAGS}
+          severities={SEVERITIES}
+          locationTag={locationTag}
+          setLocationTag={setLocationTag}
+          categoryTag={categoryTag}
+          setCategoryTag={setCategoryTag}
+          severity={severity}
+          setSeverity={setSeverity}
+          dvrTimestamp={dvrTimestamp}
+          setDvrTimestamp={setDvrTimestamp}
+          onResetTimestamp={() => setDvrTimestamp(nowHMS())}
+          keepOpenForHandover={keepOpenForHandover}
+          setKeepOpenForHandover={setKeepOpenForHandover}
+          content={content}
+          setContent={setContent}
+          proofDataUrl={proofDataUrl}
+          setProofDataUrl={setProofDataUrl}
+          submitting={submitting}
+          canWrite={canWrite}
+          onSubmit={handleSaveNote}
+          onToast={onToast}
+        />
       </div>
 
-      {/* Left Column: Shift Handover Card + Notes Stream */}
+      {/* Mobile Composer Snap BottomSheet */}
+      <BottomSheet
+        open={composerSheetOpen}
+        onClose={() => setComposerSheetOpen(false)}
+        title="تسجيل ملاحظة جديدة"
+        subtitle="اختر المكان ونوع الملاحظة أو استخدم الإملاء الصوتي"
+        icon="edit_note"
+        maxWidth="max-w-xl"
+      >
+        <NoteComposerForm
+          inSheet
+          locationTags={LOCATION_TAGS}
+          categoryTags={CATEGORY_TAGS}
+          severities={SEVERITIES}
+          locationTag={locationTag}
+          setLocationTag={setLocationTag}
+          categoryTag={categoryTag}
+          setCategoryTag={setCategoryTag}
+          severity={severity}
+          setSeverity={setSeverity}
+          dvrTimestamp={dvrTimestamp}
+          setDvrTimestamp={setDvrTimestamp}
+          onResetTimestamp={() => setDvrTimestamp(nowHMS())}
+          keepOpenForHandover={keepOpenForHandover}
+          setKeepOpenForHandover={setKeepOpenForHandover}
+          content={content}
+          setContent={setContent}
+          proofDataUrl={proofDataUrl}
+          setProofDataUrl={setProofDataUrl}
+          submitting={submitting}
+          canWrite={canWrite}
+          onSubmit={handleSaveNote}
+          onToast={onToast}
+        />
+      </BottomSheet>
+
+      {/* Left Column: Mobile Quick Action Bar + Shift Handover Card + Notes Stream */}
       <div className="lg:col-span-7 space-y-5">
+        {canWrite && (
+          <div className="lg:hidden g-card p-3.5 flex items-center justify-between gap-2.5 bg-[var(--g-surface)]">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-10 h-10 rounded-2xl bg-[var(--g-primary-container)] text-[var(--g-primary)] flex items-center justify-center shrink-0">
+                <span className="ms-icon filled text-xl">edit_note</span>
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-black text-[var(--g-text)] truncate">
+                  تسجيل ملاحظة سريعة
+                </div>
+                <div className="text-[11px] text-[var(--g-muted)] truncate">
+                  لمس سريع أو إملاء صوتي بالعامية
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setComposerSheetOpen(true)}
+              className="min-h-[44px] px-4 py-2 rounded-full bg-[var(--g-primary)] text-white text-xs sm:text-sm font-extrabold flex items-center gap-1.5 shadow-sm shrink-0 active:scale-[0.98]"
+            >
+              <span className="ms-icon text-lg">add</span>
+              <span>إضافة ملاحظة</span>
+            </button>
+          </div>
+        )}
         {/* Feature #1: Shift Handover Control Card */}
         <section className="g-card p-4 sm:p-5 bg-[var(--g-surface-tint)]">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -440,20 +376,21 @@ export default function CctvNotesView({
             <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
               {[
                 { id: 'all', label: `الكل (${notes.length})` },
-                { id: 'cashier', label: '🛒 ملاحظات الكاشيرية' },
-                { id: 'open', label: `⏳ للمتابعة (${openHandoverNotes.length})` },
+                { id: 'cashier', icon: 'point_of_sale', label: 'ملاحظات الكاشيرية' },
+                { id: 'open', icon: 'pending_actions', label: `للمتابعة (${openHandoverNotes.length})` },
               ].map((f) => (
                 <button
                   key={f.id}
                   type="button"
                   onClick={() => setNotesFilter(f.id)}
-                  className={`px-3 py-1 rounded-full text-xs font-extrabold whitespace-nowrap transition-all ${
+                  className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-extrabold whitespace-nowrap transition-all inline-flex items-center gap-1 ${
                     notesFilter === f.id
                       ? 'bg-[var(--g-primary)] text-white'
                       : 'bg-[var(--g-surface-variant)] text-[var(--g-muted)]'
                   }`}
                 >
-                  {f.label}
+                  {f.icon && <span className="ms-icon text-sm">{f.icon}</span>}
+                  <span>{f.label}</span>
                 </button>
               ))}
             </div>
@@ -483,16 +420,18 @@ export default function CctvNotesView({
                         <span className={`px-2.5 py-0.5 rounded-full text-xs font-extrabold ${sev.badge}`}>
                           {sev.label}
                         </span>
-                        <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[var(--g-surface)] border border-[var(--g-border)]">
-                          📍 {n.location_tag}
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-[var(--g-surface)] border border-[var(--g-border)]">
+                          <span className="ms-icon text-sm text-[var(--g-primary)]">location_on</span>
+                          <span>{n.location_tag}</span>
                         </span>
                         <span className="text-xs text-[var(--g-muted)] font-semibold">
                           • {n.category_tag}
                         </span>
                       </div>
 
-                      <span className="num-ltr text-xs font-extrabold px-2.5 py-1 rounded-lg bg-[var(--g-surface)] border border-[var(--g-border)]">
-                        🕒 {n.dvr_timestamp || formatTimeWithSeconds(n.timestamp)}
+                      <span className="inline-flex items-center gap-1 num-ltr text-xs font-extrabold px-2.5 py-1 rounded-lg bg-[var(--g-surface)] border border-[var(--g-border)]">
+                        <span className="ms-icon text-sm text-[var(--g-muted)]">schedule</span>
+                        <span>{n.dvr_timestamp || formatTimeWithSeconds(n.timestamp)}</span>
                       </span>
                     </div>
 

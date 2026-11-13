@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   apiRequest,
   formatRequestedQty,
@@ -12,19 +12,20 @@ import {
   exportShortagesWord,
   formatTimeArabic,
 } from '../lib/exportUtils.js';
-import VoiceMicButton from './VoiceMicButton.jsx';
+import ShortageComposerForm from './shortages/ShortageComposerForm.jsx';
+import { Badge, BottomSheet, Button, EmptyState } from './ui/index.js';
 
 export const SHORTAGE_CATEGORIES = [
-  { id: 'ألبان وجبن', label: 'ألبان وجبن', emoji: '🧀' },
-  { id: 'مشروبات وعصائر', label: 'مشروبات وعصائر', emoji: '🧃' },
-  { id: 'بقالة جافة', label: 'بقالة جافة', emoji: '🥫' },
-  { id: 'شيبسي وسناكس', label: 'شيبسي وسناكس', emoji: '🥔' },
-  { id: 'منظفات وورقيات', label: 'منظفات وورقيات', emoji: '🧼' },
-  { id: 'مجمدات ولحوم', label: 'مجمدات ولحوم', emoji: '❄️' },
-  { id: 'خضار وفاكهة', label: 'خضار وفاكهة', emoji: '🍎' },
-  { id: 'مخبوزات وحلويات', label: 'مخبوزات وحلويات', emoji: '🥖' },
-  { id: 'عطارة وتوابل', label: 'عطارة وتوابل', emoji: '🌿' },
-  { id: 'أصناف أخرى', label: 'أصناف أخرى', emoji: '📦' },
+  { id: 'ألبان وجبن', label: 'ألبان وجبن', icon: 'kitchen' },
+  { id: 'مشروبات وعصائر', label: 'مشروبات وعصائر', icon: 'local_drink' },
+  { id: 'بقالة جافة', label: 'بقالة جافة', icon: 'inventory_2' },
+  { id: 'شيبسي وسناكس', label: 'شيبسي وسناكس', icon: 'cookie' },
+  { id: 'منظفات وورقيات', label: 'منظفات وورقيات', icon: 'cleaning_services' },
+  { id: 'مجمدات ولحوم', label: 'مجمدات ولحوم', icon: 'ac_unit' },
+  { id: 'خضار وفاكهة', label: 'خضار وفاكهة', icon: 'nutrition' },
+  { id: 'مخبوزات وحلويات', label: 'مخبوزات وحلويات', icon: 'bakery_dining' },
+  { id: 'عطارة وتوابل', label: 'عطارة وتوابل', icon: 'spa' },
+  { id: 'أصناف أخرى', label: 'أصناف أخرى', icon: 'category' },
 ];
 
 const UNIT_OPTIONS = ['', 'كرتونة', 'باكت', 'علبة', 'قطعة', 'كيلو', 'شكارة'];
@@ -80,6 +81,7 @@ export default function ShortagesView({
   const [notes, setNotes] = useState('');
   const [showExtraFields, setShowExtraFields] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [composerSheetOpen, setComposerSheetOpen] = useState(false);
 
   // List filter state
   const [statusFilter, setStatusFilter] = useState('open');
@@ -109,6 +111,17 @@ export default function ShortagesView({
 
   const composerRef = useRef(null);
   const nameInputRef = useRef(null);
+
+  useEffect(() => {
+    const handleOpenComposer = (ev) => {
+      if (ev?.detail?.action === 'shortage_add' && canWrite) {
+        setComposerSheetOpen(true);
+        setTimeout(() => nameInputRef.current?.focus(), 120);
+      }
+    };
+    window.addEventListener('zayed:open-composer', handleOpenComposer);
+    return () => window.removeEventListener('zayed:open-composer', handleOpenComposer);
+  }, [canWrite]);
 
   // Map open/ordered shortages by normalized item name so quick catalog shows live status
   const activeByNormName = useMemo(() => {
@@ -187,7 +200,11 @@ export default function ShortagesView({
     if (catItem.category) setSelectedCategory(catItem.category);
     if (catItem.default_unit) setUnit(catItem.default_unit);
     if (catItem.supplier_id) setSupplierId(catItem.supplier_id);
-    composerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      setComposerSheetOpen(true);
+    } else {
+      composerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
   }
 
   async function handleSubmitShortage(e) {
@@ -246,6 +263,7 @@ export default function ShortagesView({
       setNotes('');
       setIsSuggestion(false);
       setStatusFilter('open');
+      setComposerSheetOpen(false);
       onRefresh?.();
     } catch (err) {
       onToast?.(err.message, 'error');
@@ -322,7 +340,7 @@ export default function ShortagesView({
       playSuccessChime(nextStatus === 'resolved' ? 'out' : 'in');
       const msg =
         nextStatus === 'ordered'
-          ? `تم تعليم "${item.item_name}" أنه تم طلبه من المورد 🚚`
+          ? `تم تعليم "${item.item_name}" أنه تم طلبه من المورد`
           : nextStatus === 'resolved'
           ? `تم توفير "${item.item_name}" في الصالة ✓`
           : `تم إعادة "${item.item_name}" إلى النواقص المفتوحة`;
@@ -412,11 +430,6 @@ export default function ShortagesView({
     window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
   }
 
-  const parsedLiveQty = parseQtyInputForPayload(qtyInput);
-  const liveQtyPreview = !parsedLiveQty.ok
-    ? 'رقم غير صحيح'
-    : formatRequestedQty(parsedLiveQty.value, unit);
-
   return (
     <div className="space-y-4">
       {/* Top Summary Banner — Large, Friendly, Mobile-First */}
@@ -435,6 +448,18 @@ export default function ShortagesView({
               </p>
             </div>
           </div>
+
+          {/* Mobile Quick Composer CTA */}
+          {canWrite && (
+            <button
+              type="button"
+              onClick={() => setComposerSheetOpen(true)}
+              className="md:hidden w-full min-h-[48px] px-4 py-2.5 rounded-2xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-sm font-black flex items-center justify-center gap-2 shadow-sm active:scale-[0.98]"
+            >
+              <span className="ms-icon filled text-xl">add_shopping_cart</span>
+              <span>تسجيل صنف ناقص / اقتراح</span>
+            </button>
+          )}
 
           {/* Handover, Export & Catalog Actions */}
           {(canHandover || canExport || canManageShortages || canManageRecords) && (
@@ -600,7 +625,7 @@ export default function ShortagesView({
                       : 'bg-[var(--g-surface-2)] text-[var(--g-text)] border border-[var(--g-border)]'
                   }`}
                 >
-                  <span>{cat.emoji}</span>
+                  <span className="ms-icon text-base">{cat.icon}</span>
                   <span>{cat.label}</span>
                   <span className="opacity-75">({countInCat})</span>
                 </button>
@@ -656,331 +681,89 @@ export default function ShortagesView({
         </div>
       )}
 
-      {/* Super-Simple Add Shortage Form (Mobile-First, Giant Buttons) */}
+      {/* Super-Simple Add Shortage Form: Inline on Desktop, Snap BottomSheet on Mobile */}
       {canWrite && (
-        <form
-          ref={composerRef}
-          onSubmit={handleSubmitShortage}
-          className="g-card p-4 sm:p-5 space-y-4 border-2 border-[var(--g-primary)]/20"
-        >
-          {/* Toggle between Shortage vs Cashier Product Suggestion */}
-          <div className="grid grid-cols-2 gap-2 p-1.5 rounded-2xl bg-[var(--g-surface-variant)]">
-            <button
-              type="button"
-              onClick={() => setIsSuggestion(false)}
-              className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all ${
-                !isSuggestion
-                  ? 'bg-[var(--g-surface)] text-[var(--g-primary)] shadow-xs'
-                  : 'text-[var(--g-muted)]'
-              }`}
-            >
-              <span className="ms-icon text-base">production_quantity_limits</span>
-              <span>🛒 تسجيل صنف ناقص بالصالة</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setIsSuggestion(true)}
-              className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all ${
-                isSuggestion
-                  ? 'bg-[var(--g-purple-bg)] text-[var(--g-purple)] shadow-xs border border-[var(--g-purple-border)]/40'
-                  : 'text-[var(--g-muted)]'
-              }`}
-            >
-              <span className="ms-icon text-base">lightbulb</span>
-              <span>💡 اقتراح إضافة صنف جديد يطلبه العملاء</span>
-            </button>
-          </div>
-
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <div className="flex items-center gap-2">
-              <span className="w-7 h-7 rounded-full bg-[var(--g-primary)] text-white text-sm font-black flex items-center justify-center">
-                1
-              </span>
-              <h3 className="text-base sm:text-lg font-black text-[var(--g-text)]">
-                {isSuggestion
-                  ? 'اختر القسم واكتب اسم الصنف المقترح إضافته للماركت'
-                  : 'اختر القسم واكتب اسم الصنف الناقص'}
-              </h3>
-            </div>
-            <VoiceMicButton
-              onTranscript={(txt) => setItemName((prev) => (prev ? `${prev} ${txt}` : txt))}
+        <>
+          <div ref={composerRef} className="hidden md:block">
+            <ShortageComposerForm
+              categories={SHORTAGE_CATEGORIES}
+              unitOptions={UNIT_OPTIONS}
+              qtyPresets={QTY_PRESETS}
+              suppliers={suppliers}
+              canManageShortages={canManageShortages}
+              canManageRecords={canManageRecords}
+              selectedCategory={selectedCategory}
+              setSelectedCategory={setSelectedCategory}
+              itemName={itemName}
+              setItemName={setItemName}
+              setSelectedCatalogId={setSelectedCatalogId}
+              qtyInput={qtyInput}
+              setQtyInput={setQtyInput}
+              unit={unit}
+              setUnit={setUnit}
+              urgency={urgency}
+              setUrgency={setUrgency}
+              isSuggestion={isSuggestion}
+              setIsSuggestion={setIsSuggestion}
+              supplierId={supplierId}
+              setSupplierId={setSupplierId}
+              notes={notes}
+              setNotes={setNotes}
+              showExtraFields={showExtraFields}
+              setShowExtraFields={setShowExtraFields}
+              submitting={submitting}
+              nameInputRef={nameInputRef}
+              parseQtyInputForPayload={parseQtyInputForPayload}
+              adjustQty={adjustQty}
+              onSubmit={handleSubmitShortage}
               onToast={onToast}
             />
           </div>
 
-          {/* Step 1: Big Category Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-            {SHORTAGE_CATEGORIES.map((cat) => {
-              const active = selectedCategory === cat.id;
-              return (
-                <button
-                  key={cat.id}
-                  type="button"
-                  onClick={() => setSelectedCategory(cat.id)}
-                  className={`min-h-[48px] px-3 py-2 rounded-2xl border text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all active:scale-[0.98] ${
-                    active
-                      ? 'border-[var(--g-primary)] bg-[var(--g-primary)] text-white shadow-sm'
-                      : 'border-[var(--g-border)] bg-[var(--g-surface-2)] text-[var(--g-text)]'
-                  }`}
-                >
-                  <span className="text-base">{cat.emoji}</span>
-                  <span className="truncate">{cat.label}</span>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Item Name Large Input */}
-          <div>
-            <label className="block text-xs sm:text-sm font-extrabold text-[var(--g-text)] mb-1.5">
-              اسم الصنف المطلوب (يُحفظ تلقائياً في الأزرار السريعة)
-            </label>
-            <div className="relative">
-              <input
-                ref={nameInputRef}
-                type="text"
-                value={itemName}
-                onChange={(e) => {
-                  setItemName(e.target.value);
-                  setSelectedCatalogId('');
-                }}
-                placeholder="مثال: لبن جهينة 1 لتر / زيت كريستال ذرة / سكر..."
-                className="g-input min-h-[54px] text-base sm:text-lg font-extrabold pl-10"
-              />
-              {itemName && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setItemName('');
-                    setSelectedCatalogId('');
-                  }}
-                  className="absolute left-2.5 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-[var(--g-surface-2)] text-[var(--g-text-muted)] flex items-center justify-center"
-                  title="مسح الاسم"
-                >
-                  <span className="ms-icon text-lg">close</span>
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Step 2: Nullable / Zero / Positive Quantity Picker */}
-          <div className="p-3.5 sm:p-4 rounded-2xl bg-[var(--g-surface-2)] border border-[var(--g-border)] space-y-3">
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <div className="flex items-center gap-2">
-                <span className="w-7 h-7 rounded-full bg-[var(--g-primary)] text-white text-sm font-black flex items-center justify-center">
-                  2
-                </span>
-                <div>
-                  <div className="text-sm sm:text-base font-black text-[var(--g-text)]">
-                    الكمية المطلوبة (اختياري)
-                  </div>
-                  <div className="text-xs text-[var(--g-text-muted)]">
-                    ممكن تسيبها فاضية بدون كمية، أو تختار 0، أو تكتب العدد المطلوب
-                  </div>
-                </div>
-              </div>
-
-              <span className="px-3 py-1 rounded-full text-xs font-black bg-[var(--g-primary-container)] text-[var(--g-on-primary-container)]">
-                {liveQtyPreview}
-              </span>
-            </div>
-
-            {/* 1-Tap Presets including Empty (null) and 0 */}
-            <div className="flex flex-wrap gap-2">
-              {QTY_PRESETS.map((preset) => {
-                const isSelected = normalizeDigitsClient(qtyInput).trim() === preset.value;
-                return (
-                  <button
-                    key={preset.label}
-                    type="button"
-                    onClick={() => setQtyInput(preset.value)}
-                    className={`min-h-[46px] px-3.5 py-2 rounded-xl border text-xs sm:text-sm font-black transition-all active:scale-[0.97] ${
-                      isSelected
-                        ? 'border-[var(--g-primary)] bg-[var(--g-primary)] text-white shadow-sm'
-                        : 'border-[var(--g-border)] bg-[var(--g-surface)] text-[var(--g-text)]'
-                    }`}
-                  >
-                    {preset.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Big Plus / Minus Stepper + Direct Number Input */}
-            <div className="flex items-center gap-2 sm:gap-3">
-              <button
-                type="button"
-                onClick={() => setQtyInput((prev) => adjustQty(prev, 1))}
-                className="w-14 h-14 rounded-2xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-2xl font-black flex items-center justify-center shrink-0 shadow-sm active:scale-95"
-                aria-label="زيادة الكمية"
-              >
-                +
-              </button>
-
-              <div className="relative flex-1">
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  dir="ltr"
-                  value={qtyInput}
-                  onChange={(e) => setQtyInput(normalizeDigitsClient(e.target.value))}
-                  placeholder="فاضي (بدون تحديد كمية)"
-                  className="g-input min-h-[56px] text-center text-lg sm:text-xl font-black"
-                />
-                {qtyInput !== '' && (
-                  <button
-                    type="button"
-                    onClick={() => setQtyInput('')}
-                    className="absolute left-2.5 top-1/2 -translate-y-1/2 px-2.5 py-1 rounded-lg bg-[var(--g-surface-2)] text-xs font-bold text-[var(--g-text-muted)]"
-                  >
-                    تفريغ
-                  </button>
-                )}
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setQtyInput((prev) => adjustQty(prev, -1))}
-                className="w-14 h-14 rounded-2xl bg-[var(--g-surface)] border border-[var(--g-border)] text-[var(--g-text)] text-2xl font-black flex items-center justify-center shrink-0 active:scale-95"
-                aria-label="تقليل الكمية"
-              >
-                −
-              </button>
-            </div>
-
-            {/* Optional Unit Chips */}
-            <div className="flex items-center gap-1.5 flex-wrap pt-1">
-              <span className="text-xs font-bold text-[var(--g-text-muted)] ml-1">الوحدة:</span>
-              {UNIT_OPTIONS.map((u) => (
-                <button
-                  key={u || '__none'}
-                  type="button"
-                  onClick={() => setUnit(u)}
-                  className={`min-h-[38px] px-3 py-1 rounded-full text-xs font-extrabold border transition-all ${
-                    unit === u
-                      ? 'border-[var(--g-primary)] bg-[var(--g-primary)] text-white shadow-2xs'
-                      : 'border-[var(--g-border)] bg-[var(--g-surface)] text-[var(--g-text)] hover:border-[var(--g-primary)]'
-                  }`}
-                >
-                  {u || 'بدون وحدة'}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Step 3: Urgency 2-Big Buttons */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            <button
-              type="button"
-              onClick={() => setUrgency('out_of_stock')}
-              className={`min-h-[54px] p-3 rounded-2xl border-2 font-extrabold text-sm sm:text-base flex items-center justify-center gap-2 transition-all active:scale-[0.99] ${
-                urgency === 'out_of_stock'
-                  ? 'border-[#9E1C17] bg-[#C5221F] text-white shadow-sm'
-                  : 'border-[var(--g-border)] bg-[var(--g-surface)] hover:bg-[var(--g-red-bg)] hover:border-[var(--g-red-border)] text-[var(--g-text)]'
-              }`}
-            >
-              <span
-                className={`ms-icon filled text-xl ${
-                  urgency === 'out_of_stock' ? 'text-white' : 'text-[#C5221F]'
-                }`}
-              >
-                error
-              </span>
-              <span>خلص تماماً من الرف</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setUrgency('low_stock')}
-              className={`min-h-[54px] p-3 rounded-2xl border-2 font-extrabold text-sm sm:text-base flex items-center justify-center gap-2 transition-all active:scale-[0.99] ${
-                urgency === 'low_stock'
-                  ? 'border-[#9A4A00] bg-[#C25E00] text-white shadow-sm'
-                  : 'border-[var(--g-border)] bg-[var(--g-surface)] hover:bg-[var(--g-yellow-bg)] hover:border-[var(--g-yellow-border)] text-[var(--g-text)]'
-              }`}
-            >
-              <span
-                className={`ms-icon filled text-xl ${
-                  urgency === 'low_stock' ? 'text-white' : 'text-[#C25E00]'
-                }`}
-              >
-                warning
-              </span>
-              <span>قرب يخلص (رصيد قليل)</span>
-            </button>
-          </div>
-
-          {/* Optional Extra Note / Supplier Toggle (keeps form clean for workers!) */}
-          <div>
-            <button
-              type="button"
-              onClick={() => setShowExtraFields((v) => !v)}
-              className="text-xs sm:text-sm font-bold text-[var(--g-primary)] flex items-center gap-1 py-1"
-            >
-              <span className="ms-icon text-base">
-                {showExtraFields ? 'expand_less' : 'add_circle'}
-              </span>
-              <span>
-                {showExtraFields
-                  ? 'إخفاء الملاحظة الإضافية'
-                  : 'إضافة ملاحظة أو تحديد مورد (اختياري)'}
-              </span>
-            </button>
-
-            {showExtraFields && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2 p-3 rounded-2xl bg-[var(--g-surface-2)] border border-[var(--g-border)]">
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs font-bold text-[var(--g-text-muted)]">
-                      ملاحظة قصيرة (اختياري)
-                    </label>
-                    <VoiceMicButton
-                      small
-                      onTranscript={(txt) => setNotes((p) => (p ? `${p} ${txt}` : txt))}
-                      onToast={onToast}
-                    />
-                  </div>
-                  <input
-                    type="text"
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
-                    placeholder="مثال: مطلوب الحجم العائلي..."
-                    className="g-input min-h-[46px] text-sm"
-                  />
-                </div>
-
-                {suppliers.length > 0 && (canManageShortages || canManageRecords) && (
-                  <div>
-                    <label className="block text-xs font-bold text-[var(--g-text-muted)] mb-1">
-                      ربط بمورد (اختياري)
-                    </label>
-                    <select
-                      value={supplierId}
-                      onChange={(e) => setSupplierId(e.target.value)}
-                      className="g-input min-h-[46px] text-sm"
-                    >
-                      <option value="">— بدون تحديد مورد —</option>
-                      {suppliers.map((sup) => (
-                        <option key={sup.id} value={sup.id}>
-                          {sup.name} ({sup.category})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* Giant Submit Button */}
-          <button
-            type="submit"
-            disabled={submitting}
-            className="w-full min-h-[58px] rounded-2xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-base sm:text-lg font-black shadow-md flex items-center justify-center gap-2 transition-all active:scale-[0.99] disabled:opacity-60"
+          <BottomSheet
+            open={composerSheetOpen}
+            onClose={() => setComposerSheetOpen(false)}
+            title={isSuggestion ? 'اقتراح إضافة صنف جديد' : 'تسجيل صنف ناقص بالصالة'}
+            subtitle="اختر القسم والكمية ثم اضغط تسجيل"
+            icon={isSuggestion ? 'lightbulb' : 'add_shopping_cart'}
+            maxWidth="max-w-xl"
           >
-            <span className="ms-icon filled text-2xl">add_shopping_cart</span>
-            <span>{submitting ? 'جاري التسجيل...' : 'تسجيل الصنف في النواقص الآن ✓'}</span>
-          </button>
-        </form>
+            <ShortageComposerForm
+              inSheet
+              categories={SHORTAGE_CATEGORIES}
+              unitOptions={UNIT_OPTIONS}
+              qtyPresets={QTY_PRESETS}
+              suppliers={suppliers}
+              canManageShortages={canManageShortages}
+              canManageRecords={canManageRecords}
+              selectedCategory={selectedCategory}
+              setSelectedCategory={setSelectedCategory}
+              itemName={itemName}
+              setItemName={setItemName}
+              setSelectedCatalogId={setSelectedCatalogId}
+              qtyInput={qtyInput}
+              setQtyInput={setQtyInput}
+              unit={unit}
+              setUnit={setUnit}
+              urgency={urgency}
+              setUrgency={setUrgency}
+              isSuggestion={isSuggestion}
+              setIsSuggestion={setIsSuggestion}
+              supplierId={supplierId}
+              setSupplierId={setSupplierId}
+              notes={notes}
+              setNotes={setNotes}
+              showExtraFields={showExtraFields}
+              setShowExtraFields={setShowExtraFields}
+              submitting={submitting}
+              nameInputRef={nameInputRef}
+              parseQtyInputForPayload={parseQtyInputForPayload}
+              adjustQty={adjustQty}
+              onSubmit={handleSubmitShortage}
+              onToast={onToast}
+            />
+          </BottomSheet>
+        </>
       )}
 
       {/* Recorded Shortages List */}
@@ -989,7 +772,7 @@ export default function ShortagesView({
           <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
             {[
               { id: 'open', label: `مطلوب الآن (${counts.open})` },
-              { id: 'suggestions', label: `💡 مقترحات الكاشيرية (${counts.suggestions})` },
+              { id: 'suggestions', icon: 'lightbulb', label: `مقترحات الكاشيرية (${counts.suggestions})` },
               { id: 'ordered', label: `تم طلبه (${counts.ordered})` },
               { id: 'resolved', label: `تم توفيره (${counts.resolved})` },
               { id: 'all', label: `الكل (${counts.total})` },
@@ -998,13 +781,14 @@ export default function ShortagesView({
                 key={tab.id}
                 type="button"
                 onClick={() => setStatusFilter(tab.id)}
-                className={`min-h-[44px] px-4 py-2 rounded-full text-xs sm:text-sm font-extrabold whitespace-nowrap transition-all ${
+                className={`min-h-[44px] px-4 py-2 rounded-full text-xs sm:text-sm font-extrabold whitespace-nowrap transition-all inline-flex items-center gap-1.5 ${
                   statusFilter === tab.id
                     ? 'bg-[var(--g-primary)] text-white shadow-sm'
                     : 'bg-[var(--g-surface-2)] text-[var(--g-text)] border border-[var(--g-border)]'
                 }`}
               >
-                {tab.label}
+                {tab.icon && <span className="ms-icon text-base">{tab.icon}</span>}
+                <span>{tab.label}</span>
               </button>
             ))}
           </div>
@@ -1037,17 +821,18 @@ export default function ShortagesView({
         </div>
 
         {filteredShortages.length === 0 ? (
-          <div className="text-center py-10 px-4 rounded-2xl bg-[var(--g-surface-2)] border border-dashed border-[var(--g-border)]">
-            <span className="ms-icon text-4xl text-[var(--g-green)] mb-2">inventory</span>
-            <p className="text-base font-extrabold text-[var(--g-text)]">
-              {statusFilter === 'open'
+          <EmptyState
+            icon="inventory"
+            tone="success"
+            title={
+              statusFilter === 'open'
                 ? 'لا توجد نواقص مطلوبة حالياً في الصالة'
-                : 'لا توجد أصناف في هذا القسم حالياً'}
-            </p>
-            <p className="text-xs text-[var(--g-text-muted)] mt-1">
-              أي صنف يتم تسجيله يظهر هنا فوراً لكل المسؤولين
-            </p>
-          </div>
+                : 'لا توجد أصناف في هذا القسم حالياً'
+            }
+            description="أي صنف يتم تسجيله يظهر هنا فوراً لكل المسؤولين"
+            actionLabel={canWrite ? 'تسجيل صنف الآن' : undefined}
+            onAction={canWrite ? () => setComposerSheetOpen(true) : undefined}
+          />
         ) : (
           <div className="space-y-3">
             {filteredShortages.map((item) => {
@@ -1071,12 +856,13 @@ export default function ShortagesView({
                     <div className="space-y-1.5 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         {Number(item.is_suggestion) === 1 && (
-                          <span className="px-2.5 py-0.5 rounded-full text-xs font-extrabold bg-[var(--g-purple-bg)] text-[var(--g-purple)] border border-[var(--g-purple-border)]/40">
-                            💡 اقتراح صنف جديد
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-extrabold bg-[var(--g-purple-bg)] text-[var(--g-purple)] border border-[var(--g-purple-border)]/40">
+                            <span className="ms-icon text-sm">lightbulb</span>
+                            <span>اقتراح صنف جديد</span>
                           </span>
                         )}
                         <span
-                          className={`px-2.5 py-0.5 rounded-full text-xs font-extrabold border ${
+                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-extrabold border ${
                             item.status === 'resolved'
                               ? 'bg-[var(--g-green-bg)] text-[var(--g-green)] border-[var(--g-green-border)]/35'
                               : item.status === 'ordered'
@@ -1086,13 +872,24 @@ export default function ShortagesView({
                               : 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] border-[var(--g-yellow-border)]/40'
                           }`}
                         >
-                          {item.status === 'resolved'
-                            ? '✓ تم التوفير بالصالة'
-                            : item.status === 'ordered'
-                            ? '🚚 تم الطلب من المورد'
-                            : item.urgency === 'out_of_stock'
-                            ? 'خلص تماماً'
-                            : 'قرب يخلص'}
+                          <span className="ms-icon text-sm">
+                            {item.status === 'resolved'
+                              ? 'check_circle'
+                              : item.status === 'ordered'
+                              ? 'local_shipping'
+                              : item.urgency === 'out_of_stock'
+                              ? 'error'
+                              : 'warning'}
+                          </span>
+                          <span>
+                            {item.status === 'resolved'
+                              ? 'تم التوفير بالصالة'
+                              : item.status === 'ordered'
+                              ? 'تم الطلب من المورد'
+                              : item.urgency === 'out_of_stock'
+                              ? 'خلص تماماً'
+                              : 'قرب يخلص'}
+                          </span>
                         </span>
 
                         <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[var(--g-surface-2)] text-[var(--g-text-muted)] border border-[var(--g-border)]">
@@ -1122,8 +919,9 @@ export default function ShortagesView({
                       </div>
 
                       {item.notes && (
-                        <div className="text-xs sm:text-sm font-medium text-[var(--g-text)] bg-[var(--g-surface-2)] px-3 py-1.5 rounded-xl">
-                          📝 {item.notes}
+                        <div className="flex items-start gap-1.5 text-xs sm:text-sm font-medium text-[var(--g-text)] bg-[var(--g-surface-2)] px-3 py-1.5 rounded-xl">
+                          <span className="ms-icon text-base text-[var(--g-text-muted)] shrink-0">notes</span>
+                          <span>{item.notes}</span>
                         </div>
                       )}
 
@@ -1277,7 +1075,7 @@ export default function ShortagesView({
               >
                 {SHORTAGE_CATEGORIES.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.emoji} {c.label}
+                    {c.label}
                   </option>
                 ))}
               </select>
@@ -1519,7 +1317,7 @@ export default function ShortagesView({
                   >
                     {SHORTAGE_CATEGORIES.map((c) => (
                       <option key={c.id} value={c.id}>
-                        {c.emoji} {c.label}
+                        {c.label}
                       </option>
                     ))}
                   </select>

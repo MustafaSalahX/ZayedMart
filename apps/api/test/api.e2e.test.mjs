@@ -309,4 +309,52 @@ describe('ZayedMart NestJS API + Global Walkie-Talkie + Zero-Conflict Sync E2E',
     assert.ok(resetRes.json.permissions.includes('walkie:use'));
     assert.ok(resetRes.json.permissions.includes('attendance:self'));
   });
+
+  it('6. provides lightweight /api/sync-check digest and idempotent offline replay', async () => {
+    const sync1 = await api('/api/sync-check', 'GET', undefined, ownerToken);
+    assert.equal(sync1.status, 200);
+    assert.equal(sync1.json.ok, true);
+    assert.ok(sync1.json.digest);
+
+    // Create a shortage item -> digest must change
+    const shRes = await api(
+      '/api/shortages',
+      'POST',
+      {
+        id: 'idemp-shortage-001',
+        item_name: 'لبن جهينة كامل الدسم',
+        category: 'ألبان وجبن',
+        requested_qty: 5,
+        unit: 'كرتونة',
+      },
+      hallToken
+    );
+    assert.equal(shRes.status, 201);
+
+    const sync2 = await api('/api/sync-check', 'GET', undefined, ownerToken);
+    assert.equal(sync2.status, 200);
+    assert.notEqual(sync2.json.digest, sync1.json.digest);
+
+    // Replaying an attendance log with the same client UUID must be idempotent (no duplicate or error)
+    const boot = await api('/api/bootstrap', 'GET', undefined, ownerToken);
+    const firstEmpId = boot.json.employees[0].id;
+    const replayId = 'idemp-att-replay-001';
+
+    const firstAtt = await api(
+      '/api/attendance',
+      'POST',
+      { id: replayId, employee_id: firstEmpId, action_type: 'break_start', allowed_break_minutes: 15 },
+      ownerToken
+    );
+    assert.equal(firstAtt.status, 201);
+
+    const replayAtt = await api(
+      '/api/attendance',
+      'POST',
+      { id: replayId, employee_id: firstEmpId, action_type: 'break_start', allowed_break_minutes: 15 },
+      ownerToken
+    );
+    assert.equal(replayAtt.status, 201);
+    assert.equal(replayAtt.json.log.id, replayId);
+  });
 });

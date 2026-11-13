@@ -86,10 +86,13 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private initPromise: Promise<void> | null = null;
   private cachedSessionSecret = '';
   private readonly authCache = new Map<string, { auth: AuthContext; expiresAt: number }>();
+  private readonly decryptedPinCache = new Map<string, string>();
 
   public storageMode: 'supabase_postgres' | 'sqlite_local';
   public readonly dbBootId: string = crypto.randomUUID();
   public readonly isServerless: boolean;
+  public mutationSeq = 0;
+  public lastMutationAt: string = new Date().toISOString();
 
   constructor() {
     this.isServerless = Boolean(
@@ -196,6 +199,66 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
   public invalidateAuthCache(): void {
     this.authCache.clear();
+    this.decryptedPinCache.clear();
+  }
+
+  private decryptPinCached(userId: string, pinCipher: string, secretHex: string): string {
+    if (!pinCipher) return '';
+    const cacheKey = `${userId}:${pinCipher}`;
+    const cached = this.decryptedPinCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+    const decrypted = decryptPasswordForAdmin(pinCipher, secretHex) || '';
+    if (this.decryptedPinCache.size > 500) {
+      this.decryptedPinCache.clear();
+    }
+    this.decryptedPinCache.set(cacheKey, decrypted);
+    return decrypted;
+  }
+
+  async getSyncDigest(dateKey?: string): Promise<{
+    dbBootId: string;
+    cacheEpoch: string;
+    mutationSeq: number;
+    lastMutationAt: string;
+    digest: string;
+    storageMode: string;
+    serverTime: string;
+  }> {
+    const targetDate =
+      dateKey && /^\d{4}-\d{2}-\d{2}$/.test(dateKey) ? dateKey : getLocalDateKey();
+    const row = await this.queryOne<any>(
+      `SELECT
+        (SELECT value FROM settings WHERE key = 'cache_epoch') AS epoch,
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(timestamp), '') FROM attendance_logs WHERE date_key = ? OR shift_date_key = ?) AS att,
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), '') FROM shortages WHERE status IN ('open', 'ordered') OR date_key = ?) AS sht,
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(arrival_time), '') || ':' || COALESCE(MAX(departure_time), '') FROM truck_logs WHERE status = 'unloading' OR date_key = ?) AS trk,
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(timestamp), '') || ':' || COALESCE(MAX(resolved_at), '') FROM notes WHERE is_open_handover = 1 OR date_key = ?) AS nts,
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(timestamp), '') FROM team_messages) AS msg,
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(timestamp), '') || ':' || COALESCE(SUM(acknowledged), 0) FROM shift_handovers) AS hnd`,
+      [targetDate, targetDate, targetDate, targetDate, targetDate]
+    );
+    const cacheEpoch = String(row?.epoch || '2026-11-06-clean-v2');
+    const digest = [
+      this.dbBootId,
+      cacheEpoch,
+      targetDate,
+      row?.att || '',
+      row?.sht || '',
+      row?.trk || '',
+      row?.nts || '',
+      row?.msg || '',
+      row?.hnd || '',
+    ].join('|');
+
+    return {
+      dbBootId: this.dbBootId,
+      cacheEpoch,
+      mutationSeq: this.mutationSeq,
+      lastMutationAt: this.lastMutationAt,
+      digest,
+      storageMode: this.storageMode,
+      serverTime: new Date().toISOString(),
+    };
   }
 
   async queryAll<T = any>(sql: string, params: any[] = [], client?: PoolClient): Promise<T[]> {
@@ -237,6 +300,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     params: any[] = [],
     client?: PoolClient
   ): Promise<{ changes: number }> {
+    this.mutationSeq += 1;
+    this.lastMutationAt = new Date().toISOString();
     const upper = sql.toUpperCase();
     if (
       upper.includes('SYSTEM_USERS') ||
@@ -245,6 +310,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       upper.includes('SETTINGS')
     ) {
       this.authCache.clear();
+      if (upper.includes('SYSTEM_USERS') || upper.includes('SETTINGS')) {
+        this.decryptedPinCache.clear();
+      }
     }
 
     if (this.pgPool) {
@@ -1549,72 +1617,98 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (!this.useSupabaseRpc || this.storageMode === 'sqlite_local') {
-      settings = await this.getSettingsMap();
-      employees = canAttendance
-        ? await this.queryAll<any>(
-            'SELECT * FROM employees WHERE is_active = 1 ORDER BY department, emp_code, name'
-          )
-        : [];
-      if (canAttendance) {
-        directLogs = await this.queryAll<any>(
-          'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp DESC',
-          [targetDate, targetDate]
-        );
-        prevShiftLogs = await this.queryAll<any>(
-          'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp ASC',
-          [prevDate, prevDate]
-        );
-      }
-      activeSysUsersAll = await this.queryAll<any>(
-        'SELECT * FROM system_users WHERE is_active = 1 ORDER BY display_name'
-      );
-      suppliers = canSeeSupplierDirectory
-        ? await this.queryAll<any>(
-            'SELECT * FROM suppliers WHERE is_active = 1 ORDER BY has_pending_return DESC, name'
-          )
-        : [];
-      truckLogs = canTrucks
-        ? await this.queryAll<any>(
-            `SELECT * FROM truck_logs
-             WHERE status = 'unloading' OR date_key = ?
-             ORDER BY CASE WHEN status = 'unloading' THEN 0 ELSE 1 END, arrival_time DESC`,
-            [targetDate]
-          )
-        : [];
-      shortages = canShortages
-        ? await this.queryAll<any>(
-            `SELECT * FROM shortages
-             WHERE status IN ('open', 'ordered') OR date_key = ?
-             ORDER BY
-               CASE status WHEN 'open' THEN 0 WHEN 'ordered' THEN 1 ELSE 2 END,
-               CASE urgency WHEN 'out_of_stock' THEN 0 ELSE 1 END,
-               updated_at DESC`,
-            [targetDate]
-          )
-        : [];
-      productCatalog = canShortages
-        ? await this.queryAll<any>(
-            'SELECT * FROM product_catalog WHERE is_active = 1 ORDER BY usage_count DESC, name ASC'
-          )
-        : [];
-      notes = canNotes
-        ? await this.queryAll<any>(
-            `SELECT * FROM notes
-             WHERE is_open_handover = 1 OR date_key = ?
-             ORDER BY is_open_handover DESC, timestamp DESC`,
-            [targetDate]
-          )
-        : [];
-      teamMessages = canChat
-        ? await this.queryAll<any>(
-            'SELECT * FROM team_messages ORDER BY is_pinned DESC, timestamp DESC LIMIT 120'
-          )
-        : [];
-      rawHandovers = canHandover
-        ? await this.queryAll<any>(
-            'SELECT * FROM shift_handovers ORDER BY timestamp DESC LIMIT 40'
-          )
-        : [];
+      const [
+        settingsRes,
+        employeesRes,
+        directLogsRes,
+        prevShiftLogsRes,
+        activeSysUsersRes,
+        suppliersRes,
+        truckLogsRes,
+        shortagesRes,
+        productCatalogRes,
+        notesRes,
+        teamMessagesRes,
+        rawHandoversRes,
+      ] = await Promise.all([
+        this.getSettingsMap(),
+        canAttendance
+          ? this.queryAll<any>(
+              'SELECT * FROM employees WHERE is_active = 1 ORDER BY department, emp_code, name'
+            )
+          : Promise.resolve([]),
+        canAttendance
+          ? this.queryAll<any>(
+              'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp DESC',
+              [targetDate, targetDate]
+            )
+          : Promise.resolve([]),
+        canAttendance
+          ? this.queryAll<any>(
+              'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp ASC',
+              [prevDate, prevDate]
+            )
+          : Promise.resolve([]),
+        this.queryAll<any>('SELECT * FROM system_users WHERE is_active = 1 ORDER BY display_name'),
+        canSeeSupplierDirectory
+          ? this.queryAll<any>(
+              'SELECT * FROM suppliers WHERE is_active = 1 ORDER BY has_pending_return DESC, name'
+            )
+          : Promise.resolve([]),
+        canTrucks
+          ? this.queryAll<any>(
+              `SELECT * FROM truck_logs
+               WHERE status = 'unloading' OR date_key = ?
+               ORDER BY CASE WHEN status = 'unloading' THEN 0 ELSE 1 END, arrival_time DESC`,
+              [targetDate]
+            )
+          : Promise.resolve([]),
+        canShortages
+          ? this.queryAll<any>(
+              `SELECT * FROM shortages
+               WHERE status IN ('open', 'ordered') OR date_key = ?
+               ORDER BY
+                 CASE status WHEN 'open' THEN 0 WHEN 'ordered' THEN 1 ELSE 2 END,
+                 CASE urgency WHEN 'out_of_stock' THEN 0 ELSE 1 END,
+                 updated_at DESC`,
+              [targetDate]
+            )
+          : Promise.resolve([]),
+        canShortages
+          ? this.queryAll<any>(
+              'SELECT * FROM product_catalog WHERE is_active = 1 ORDER BY usage_count DESC, name ASC'
+            )
+          : Promise.resolve([]),
+        canNotes
+          ? this.queryAll<any>(
+              `SELECT * FROM notes
+               WHERE is_open_handover = 1 OR date_key = ?
+               ORDER BY is_open_handover DESC, timestamp DESC`,
+              [targetDate]
+            )
+          : Promise.resolve([]),
+        canChat
+          ? this.queryAll<any>(
+              'SELECT * FROM team_messages ORDER BY is_pinned DESC, timestamp DESC LIMIT 120'
+            )
+          : Promise.resolve([]),
+        canHandover
+          ? this.queryAll<any>('SELECT * FROM shift_handovers ORDER BY timestamp DESC LIMIT 40')
+          : Promise.resolve([]),
+      ]);
+
+      settings = settingsRes;
+      employees = employeesRes;
+      directLogs = directLogsRes;
+      prevShiftLogs = prevShiftLogsRes;
+      activeSysUsersAll = activeSysUsersRes;
+      suppliers = suppliersRes;
+      truckLogs = truckLogsRes;
+      shortages = shortagesRes;
+      productCatalog = productCatalogRes;
+      notes = notesRes;
+      teamMessages = teamMessagesRes;
+      rawHandovers = rawHandoversRes;
     }
 
     let attendanceLogs: any[] = [];
@@ -1684,7 +1778,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         if (!u.employee_id) continue;
         linkedUsersByEmpId.set(u.employee_id, {
           role: u.role,
-          password: decryptPasswordForAdmin(u.pin_cipher, secretHex) || '',
+          password: this.decryptPinCached(u.id, u.pin_cipher, secretHex),
         });
       }
     }
@@ -2017,7 +2111,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           ]))
         : null;
       const myPass = userRow
-        ? decryptPasswordForAdmin(userRow.pin_cipher, secretHex) || empRow?.emp_code || ''
+        ? this.decryptPinCached(userRow.id, userRow.pin_cipher, secretHex) || empRow?.emp_code || ''
         : '';
 
       const enrichedSelfEmp = empRow
