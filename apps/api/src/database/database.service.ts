@@ -614,20 +614,29 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    if (this.useSupabaseRpc) {
+    if (this.useSupabaseRpc || this.pgPool) {
       try {
-        const res = await execSupabaseRpcSql<{ value: string }>(
-          'SELECT value FROM settings WHERE key = ?',
-          ['session_hmac_secret']
-        );
-        if (res.rows[0]?.value) {
-          this.cachedSessionSecret = res.rows[0].value;
+        const rows = this.useSupabaseRpc
+          ? (
+              await execSupabaseRpcSql<{ key: string; value: string }>(
+                "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38')"
+              )
+            ).rows
+          : await this.queryAll<{ key: string; value: string }>(
+              "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38')"
+            );
+        const secretRow = rows.find((r) => r.key === 'session_hmac_secret');
+        if (secretRow?.value) {
+          this.cachedSessionSecret = secretRow.value;
           this.storageMode = 'supabase_postgres';
-          await this.ensureRolePoliciesUpToDate(new Date().toISOString()).catch(() => {});
+          const migratedRow = rows.find((r) => r.key === 'migration_rbac_walkie_v38');
+          if (migratedRow?.value !== 'done') {
+            await this.ensureRolePoliciesUpToDate(new Date().toISOString()).catch(() => {});
+          }
           return;
         }
       } catch {
-        if (!this.isServerless && this.sqliteDb) {
+        if (this.useSupabaseRpc && !this.isServerless && this.sqliteDb) {
           this.storageMode = 'sqlite_local';
         }
       }
@@ -710,10 +719,16 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async ensureRolePoliciesUpToDate(nowIso: string): Promise<void> {
-    for (const [role, perms] of Object.entries(DEFAULT_ROLE_PERMISSIONS)) {
+    const roleEntries = Object.entries(DEFAULT_ROLE_PERMISSIONS);
+    if (roleEntries.length > 0) {
+      const placeholders = roleEntries.map(() => '(?, ?, ?)').join(', ');
+      const params: string[] = [];
+      for (const [role, perms] of roleEntries) {
+        params.push(role, JSON.stringify(perms), nowIso);
+      }
       await this.execute(
-        'INSERT INTO role_policies (role, permissions_json, updated_at) VALUES (?, ?, ?) ON CONFLICT (role) DO NOTHING',
-        [role, JSON.stringify(perms), nowIso]
+        `INSERT INTO role_policies (role, permissions_json, updated_at) VALUES ${placeholders} ON CONFLICT (role) DO NOTHING`,
+        params
       );
     }
 
