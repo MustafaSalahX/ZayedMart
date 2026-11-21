@@ -14,6 +14,7 @@ export default function SmartFab({
   canWriteTrucks = false,
   canWriteNotes = false,
   canHandover = false,
+  canSwapSchedule = false,
   onPrimaryAction,
   onOpenQr,
   onOpenHandover,
@@ -21,6 +22,14 @@ export default function SmartFab({
   const [dialOpen, setDialOpen] = useState(false);
 
   const primaryMeta = (() => {
+    if (activeTab === 'schedule' && canSwapSchedule) {
+      return {
+        action: 'schedule_swap',
+        label: 'طلب تبديل إجازة',
+        icon: 'swap_horiz',
+        tone: 'bg-[var(--g-primary-solid)] text-white shadow-[0_8px_24px_rgba(11,87,208,0.38)]',
+      };
+    }
     if (activeTab === 'shortages' && canWriteShortages) {
       return {
         action: 'shortage_add',
@@ -103,6 +112,14 @@ export default function SmartFab({
       label: 'تسليم الوردية',
       icon: 'swap_horiz',
       onClick: () => onOpenHandover?.(),
+    });
+  }
+  if (canSwapSchedule && primaryMeta?.action !== 'schedule_swap') {
+    dialActions.push({
+      id: 'schedule_swap',
+      label: 'طلب تبديل إجازة',
+      icon: 'calendar_month',
+      onClick: () => onPrimaryAction?.('schedule_swap'),
     });
   }
 

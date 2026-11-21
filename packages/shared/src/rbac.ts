@@ -213,6 +213,9 @@ export const ALL_PERMISSIONS: PermissionItem[] = [
   { id: 'settings:manage', label: 'تعديل إعدادات الفرع والمزامنة السحابية', group: 'الإدارة والأمان' },
   { id: 'backup:manage', label: 'تصدير واستعادة النسخ الاحتياطية الكاملة', group: 'الإدارة والأمان' },
   { id: 'users:manage', label: 'إدارة المستخدمين والأدوار والصلاحيات المخصصة', group: 'الإدارة والأمان' },
+  { id: 'schedule:read', label: 'عرض جدول الإجازات الأسبوعي', group: 'جدول الإجازات' },
+  { id: 'schedule:manage', label: 'إدارة وتعديل جدول الإجازات واعتماد التبديلات', group: 'جدول الإجازات' },
+  { id: 'schedule:swap_request', label: 'طلب تبديل/ترحيل الإجازة والموافقة على تبديل الزملاء', group: 'جدول الإجازات' },
 ];
 
 export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
@@ -245,6 +248,9 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'suppliers:manage',
     'audit:view',
     'settings:manage',
+    'schedule:read',
+    'schedule:manage',
+    'schedule:swap_request',
   ],
   supervisor: [
     'attendance:self',
@@ -272,6 +278,9 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'staff:manage',
     'suppliers:manage',
     'audit:view',
+    'schedule:read',
+    'schedule:manage',
+    'schedule:swap_request',
   ],
   cashier: [
     'attendance:self',
@@ -285,6 +294,8 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'chat:write',
     'walkie:use',
     'profile:view',
+    'schedule:read',
+    'schedule:swap_request',
   ],
   cctv: [
     'attendance:self',
@@ -306,6 +317,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'profile:view',
     'reports:view',
     'reports:export',
+    'schedule:read',
   ],
   security: [
     'attendance:self',
@@ -324,6 +336,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'walkie:use',
     'walkie:all_channels',
     'profile:view',
+    'schedule:read',
   ],
   hall: [
     'attendance:self',
@@ -336,6 +349,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'chat:write',
     'walkie:use',
     'profile:view',
+    'schedule:read',
   ],
   warehouse: [
     'attendance:self',
@@ -353,6 +367,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'chat:write',
     'walkie:use',
     'profile:view',
+    'schedule:read',
   ],
   delivery: [
     'attendance:self',
@@ -364,6 +379,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'chat:write',
     'walkie:use',
     'profile:view',
+    'schedule:read',
   ],
   kiosk: ['attendance:kiosk'],
 };
@@ -422,5 +438,84 @@ export function inferDefaultRoleFromDepartment(department = '', roleTitle = ''):
   if (dept.includes('كاشير') || title.includes('كاشير')) return 'cashier';
   if (dept.includes('مخزن') || title.includes('مخزن')) return 'warehouse';
   if (dept.includes('دليفري') || title.includes('دليفري') || title.includes('توصيل') || title.includes('طيار')) return 'delivery';
+  return 'hall';
+}
+
+export type ScheduleTeamGroup = 'cashiers' | 'hall' | 'security_cctv';
+
+export const SCHEDULE_TEAM_GROUP_IDS: readonly ScheduleTeamGroup[] = [
+  'cashiers',
+  'hall',
+  'security_cctv',
+] as const;
+
+export interface ScheduleTeamGroupMeta {
+  id: ScheduleTeamGroup;
+  label: string;
+  shortLabel: string;
+  icon: string;
+  tone: 'primary' | 'secondary' | 'purple';
+  defaultMinOnDuty: number;
+}
+
+export const SCHEDULE_TEAM_GROUPS: ReadonlyArray<ScheduleTeamGroupMeta> = [
+  {
+    id: 'cashiers',
+    label: 'الكاشير',
+    shortLabel: 'الكاشير',
+    icon: 'point_of_sale',
+    tone: 'primary',
+    defaultMinOnDuty: 2,
+  },
+  {
+    id: 'hall',
+    label: 'عمال الصالة',
+    shortLabel: 'الصالة',
+    icon: 'storefront',
+    tone: 'secondary',
+    defaultMinOnDuty: 2,
+  },
+  {
+    id: 'security_cctv',
+    label: 'الأمن والكاميرات',
+    shortLabel: 'الأمن والكاميرات',
+    icon: 'videocam',
+    tone: 'purple',
+    defaultMinOnDuty: 1,
+  },
+];
+
+export function isScheduleTeamGroup(val: unknown): val is ScheduleTeamGroup {
+  return typeof val === 'string' && (SCHEDULE_TEAM_GROUP_IDS as readonly string[]).includes(val);
+}
+
+/**
+ * Infers the weekly day-off schedule team group from an employee's role, department, or title.
+ */
+export function inferScheduleTeam(
+  emp?: { department?: string; role_title?: string; system_role?: string; role?: string } | null
+): ScheduleTeamGroup {
+  if (!emp) return 'hall';
+  const role = String(emp.system_role || emp.role || '').trim().toLowerCase();
+  const dept = String(emp.department || '').trim();
+  const title = String(emp.role_title || '').trim();
+
+  if (role === 'cashier' || dept.includes('كاشير') || title.includes('كاشير')) {
+    return 'cashiers';
+  }
+  if (
+    role === 'security' ||
+    role === 'cctv' ||
+    dept.includes('أمن') ||
+    dept.includes('امن') ||
+    dept.includes('حارس') ||
+    dept.includes('كاميرات') ||
+    title.includes('أمن') ||
+    title.includes('امن') ||
+    title.includes('حارس') ||
+    title.includes('كاميرات')
+  ) {
+    return 'security_cctv';
+  }
   return 'hall';
 }

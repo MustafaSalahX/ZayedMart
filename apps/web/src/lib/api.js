@@ -1,6 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 import {
   DEFAULT_ROLE_PERMISSIONS,
+  getCairoDateKey,
+  getSaturdayWeekStart,
   inferDefaultRoleFromDepartment,
   ROLES_METADATA,
   ZAYED_SUPABASE_ANON_KEY,
@@ -147,6 +149,9 @@ export const ALL_PERMISSION_IDS = [
   'backup:manage',
   'users:manage',
   'records:manage',
+  'schedule:read',
+  'schedule:manage',
+  'schedule:swap_request',
 ];
 
 export function computeShiftDurationHoursClient(shiftStart, shiftEnd) {
@@ -254,6 +259,16 @@ export function clearAuthSession() {
   localStorage.removeItem(AUTH_TOKEN_KEY);
   localStorage.removeItem(AUTH_SESSION_KEY);
   localStorage.removeItem(SNAPSHOT_CACHE_KEY);
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('zayed_schedule_week_')) {
+        localStorage.removeItem(k);
+      }
+    }
+  } catch {
+    // ignore
+  }
   clearLocalUserCacheOnLogout().catch(() => {});
 }
 
@@ -765,12 +780,17 @@ async function fetchBootstrapFromDirectCloud(dateKey) {
     notes,
     handovers,
     teamMessages,
+    dayOffSchedule: null,
+    pendingDayOffSwaps: [],
     summary: {
       totalEmployees: employees.length,
       presentCount,
       onBreakCount,
       checkedOutCount,
       absentCount: Math.max(0, employees.length - presentCount - onBreakCount - checkedOutCount),
+      scheduledOffCount: 0,
+      pendingDayOffSwapsCount: 0,
+      totalPendingSwapsCount: 0,
       lateCount,
       unverifiedAttendanceCount: attendanceLogs.filter((l) => !l.verified_by_cctv).length,
       unloadingTrucksCount: truckLogs.filter((t) => t.status === 'unloading').length,
@@ -1934,4 +1954,99 @@ export async function pollWalkieChannel({
 
 export async function deleteWalkieCall(id) {
   return apiRequest(`/api/walkie/calls/${encodeURIComponent(id)}`, 'DELETE');
+}
+
+// ============================================================================
+// WEEKLY DAY-OFF SCHEDULE & DUAL-CASHIER SWAP REQUESTS (SERVER-AUTHORITATIVE)
+// ============================================================================
+
+const SCHEDULE_WEEK_CACHE_PREFIX = 'zayed_schedule_week_';
+
+function saveScheduleWeekCache(weekKey, data) {
+  if (typeof window === 'undefined' || !weekKey || !data) return;
+  try {
+    localStorage.setItem(`${SCHEDULE_WEEK_CACHE_PREFIX}${weekKey}`, JSON.stringify(data));
+  } catch {
+    // Ignore storage quota issues
+  }
+}
+
+function loadScheduleWeekCache(weekKey) {
+  if (typeof window === 'undefined' || !weekKey) return null;
+  try {
+    const raw = localStorage.getItem(`${SCHEDULE_WEEK_CACHE_PREFIX}${weekKey}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchWeeklySchedule(weekStartDate) {
+  const canonicalWeek = weekStartDate
+    ? getSaturdayWeekStart(weekStartDate)
+    : getSaturdayWeekStart(getCairoDateKey());
+  const qs = weekStartDate ? `?weekStart=${encodeURIComponent(canonicalWeek)}` : '';
+
+  try {
+    const res = await apiRequest(`/api/schedules/week${qs}`, 'GET');
+    if (res?.ok) {
+      const resolvedKey = res.weekStartDate || canonicalWeek;
+      saveScheduleWeekCache(resolvedKey, res);
+      if (canonicalWeek && canonicalWeek !== resolvedKey) {
+        saveScheduleWeekCache(canonicalWeek, res);
+      }
+    }
+    return res;
+  } catch (err) {
+    if (err?.isServerResponse || err?.status === 401 || err?.status === 403) {
+      throw err;
+    }
+    const cached = loadScheduleWeekCache(canonicalWeek);
+    if (cached) {
+      return { ...cached, _offlineCached: true };
+    }
+    throw err;
+  }
+}
+
+export async function assignDayOff(payload) {
+  return apiRequest('/api/schedules/assign', 'PUT', payload);
+}
+
+export async function bulkUpdateSchedule(payload) {
+  return apiRequest('/api/schedules/bulk', 'POST', payload);
+}
+
+export async function updateScheduleSettings(payload) {
+  return apiRequest('/api/schedules/settings', 'PUT', payload);
+}
+
+export async function fetchDayOffSwaps(params = {}) {
+  const searchParams = new URLSearchParams();
+  if (params.weekStart) searchParams.set('weekStart', String(params.weekStart));
+  if (params.status) searchParams.set('status', String(params.status));
+  const qs = searchParams.toString();
+  return apiRequest(`/api/schedules/swaps${qs ? `?${qs}` : ''}`, 'GET');
+}
+
+export async function createDayOffSwap(payload) {
+  return apiRequest('/api/schedules/swaps', 'POST', payload);
+}
+
+export async function respondDayOffSwap(id, payload) {
+  return apiRequest(`/api/schedules/swaps/${encodeURIComponent(id)}/respond`, 'POST', payload);
+}
+
+export async function decideDayOffSwap(id, payload) {
+  return apiRequest(`/api/schedules/swaps/${encodeURIComponent(id)}/decision`, 'POST', payload);
+}
+
+export async function cancelDayOffSwap(id) {
+  return apiRequest(`/api/schedules/swaps/${encodeURIComponent(id)}/cancel`, 'POST', {});
+}
+
+export async function revertDayOffSwap(id, payload = {}) {
+  return apiRequest(`/api/schedules/swaps/${encodeURIComponent(id)}/revert`, 'POST', payload);
 }

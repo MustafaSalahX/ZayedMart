@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { apiRequest } from '../lib/api.js';
+import { getScheduleWeekdayLabel } from '@zayed-mart/shared';
+import { apiRequest, decideDayOffSwap, respondDayOffSwap } from '../lib/api.js';
 import { playSuccessChime } from '../lib/audio.js';
 import VoiceMicButton from './VoiceMicButton.jsx';
 
@@ -82,6 +83,9 @@ export default function SmartAlertsAndHandoverBar({
   const [shiftName, setShiftName] = useState('الوردية الصباحية ← المسائية');
   const [handoverNote, setHandoverNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [swapBusyId, setSwapBusyId] = useState('');
+  const [rejectingSwapId, setRejectingSwapId] = useState('');
+  const [rejectSwapReason, setRejectSwapReason] = useState('');
 
   const effectiveRole = actorRole || data?.auth?.user?.role || 'cctv';
   const roleCopy = HANDOVER_ROLE_COPY[effectiveRole] || HANDOVER_ROLE_COPY.cctv;
@@ -129,15 +133,56 @@ export default function SmartAlertsAndHandoverBar({
 
   const pendingHandover = canHandover ? data.pendingHandover : null;
   const unverifiedCount = canVerify ? data.summary?.unverifiedAttendanceCount || 0 : 0;
+  const actionableSwaps = (data.pendingDayOffSwaps || []).filter((s) =>
+    Boolean(s.awaiting_my_action)
+  );
 
   const hasVisibleBanners =
     Boolean(pendingHandover && canHandover) ||
+    actionableSwaps.length > 0 ||
     overdueBreaks.length > 0 ||
     overdueTrucks.length > 0 ||
     Boolean(canVerify && unverifiedCount > 0);
 
   if (!hasVisibleBanners && !showHandoverModal) {
     return null;
+  }
+
+  async function handleSwapDecision(swap, decision, reason = '') {
+    if (!swap?.id || swapBusyId) return;
+    setSwapBusyId(swap.id);
+    try {
+      const payload = { decision, ...(reason ? { reason: reason.trim() } : {}) };
+      if (swap.status === 'pending_manager') {
+        await decideDayOffSwap(swap.id, payload);
+      } else {
+        await respondDayOffSwap(swap.id, payload);
+      }
+      playSuccessChime(decision === 'approve' ? 'in' : 'out');
+      onToast?.(
+        decision === 'approve'
+          ? 'تم تسجيل موافقتك على طلب الإجازة بنجاح'
+          : 'تم رفض طلب الإجازة'
+      );
+      setRejectingSwapId('');
+      setRejectSwapReason('');
+      onRefresh?.();
+      window.dispatchEvent(
+        new CustomEvent('zayed:schedule-updated', { detail: { reason: 'day_off_swap' } })
+      );
+    } catch (err) {
+      onToast?.(err.message || 'تعذر تنفيذ الإجراء على طلب الإجازة', 'error');
+      if (err?.status === 409) {
+        setRejectingSwapId('');
+        setRejectSwapReason('');
+        onRefresh?.();
+        window.dispatchEvent(
+          new CustomEvent('zayed:schedule-updated', { detail: { reason: 'day_off_swap' } })
+        );
+      }
+    } finally {
+      setSwapBusyId('');
+    }
   }
 
   async function handleAcknowledgeHandover(id) {
@@ -236,6 +281,128 @@ export default function SmartAlertsAndHandoverBar({
                 <span>استلام الوردية وتأكيد الاطلاع ✓</span>
               </button>
             </div>
+          </div>
+        )}
+
+        {/* 1.5 Actionable Weekly Day-Off Swap / Move Requests */}
+        {actionableSwaps.length > 0 && (
+          <div className="space-y-2">
+            {actionableSwaps.map((swap) => {
+              const isBusy = swapBusyId === swap.id;
+              const isRejecting = rejectingSwapId === swap.id;
+              const fromLabel = getScheduleWeekdayLabel(swap.requester_from_day);
+              const toLabel = getScheduleWeekdayLabel(swap.target_from_day);
+              const isManagerStep = swap.status === 'pending_manager';
+
+              return (
+                <div
+                  key={swap.id}
+                  className="g-card p-3.5 sm:p-4 border-2 border-[var(--g-primary)]/60 bg-[var(--g-primary-container)]/25 animate-pop"
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="w-7 h-7 rounded-xl bg-[var(--g-primary-container)] text-[var(--g-primary)] flex items-center justify-center shrink-0">
+                          <span className="ms-icon filled text-base">
+                            {swap.request_type === 'move' ? 'event_repeat' : 'swap_horiz'}
+                          </span>
+                        </span>
+                        <span className="font-black text-xs sm:text-sm text-[var(--g-text)]">
+                          {swap.request_type === 'move'
+                            ? `طلب ترحيل إجازة: ${swap.requester_name || 'موظف'} من ${fromLabel} إلى ${toLabel}`
+                            : `طلب تبديل إجازة: ${swap.requester_name || 'الكاشير الأول'} (${fromLabel}) مع ${swap.target_name || 'الكاشير الثاني'} (${toLabel})`}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]">
+                          {isManagerStep ? 'بانتظار اعتماد الإدارة' : 'بانتظار موافقتك'}
+                        </span>
+                        {swap.scope === 'permanent' && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-[var(--g-purple-bg)] text-[var(--g-purple)]">
+                            تغيير دائم
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="text-[11px] font-semibold text-[var(--g-muted)] flex flex-wrap items-center gap-2">
+                        <span className="num-ltr">أسبوع: {swap.week_start_date}</span>
+                        {swap.reason && <span>• السبب: {swap.reason}</span>}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => handleSwapDecision(swap, 'approve')}
+                        className="min-h-[38px] px-3.5 py-1.5 rounded-full bg-[#146C2E] hover:bg-[#0F5223] text-white text-xs font-extrabold flex items-center gap-1 active:scale-95 disabled:opacity-50"
+                      >
+                        <span className="ms-icon filled text-base">check_circle</span>
+                        <span>قبول</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => {
+                          if (isRejecting) {
+                            setRejectingSwapId('');
+                            setRejectSwapReason('');
+                          } else {
+                            setRejectingSwapId(swap.id);
+                            setRejectSwapReason('');
+                          }
+                        }}
+                        className="min-h-[38px] px-3.5 py-1.5 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] border border-[var(--g-red-border)]/35 text-xs font-extrabold flex items-center gap-1 active:scale-95 disabled:opacity-50"
+                      >
+                        <span className="ms-icon text-base">cancel</span>
+                        <span>رفض</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => onJumpTab?.('schedule')}
+                        className="min-h-[38px] px-3 py-1.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] text-xs font-extrabold text-[var(--g-primary)] flex items-center gap-1 active:scale-95"
+                      >
+                        <span className="ms-icon text-base">calendar_month</span>
+                        <span>عرض الجدول</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {isRejecting && (
+                    <div className="mt-2.5 pt-2.5 border-t border-[var(--g-border)] flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                      <input
+                        type="text"
+                        value={rejectSwapReason}
+                        onChange={(e) => setRejectSwapReason(e.target.value)}
+                        placeholder="سبب الرفض (اختياري)..."
+                        className="g-input flex-1 py-1.5 text-xs"
+                      />
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => handleSwapDecision(swap, 'reject', rejectSwapReason)}
+                          className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[#B3261E] text-white text-xs font-extrabold disabled:opacity-50"
+                        >
+                          تأكيد الرفض
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isBusy}
+                          onClick={() => {
+                            setRejectingSwapId('');
+                            setRejectSwapReason('');
+                          }}
+                          className="min-h-[38px] px-3 py-1.5 rounded-xl bg-[var(--g-surface-variant)] text-xs font-bold"
+                        >
+                          إلغاء
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
 

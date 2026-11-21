@@ -152,6 +152,16 @@ export default function AttendanceView({
     return Array.from(set);
   }, [employees]);
 
+  const scheduledOffCount = useMemo(
+    () => employees.filter((e) => e.isScheduledOff && !e.workedOnDayOff).length,
+    [employees]
+  );
+
+  const workedOnDayOffCount = useMemo(
+    () => employees.filter((e) => e.workedOnDayOff).length,
+    [employees]
+  );
+
   const filteredEmployees = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return employees.filter((emp) => {
@@ -160,6 +170,8 @@ export default function AttendanceView({
       if (statusFilter === 'on_break' && emp.currentStatus !== 'on_break') return false;
       if (statusFilter === 'absent' && emp.currentStatus !== 'absent') return false;
       if (statusFilter === 'checked_out' && emp.currentStatus !== 'checked_out') return false;
+      if (statusFilter === 'scheduled_off' && !(emp.isScheduledOff && !emp.workedOnDayOff))
+        return false;
       if (q) {
         const hay = `${emp.name} ${isOwner ? emp.emp_code || '' : ''} ${emp.department} ${emp.role_title || ''}`.toLowerCase();
         if (!hay.includes(q)) return false;
@@ -473,6 +485,36 @@ export default function AttendanceView({
         })}
       </div>
 
+      {/* Subtle Weekly Day-Off Summary / Filter Bar */}
+      {(scheduledOffCount > 0 || workedOnDayOffCount > 0) && (
+        <div className="flex flex-wrap items-center gap-2">
+          {scheduledOffCount > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                setStatusFilter((prev) => (prev === 'scheduled_off' ? 'all' : 'scheduled_off'))
+              }
+              className={`min-h-[36px] px-3 py-1.5 rounded-full text-xs font-extrabold inline-flex items-center gap-1.5 border transition-all cursor-pointer ${
+                statusFilter === 'scheduled_off'
+                  ? 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] border-transparent ring-2 ring-[var(--g-primary)]'
+                  : 'bg-[var(--g-surface)] text-[var(--g-on-secondary-container)] border-[var(--g-border)] hover:border-[var(--g-primary)]'
+              }`}
+            >
+              <span className="ms-icon text-base text-[var(--g-primary)]">event_available</span>
+              <span>إجازة أسبوعية اليوم:</span>
+              <span className="num-ltr font-black">{scheduledOffCount}</span>
+            </button>
+          )}
+          {workedOnDayOffCount > 0 && (
+            <span className="min-h-[36px] px-3 py-1.5 rounded-full text-xs font-extrabold inline-flex items-center gap-1.5 bg-[var(--g-purple-bg)] text-[var(--g-purple)] border border-[var(--g-purple-border)]/30">
+              <span className="ms-icon text-base">workspace_premium</span>
+              <span>حضور في يوم إجازة (إضافي):</span>
+              <span className="num-ltr font-black">{workedOnDayOffCount}</span>
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Department Filter Chips */}
       <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-0.5">
         {departments.map((dept) => {
@@ -611,27 +653,41 @@ export default function AttendanceView({
                     </div>
 
                     <div className="flex flex-col items-end gap-1 shrink-0">
-                      <span
-                        className={`text-xs font-extrabold px-2.5 py-1 rounded-full ${
-                          emp.currentStatus === 'present'
-                            ? 'bg-[var(--g-green-bg)] text-[var(--g-green)]'
+                      {emp.currentStatus === 'absent' && emp.isScheduledOff && !emp.workedOnDayOff ? (
+                        <span className="text-xs font-extrabold px-2.5 py-1 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] inline-flex items-center gap-1">
+                          <span className="ms-icon text-sm">event_available</span>
+                          <span>إجازة أسبوعية</span>
+                        </span>
+                      ) : (
+                        <span
+                          className={`text-xs font-extrabold px-2.5 py-1 rounded-full ${
+                            emp.currentStatus === 'present'
+                              ? 'bg-[var(--g-green-bg)] text-[var(--g-green)]'
+                              : emp.currentStatus === 'on_break'
+                              ? breakExceeded
+                                ? 'bg-[#C25E00] text-white'
+                                : 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]'
+                              : emp.currentStatus === 'checked_out'
+                              ? 'bg-[var(--g-red-bg)] text-[var(--g-red)]'
+                              : 'bg-[var(--g-surface-variant)] text-[var(--g-muted)]'
+                          }`}
+                        >
+                          {emp.currentStatus === 'present'
+                            ? 'حاضر ✓'
                             : emp.currentStatus === 'on_break'
-                            ? breakExceeded
-                              ? 'bg-[#C25E00] text-white'
-                              : 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]'
+                            ? `في بريك ${breakMins}/${empAllowedBreak} د`
                             : emp.currentStatus === 'checked_out'
-                            ? 'bg-[var(--g-red-bg)] text-[var(--g-red)]'
-                            : 'bg-[var(--g-surface-variant)] text-[var(--g-muted)]'
-                        }`}
-                      >
-                        {emp.currentStatus === 'present'
-                          ? 'حاضر ✓'
-                          : emp.currentStatus === 'on_break'
-                          ? `في بريك ${breakMins}/${empAllowedBreak} د`
-                          : emp.currentStatus === 'checked_out'
-                          ? 'منصرف ✓'
-                          : 'لم يحضر'}
-                      </span>
+                            ? 'منصرف ✓'
+                            : 'لم يحضر'}
+                        </span>
+                      )}
+
+                      {emp.workedOnDayOff && (
+                        <span className="px-2 py-0.5 rounded-full bg-[var(--g-purple-bg)] text-[var(--g-purple)] text-[10px] font-extrabold inline-flex items-center gap-1">
+                          <span className="ms-icon text-xs">workspace_premium</span>
+                          <span>عمل في يوم إجازة (إضافي)</span>
+                        </span>
+                      )}
 
                       {emp.isCrossDayShift && (
                         <span className="px-2 py-0.5 rounded-full bg-[var(--g-purple-bg)] text-[var(--g-purple)] text-[10px] font-extrabold">

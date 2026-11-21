@@ -8,9 +8,16 @@ import {
   formatShiftDurationArabic,
   getLocalDateKey,
   getPreviousDateKey,
+  getSaturdayWeekStart,
+  getWeekdayCodeFromDateKey,
   inferDefaultRoleFromDepartment,
+  inferScheduleTeam,
+  isScheduleTeamGroup,
+  isScheduleWeekday,
   normalizeDigits,
   ROLES_METADATA,
+  ScheduleTeamGroup,
+  ScheduleWeekday,
   ZAYED_SUPABASE_ANON_KEY,
   ZAYED_SUPABASE_URL,
 } from '@zayed-mart/shared';
@@ -52,6 +59,77 @@ const LEGACY_FAKE_EMPLOYEE_IDS = [
   '35b9ad92-7402-49e0-8c1c-7a851d2bf883',
   'aecff9f9-9f1c-4a7a-841e-9a974be11889',
 ];
+
+const SCHEDULE_DDL_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS employee_dayoff_defaults (
+    employee_id TEXT PRIMARY KEY,
+    team_group TEXT NOT NULL CHECK (team_group IN ('cashiers', 'hall', 'security_cctv')),
+    day_of_week TEXT NOT NULL CHECK (day_of_week IN ('sat', 'sun', 'mon', 'tue', 'wed', 'thu', 'fri')),
+    updated_by TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS weekly_dayoff_overrides (
+    id TEXT PRIMARY KEY,
+    week_start_date TEXT NOT NULL,
+    employee_id TEXT NOT NULL,
+    team_group TEXT NOT NULL CHECK (team_group IN ('cashiers', 'hall', 'security_cctv')),
+    day_of_week TEXT NOT NULL CHECK (day_of_week IN ('sat', 'sun', 'mon', 'tue', 'wed', 'thu', 'fri')),
+    source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('manual', 'swap', 'move', 'revert')),
+    swap_request_id TEXT NOT NULL DEFAULT '',
+    updated_by TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    UNIQUE(week_start_date, employee_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS dayoff_swap_requests (
+    id TEXT PRIMARY KEY,
+    request_type TEXT NOT NULL DEFAULT 'swap' CHECK (request_type IN ('swap', 'move')),
+    scope TEXT NOT NULL DEFAULT 'week' CHECK (scope IN ('week', 'permanent')),
+    week_start_date TEXT NOT NULL,
+    team_group TEXT NOT NULL CHECK (team_group IN ('cashiers', 'hall', 'security_cctv')),
+    requester_employee_id TEXT NOT NULL,
+    requester_from_day TEXT NOT NULL CHECK (requester_from_day IN ('sat', 'sun', 'mon', 'tue', 'wed', 'thu', 'fri')),
+    target_employee_id TEXT NOT NULL DEFAULT '',
+    target_from_day TEXT NOT NULL CHECK (target_from_day IN ('sat', 'sun', 'mon', 'tue', 'wed', 'thu', 'fri')),
+    reason TEXT NOT NULL DEFAULT '',
+    requester_approved INTEGER NOT NULL DEFAULT 0,
+    requester_approved_at TEXT NOT NULL DEFAULT '',
+    target_approved INTEGER NOT NULL DEFAULT 0,
+    target_approved_at TEXT NOT NULL DEFAULT '',
+    manager_approved INTEGER NOT NULL DEFAULT 0,
+    manager_approved_by TEXT NOT NULL DEFAULT '',
+    manager_approved_at TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending_peer' CHECK (status IN ('pending_requester', 'pending_peer', 'pending_manager', 'approved', 'rejected', 'cancelled', 'reverted')),
+    rejection_reason TEXT NOT NULL DEFAULT '',
+    created_by_user_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_dayoff_defaults_team ON employee_dayoff_defaults(team_group, day_of_week)`,
+  `CREATE INDEX IF NOT EXISTS idx_dayoff_overrides_week_team ON weekly_dayoff_overrides(week_start_date, team_group)`,
+  `CREATE INDEX IF NOT EXISTS idx_dayoff_overrides_emp ON weekly_dayoff_overrides(employee_id, week_start_date)`,
+  `CREATE INDEX IF NOT EXISTS idx_dayoff_swaps_week_status ON dayoff_swap_requests(week_start_date, status)`,
+  `CREATE INDEX IF NOT EXISTS idx_dayoff_swaps_requester_pending ON dayoff_swap_requests(requester_employee_id, week_start_date) WHERE status IN ('pending_requester', 'pending_peer', 'pending_manager')`,
+  `CREATE INDEX IF NOT EXISTS idx_dayoff_swaps_target_pending ON dayoff_swap_requests(target_employee_id, week_start_date) WHERE status IN ('pending_requester', 'pending_peer', 'pending_manager')`,
+];
+
+export interface ScheduleSettings {
+  swapRequiresManagerApproval: boolean;
+  minOnDuty: {
+    cashiers: number;
+    hall: number;
+    security_cctv: number;
+  };
+}
+
+export interface EffectiveScheduleEmployee {
+  [key: string]: any;
+  team_group: ScheduleTeamGroup;
+  default_day_of_week: ScheduleWeekday | null;
+  effective_day_of_week: ScheduleWeekday | null;
+  is_override: boolean;
+  override_source: string | null;
+  swap_request_id: string | null;
+}
 
 function convertPlaceholdersToPg(sql: string): string {
   let idx = 0;
@@ -234,7 +312,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         (SELECT COUNT(*) || ':' || COALESCE(MAX(arrival_time), '') || ':' || COALESCE(MAX(departure_time), '') FROM truck_logs WHERE status = 'unloading' OR date_key = ?) AS trk,
         (SELECT COUNT(*) || ':' || COALESCE(MAX(timestamp), '') || ':' || COALESCE(MAX(resolved_at), '') FROM notes WHERE is_open_handover = 1 OR date_key = ?) AS nts,
         (SELECT COUNT(*) || ':' || COALESCE(MAX(timestamp), '') FROM team_messages) AS msg,
-        (SELECT COUNT(*) || ':' || COALESCE(MAX(timestamp), '') || ':' || COALESCE(SUM(acknowledged), 0) FROM shift_handovers) AS hnd`,
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(timestamp), '') || ':' || COALESCE(SUM(acknowledged), 0) FROM shift_handovers) AS hnd,
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), '') FROM employee_dayoff_defaults) AS do_def,
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), '') FROM weekly_dayoff_overrides) AS do_ovr,
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), '') FROM dayoff_swap_requests) AS do_swp`,
       [targetDate, targetDate, targetDate, targetDate, targetDate]
     );
     const cacheEpoch = String(row?.epoch || '2026-11-06-clean-v2');
@@ -248,6 +329,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       row?.nts || '',
       row?.msg || '',
       row?.hnd || '',
+      row?.do_def || '',
+      row?.do_ovr || '',
+      row?.do_swp || '',
     ].join('|');
 
     return {
@@ -259,6 +343,29 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       storageMode: this.storageMode,
       serverTime: new Date().toISOString(),
     };
+  }
+
+  private invalidateCachesForSql(sql: string): void {
+    const upper = sql.toUpperCase();
+    if (
+      upper.includes('SYSTEM_USERS') ||
+      upper.includes('USER_SESSIONS') ||
+      upper.includes('ROLE_POLICIES') ||
+      upper.includes('SETTINGS')
+    ) {
+      this.authCache.clear();
+      if (upper.includes('SYSTEM_USERS') || upper.includes('SETTINGS')) {
+        this.decryptedPinCache.clear();
+      }
+    }
+  }
+
+  private normalizeSqliteParams(params: any[] = []): any[] {
+    return (params || []).map((p) => {
+      if (p === undefined) return null;
+      if (typeof p === 'boolean') return p ? 1 : 0;
+      return p;
+    });
   }
 
   async queryAll<T = any>(sql: string, params: any[] = [], client?: PoolClient): Promise<T[]> {
@@ -302,18 +409,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   ): Promise<{ changes: number }> {
     this.mutationSeq += 1;
     this.lastMutationAt = new Date().toISOString();
-    const upper = sql.toUpperCase();
-    if (
-      upper.includes('SYSTEM_USERS') ||
-      upper.includes('USER_SESSIONS') ||
-      upper.includes('ROLE_POLICIES') ||
-      upper.includes('SETTINGS')
-    ) {
-      this.authCache.clear();
-      if (upper.includes('SYSTEM_USERS') || upper.includes('SETTINGS')) {
-        this.decryptedPinCache.clear();
-      }
-    }
+    this.invalidateCachesForSql(sql);
 
     if (this.pgPool) {
       const pgSql = convertPlaceholdersToPg(sql);
@@ -380,6 +476,84 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       }
       throw err;
     }
+  }
+
+  /**
+   * Executes multiple SQL statements atomically across all 3 storage modes:
+   * Supabase RPC batch (single PL/pgSQL transaction), direct PG pool, or local SQLite.
+   */
+  async executeBatch(statements: Array<{ sql: string; params?: any[] }>): Promise<void> {
+    if (!statements || statements.length === 0) return;
+    this.mutationSeq += 1;
+    this.lastMutationAt = new Date().toISOString();
+    for (const stmt of statements) {
+      this.invalidateCachesForSql(stmt.sql);
+    }
+
+    if (this.pgPool) {
+      await this.withTransaction(async (client) => {
+        for (const stmt of statements) {
+          const pgSql = convertPlaceholdersToPg(stmt.sql);
+          await client!.query(pgSql, stmt.params || []);
+        }
+      });
+      return;
+    }
+
+    if (this.useSupabaseRpc) {
+      try {
+        await execSupabaseRpcBatch(statements);
+        this.storageMode = 'supabase_postgres';
+        if (!this.isServerless && this.sqliteDb) {
+          this.sqliteDb.exec('BEGIN TRANSACTION');
+          try {
+            for (const stmt of statements) {
+              this.sqliteDb
+                .prepare(stmt.sql)
+                .run(...this.normalizeSqliteParams(stmt.params || []));
+            }
+            this.sqliteDb.exec('COMMIT');
+          } catch {
+            try {
+              this.sqliteDb.exec('ROLLBACK');
+            } catch {
+              // ignore
+            }
+          }
+        }
+        return;
+      } catch (err) {
+        if (!this.isServerless && this.sqliteDb) {
+          this.storageMode = 'sqlite_local';
+          this.sqliteDb.exec('BEGIN TRANSACTION');
+          try {
+            for (const stmt of statements) {
+              this.sqliteDb
+                .prepare(stmt.sql)
+                .run(...this.normalizeSqliteParams(stmt.params || []));
+            }
+            this.sqliteDb.exec('COMMIT');
+            return;
+          } catch (sqliteErr) {
+            try {
+              this.sqliteDb.exec('ROLLBACK');
+            } catch {
+              // ignore
+            }
+            throw sqliteErr;
+          }
+        }
+        throw err;
+      }
+    }
+
+    await this.withTransaction(async () => {
+      for (const stmt of statements) {
+        this.sqliteDb!
+          .prepare(stmt.sql)
+          .run(...this.normalizeSqliteParams(stmt.params || []));
+      }
+    });
   }
 
   private async bootstrapSchemaAndDefaults(): Promise<void> {
@@ -602,6 +776,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         mic_mode TEXT DEFAULT 'vad',
         updated_at_ms BIGINT NOT NULL
       )`,
+      ...SCHEDULE_DDL_STATEMENTS,
     ];
 
     if (this.sqliteDb) {
@@ -619,18 +794,30 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         const rows = this.useSupabaseRpc
           ? (
               await execSupabaseRpcSql<{ key: string; value: string }>(
-                "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38')"
+                "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38', 'migration_schedule_tables_v41', 'migration_rbac_schedule_v41')"
               )
             ).rows
           : await this.queryAll<{ key: string; value: string }>(
-              "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38')"
+              "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38', 'migration_schedule_tables_v41', 'migration_rbac_schedule_v41')"
             );
         const secretRow = rows.find((r) => r.key === 'session_hmac_secret');
         if (secretRow?.value) {
           this.cachedSessionSecret = secretRow.value;
           this.storageMode = 'supabase_postgres';
-          const migratedRow = rows.find((r) => r.key === 'migration_rbac_walkie_v38');
-          if (migratedRow?.value !== 'done') {
+          const scheduleTablesMigrated = rows.find(
+            (r) => r.key === 'migration_schedule_tables_v41'
+          );
+          if (scheduleTablesMigrated?.value !== 'done') {
+            try {
+              await this.executeBatch(SCHEDULE_DDL_STATEMENTS.map((sql) => ({ sql })));
+              await this.upsertSetting('migration_schedule_tables_v41', 'done');
+            } catch {
+              // ignore non-fatal DDL migration if already provisioned or offline
+            }
+          }
+          const migratedWalkie = rows.find((r) => r.key === 'migration_rbac_walkie_v38');
+          const migratedScheduleRbac = rows.find((r) => r.key === 'migration_rbac_schedule_v41');
+          if (migratedWalkie?.value !== 'done' || migratedScheduleRbac?.value !== 'done') {
             await this.ensureRolePoliciesUpToDate(new Date().toISOString()).catch(() => {});
           }
           return;
@@ -676,6 +863,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       supabase_anon_key: envSupabaseKey,
       cloud_sync_enabled: 'true',
       last_cloud_sync: '',
+      migration_schedule_tables_v41: 'done',
     };
 
     for (const [k, v] of Object.entries(defaultSettings)) {
@@ -718,6 +906,32 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async mergeRolePolicyPermissions(
+    additions: Record<string, string[]>,
+    nowIso: string
+  ): Promise<void> {
+    for (const [roleId, extraPerms] of Object.entries(additions)) {
+      const row = await this.queryOne<{ permissions_json: string }>(
+        'SELECT permissions_json FROM role_policies WHERE role = ?',
+        [roleId]
+      );
+      if (row?.permissions_json) {
+        try {
+          const parsed = JSON.parse(row.permissions_json);
+          if (Array.isArray(parsed)) {
+            const merged = Array.from(new Set([...parsed, ...extraPerms]));
+            await this.execute(
+              'UPDATE role_policies SET permissions_json = ?, updated_at = ? WHERE role = ?',
+              [JSON.stringify(merged), nowIso, roleId]
+            );
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
   private async ensureRolePoliciesUpToDate(nowIso: string): Promise<void> {
     const roleEntries = Object.entries(DEFAULT_ROLE_PERMISSIONS);
     if (roleEntries.length > 0) {
@@ -736,60 +950,64 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       "SELECT value FROM settings WHERE key = 'migration_rbac_walkie_v38'"
     );
     if (!migratedV38?.value) {
-      const additions: Record<string, string[]> = {
-        manager: ['attendance:self', 'walkie:use', 'walkie:all_channels', 'profile:view', 'chat:read', 'chat:write'],
-        supervisor: ['attendance:self', 'walkie:use', 'walkie:all_channels', 'profile:view', 'chat:read', 'chat:write'],
-        cctv: ['attendance:self', 'walkie:use', 'walkie:all_channels', 'profile:view', 'chat:read', 'chat:write'],
-        security: ['attendance:self', 'walkie:use', 'walkie:all_channels', 'shortages:read', 'notes:read', 'notes:write', 'profile:view', 'chat:read', 'chat:write'],
-        cashier: [
-          'attendance:self',
-          'attendance:read',
-          'shortages:read',
-          'shortages:write',
-          'notes:read',
-          'notes:write',
-          'handover:manage',
-          'chat:read',
-          'chat:write',
-          'walkie:use',
-          'profile:view',
-        ],
-        hall: [
-          'attendance:self',
-          'shortages:read',
-          'shortages:write',
-          'notes:read',
-          'notes:write',
-          'handover:manage',
-          'chat:read',
-          'chat:write',
-          'walkie:use',
-          'profile:view',
-        ],
-        warehouse: ['attendance:self', 'walkie:use', 'profile:view', 'chat:read', 'chat:write'],
-        delivery: ['attendance:self', 'walkie:use', 'profile:view', 'chat:read', 'chat:write'],
-      };
-      for (const [roleId, extraPerms] of Object.entries(additions)) {
-        const row = await this.queryOne<{ permissions_json: string }>(
-          'SELECT permissions_json FROM role_policies WHERE role = ?',
-          [roleId]
-        );
-        if (row?.permissions_json) {
-          try {
-            const parsed = JSON.parse(row.permissions_json);
-            if (Array.isArray(parsed)) {
-              const merged = Array.from(new Set([...parsed, ...extraPerms]));
-              await this.execute(
-                'UPDATE role_policies SET permissions_json = ?, updated_at = ? WHERE role = ?',
-                [JSON.stringify(merged), nowIso, roleId]
-              );
-            }
-          } catch {
-            // ignore
-          }
-        }
-      }
+      await this.mergeRolePolicyPermissions(
+        {
+          manager: ['attendance:self', 'walkie:use', 'walkie:all_channels', 'profile:view', 'chat:read', 'chat:write'],
+          supervisor: ['attendance:self', 'walkie:use', 'walkie:all_channels', 'profile:view', 'chat:read', 'chat:write'],
+          cctv: ['attendance:self', 'walkie:use', 'walkie:all_channels', 'profile:view', 'chat:read', 'chat:write'],
+          security: ['attendance:self', 'walkie:use', 'walkie:all_channels', 'shortages:read', 'notes:read', 'notes:write', 'profile:view', 'chat:read', 'chat:write'],
+          cashier: [
+            'attendance:self',
+            'attendance:read',
+            'shortages:read',
+            'shortages:write',
+            'notes:read',
+            'notes:write',
+            'handover:manage',
+            'chat:read',
+            'chat:write',
+            'walkie:use',
+            'profile:view',
+          ],
+          hall: [
+            'attendance:self',
+            'shortages:read',
+            'shortages:write',
+            'notes:read',
+            'notes:write',
+            'handover:manage',
+            'chat:read',
+            'chat:write',
+            'walkie:use',
+            'profile:view',
+          ],
+          warehouse: ['attendance:self', 'walkie:use', 'profile:view', 'chat:read', 'chat:write'],
+          delivery: ['attendance:self', 'walkie:use', 'profile:view', 'chat:read', 'chat:write'],
+        },
+        nowIso
+      );
       await this.upsertSetting('migration_rbac_walkie_v38', 'done');
+    }
+
+    const migratedScheduleV41 = await this.queryOne<{ value: string }>(
+      "SELECT value FROM settings WHERE key = 'migration_rbac_schedule_v41'"
+    );
+    if (!migratedScheduleV41?.value) {
+      await this.mergeRolePolicyPermissions(
+        {
+          owner: ['schedule:read', 'schedule:manage', 'schedule:swap_request'],
+          manager: ['schedule:read', 'schedule:manage', 'schedule:swap_request'],
+          supervisor: ['schedule:read', 'schedule:manage', 'schedule:swap_request'],
+          cashier: ['schedule:read', 'schedule:swap_request'],
+          hall: ['schedule:read'],
+          cctv: ['schedule:read'],
+          security: ['schedule:read'],
+          warehouse: ['schedule:read'],
+          delivery: ['schedule:read'],
+        },
+        nowIso
+      );
+      await this.upsertSetting('migration_rbac_schedule_v41', 'done');
     }
   }
 
@@ -1491,6 +1709,219 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return newId;
   }
 
+  private parseScheduleSettingsFromMap(settings: Record<string, string>): ScheduleSettings {
+    const rawReqMgr = String(settings.dayoff_swap_requires_manager_approval ?? '')
+      .trim()
+      .toLowerCase();
+    const swapRequiresManagerApproval = rawReqMgr === 'true' || rawReqMgr === '1';
+
+    const parseMin = (raw: string | undefined, fallback: number): number => {
+      if (raw === undefined || raw === null || String(raw).trim() === '') return fallback;
+      const n = Number(normalizeDigits(String(raw)).trim());
+      if (!Number.isFinite(n) || n < 0) return fallback;
+      return Math.floor(n);
+    };
+
+    return {
+      swapRequiresManagerApproval,
+      minOnDuty: {
+        cashiers: parseMin(settings.dayoff_min_onduty_cashiers, 2),
+        hall: parseMin(settings.dayoff_min_onduty_hall, 2),
+        security_cctv: parseMin(settings.dayoff_min_onduty_security_cctv, 1),
+      },
+    };
+  }
+
+  async getScheduleSettings(settingsMap?: Record<string, string>): Promise<ScheduleSettings> {
+    const map = settingsMap || (await this.getSettingsMap());
+    return this.parseScheduleSettingsFromMap(map);
+  }
+
+  private resolveEmployeeFromList(auth: AuthContext | null, activeEmployees: any[]): any | null {
+    if (!auth?.user || auth.user.role === 'kiosk') return null;
+    const directEmpId = String(auth.user.employee_id || '').trim();
+    if (directEmpId) {
+      const byId = activeEmployees.find((e) => e.id === directEmpId);
+      if (byId) return byId;
+    }
+    const cleanName = String(auth.user.display_name || '').trim();
+    if (!cleanName) return null;
+    const exact = activeEmployees.find((e) => String(e.name || '').trim() === cleanName);
+    if (exact) return exact;
+    const lowerTarget = cleanName.toLowerCase();
+    return (
+      activeEmployees.find((e) => String(e.name || '').trim().toLowerCase() === lowerTarget) ||
+      null
+    );
+  }
+
+  async resolveEmployeeForAuth(auth: AuthContext | null): Promise<any | null> {
+    if (!auth?.user || auth.user.role === 'kiosk') return null;
+    const directEmpId = String(auth.user.employee_id || '').trim();
+    if (directEmpId) {
+      const emp = await this.queryOne<any>(
+        'SELECT * FROM employees WHERE id = ? AND is_active = 1 LIMIT 1',
+        [directEmpId]
+      );
+      if (emp) return emp;
+    }
+    const cleanName = String(auth.user.display_name || '').trim();
+    if (!cleanName) return null;
+    const exactMatch = await this.queryOne<any>(
+      'SELECT * FROM employees WHERE is_active = 1 AND name = ? LIMIT 1',
+      [cleanName]
+    );
+    if (exactMatch) return exactMatch;
+    const allActive = await this.queryAll<any>('SELECT * FROM employees WHERE is_active = 1');
+    return this.resolveEmployeeFromList(auth, allActive);
+  }
+
+  async resolveTeamGroupForAuth(
+    auth: AuthContext | null,
+    defaultsMap?: Map<string, any>
+  ): Promise<ScheduleTeamGroup> {
+    if (!auth?.user) return 'hall';
+    const emp = await this.resolveEmployeeForAuth(auth);
+    if (emp) {
+      let defaultRow: any = defaultsMap ? defaultsMap.get(emp.id) : undefined;
+      if (defaultRow === undefined && !defaultsMap) {
+        defaultRow = await this.queryOne<any>(
+          'SELECT team_group FROM employee_dayoff_defaults WHERE employee_id = ? LIMIT 1',
+          [emp.id]
+        );
+      }
+      const explicitGroup =
+        typeof defaultRow === 'string' ? defaultRow : defaultRow?.team_group;
+      if (isScheduleTeamGroup(explicitGroup)) {
+        return explicitGroup;
+      }
+      return inferScheduleTeam(emp);
+    }
+    return inferScheduleTeam({ role: auth.user.role });
+  }
+
+  private enrichEmployeeScheduleDayOff(
+    emp: any,
+    defaultRow: any,
+    overrideRow: any
+  ): {
+    team_group: ScheduleTeamGroup;
+    default_day_of_week: ScheduleWeekday | null;
+    effective_day_of_week: ScheduleWeekday | null;
+    is_override: boolean;
+    override_source: string | null;
+    swap_request_id: string | null;
+  } {
+    const teamGroup: ScheduleTeamGroup = isScheduleTeamGroup(overrideRow?.team_group)
+      ? overrideRow.team_group
+      : isScheduleTeamGroup(defaultRow?.team_group)
+      ? defaultRow.team_group
+      : inferScheduleTeam(emp);
+
+    const defaultDay: ScheduleWeekday | null = isScheduleWeekday(defaultRow?.day_of_week)
+      ? defaultRow.day_of_week
+      : null;
+
+    const hasValidOverride = Boolean(overrideRow && isScheduleWeekday(overrideRow.day_of_week));
+    const effectiveDay: ScheduleWeekday | null = hasValidOverride
+      ? (overrideRow.day_of_week as ScheduleWeekday)
+      : defaultDay;
+
+    const isOverride = Boolean(
+      hasValidOverride &&
+        (overrideRow.source !== 'revert' || overrideRow.day_of_week !== defaultDay)
+    );
+
+    return {
+      team_group: teamGroup,
+      default_day_of_week: defaultDay,
+      effective_day_of_week: effectiveDay,
+      is_override: isOverride,
+      override_source: hasValidOverride ? String(overrideRow.source || 'manual') : null,
+      swap_request_id:
+        hasValidOverride && overrideRow.swap_request_id
+          ? String(overrideRow.swap_request_id)
+          : null,
+    };
+  }
+
+  async getEffectiveWeekSchedule(
+    weekStartSaturday: string,
+    options?: { includeInactiveWithOverrides?: boolean }
+  ): Promise<EffectiveScheduleEmployee[]> {
+    const weekStart = getSaturdayWeekStart(weekStartSaturday);
+    let activeEmployees: any[] = [];
+    let defaultRows: any[] = [];
+    let overrideRows: any[] = [];
+
+    if (this.useSupabaseRpc) {
+      try {
+        const batchResults = await execSupabaseRpcBatch([
+          {
+            sql: 'SELECT * FROM employees WHERE is_active = 1 ORDER BY department, emp_code, name',
+          },
+          { sql: 'SELECT * FROM employee_dayoff_defaults' },
+          {
+            sql: 'SELECT * FROM weekly_dayoff_overrides WHERE week_start_date = ?',
+            params: [weekStart],
+          },
+        ]);
+        this.storageMode = 'supabase_postgres';
+        activeEmployees = batchResults[0]?.rows || [];
+        defaultRows = batchResults[1]?.rows || [];
+        overrideRows = batchResults[2]?.rows || [];
+      } catch (err) {
+        if (this.isServerless || !this.sqliteDb) throw err;
+        this.storageMode = 'sqlite_local';
+      }
+    }
+
+    if (!this.useSupabaseRpc || this.storageMode === 'sqlite_local') {
+      [activeEmployees, defaultRows, overrideRows] = await Promise.all([
+        this.queryAll<any>(
+          'SELECT * FROM employees WHERE is_active = 1 ORDER BY department, emp_code, name'
+        ),
+        this.queryAll<any>('SELECT * FROM employee_dayoff_defaults'),
+        this.queryAll<any>(
+          'SELECT * FROM weekly_dayoff_overrides WHERE week_start_date = ?',
+          [weekStart]
+        ),
+      ]);
+    }
+
+    let combinedEmployees = activeEmployees;
+    if (options?.includeInactiveWithOverrides && overrideRows.length > 0) {
+      const activeIds = new Set(activeEmployees.map((e) => e.id));
+      const missingIds = Array.from(
+        new Set(
+          overrideRows
+            .map((o) => String(o.employee_id || ''))
+            .filter((id) => id && !activeIds.has(id))
+        )
+      );
+      if (missingIds.length > 0) {
+        const placeholders = missingIds.map(() => '?').join(', ');
+        const inactiveRows = await this.queryAll<any>(
+          `SELECT * FROM employees WHERE id IN (${placeholders}) ORDER BY department, emp_code, name`,
+          missingIds
+        );
+        combinedEmployees = [...activeEmployees, ...inactiveRows];
+      }
+    }
+
+    const defaultsByEmp = new Map<string, any>(defaultRows.map((d) => [d.employee_id, d]));
+    const overridesByEmp = new Map<string, any>(overrideRows.map((o) => [o.employee_id, o]));
+
+    return combinedEmployees.map((emp) => ({
+      ...emp,
+      ...this.enrichEmployeeScheduleDayOff(
+        emp,
+        defaultsByEmp.get(emp.id),
+        overridesByEmp.get(emp.id)
+      ),
+    }));
+  }
+
   async buildBootstrapData(
     dateKey: string | undefined,
     auth: AuthContext | null,
@@ -1499,6 +1930,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     const targetDate = dateKey || getLocalDateKey();
     const prevDate = getPreviousDateKey(targetDate);
     const todayKey = getLocalDateKey();
+    const weekStartDate = getSaturdayWeekStart(targetDate);
+    const todayWeekday = getWeekdayCodeFromDateKey(targetDate);
     const isInternalSnap = !auth;
 
     const canAttendance =
@@ -1536,6 +1969,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       isInternalSnap || auth!.has('handover:manage') || auth!.has('reports:view');
 
     const canChat = isInternalSnap || auth!.has('chat:read') || auth!.has('chat:write');
+    const canScheduleRead =
+      isInternalSnap ||
+      auth!.has('schedule:read') ||
+      auth!.has('schedule:manage') ||
+      auth!.has('schedule:swap_request');
+    const canScheduleManage = isInternalSnap || auth!.has('schedule:manage');
+    const canScheduleSwap =
+      isInternalSnap || auth!.has('schedule:swap_request') || auth!.has('schedule:manage');
     const canSeeSupplierDirectory = Boolean(
       canTrucks || (auth && auth.has('shortages:manage'))
     );
@@ -1554,6 +1995,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     let notes: any[] = [];
     let teamMessages: any[] = [];
     let rawHandovers: any[] = [];
+    let dayoffDefaults: any[] = [];
+    let dayoffOverrides: any[] = [];
+    let rawPendingSwaps: any[] = [];
 
     if (this.useSupabaseRpc) {
       try {
@@ -1606,6 +2050,16 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           {
             sql: 'SELECT * FROM shift_handovers ORDER BY timestamp DESC LIMIT 40',
           },
+          {
+            sql: 'SELECT * FROM employee_dayoff_defaults',
+          },
+          {
+            sql: 'SELECT * FROM weekly_dayoff_overrides WHERE week_start_date = ?',
+            params: [weekStartDate],
+          },
+          {
+            sql: "SELECT * FROM dayoff_swap_requests WHERE status IN ('pending_requester', 'pending_peer', 'pending_manager') ORDER BY created_at DESC",
+          },
         ]);
 
         this.storageMode = 'supabase_postgres';
@@ -1614,7 +2068,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         if (settings.session_hmac_secret) {
           this.cachedSessionSecret = settings.session_hmac_secret;
         }
-        employees = canAttendance ? batchResults[1]?.rows || [] : [];
+        employees = canAttendance || canScheduleRead ? batchResults[1]?.rows || [] : [];
         directLogs = canAttendance ? batchResults[2]?.rows || [] : [];
         prevShiftLogs = canAttendance ? batchResults[3]?.rows || [] : [];
         activeSysUsersAll = batchResults[4]?.rows || [];
@@ -1625,6 +2079,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         notes = canNotes ? batchResults[9]?.rows || [] : [];
         teamMessages = canChat ? batchResults[10]?.rows || [] : [];
         rawHandovers = canHandover ? batchResults[11]?.rows || [] : [];
+        dayoffDefaults = canAttendance || canScheduleRead ? batchResults[12]?.rows || [] : [];
+        dayoffOverrides = canAttendance || canScheduleRead ? batchResults[13]?.rows || [] : [];
+        rawPendingSwaps = canScheduleRead ? batchResults[14]?.rows || [] : [];
       } catch (err) {
         if (this.isServerless) throw err;
         this.storageMode = 'sqlite_local';
@@ -1645,9 +2102,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         notesRes,
         teamMessagesRes,
         rawHandoversRes,
+        dayoffDefaultsRes,
+        dayoffOverridesRes,
+        rawPendingSwapsRes,
       ] = await Promise.all([
         this.getSettingsMap(),
-        canAttendance
+        canAttendance || canScheduleRead
           ? this.queryAll<any>(
               'SELECT * FROM employees WHERE is_active = 1 ORDER BY department, emp_code, name'
             )
@@ -1710,6 +2170,20 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         canHandover
           ? this.queryAll<any>('SELECT * FROM shift_handovers ORDER BY timestamp DESC LIMIT 40')
           : Promise.resolve([]),
+        canAttendance || canScheduleRead
+          ? this.queryAll<any>('SELECT * FROM employee_dayoff_defaults')
+          : Promise.resolve([]),
+        canAttendance || canScheduleRead
+          ? this.queryAll<any>(
+              'SELECT * FROM weekly_dayoff_overrides WHERE week_start_date = ?',
+              [weekStartDate]
+            )
+          : Promise.resolve([]),
+        canScheduleRead
+          ? this.queryAll<any>(
+              "SELECT * FROM dayoff_swap_requests WHERE status IN ('pending_requester', 'pending_peer', 'pending_manager') ORDER BY created_at DESC"
+            )
+          : Promise.resolve([]),
       ]);
 
       settings = settingsRes;
@@ -1724,6 +2198,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       notes = notesRes;
       teamMessages = teamMessagesRes;
       rawHandovers = rawHandoversRes;
+      dayoffDefaults = dayoffDefaultsRes;
+      dayoffOverrides = dayoffOverridesRes;
+      rawPendingSwaps = rawPendingSwapsRes;
     }
 
     let attendanceLogs: any[] = [];
@@ -1779,6 +2256,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     let checkedOutCount = 0;
     let lateCount = 0;
     let unverifiedAttendanceCount = 0;
+    let scheduledOffCount = 0;
+    let scheduledOffAbsentCount = 0;
 
     if (canAttendance) {
       for (const log of attendanceLogs) {
@@ -1798,6 +2277,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    const defaultsByEmpId = new Map<string, any>(dayoffDefaults.map((d) => [d.employee_id, d]));
+    const overridesByEmpId = new Map<string, any>(dayoffOverrides.map((o) => [o.employee_id, o]));
     const defaultMaxBreak = Number(settings.max_break_minutes || 30);
 
     const enrichedEmployees = employees.map((emp) => {
@@ -1824,6 +2305,28 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           currentStatus = 'checked_out';
           checkedOutCount += 1;
         }
+      }
+
+      const linkedInfo = linkedUsersByEmpId.get(emp.id);
+      const scheduleInfo = this.enrichEmployeeScheduleDayOff(
+        linkedInfo?.role ? { ...emp, system_role: linkedInfo.role } : emp,
+        defaultsByEmpId.get(emp.id),
+        overridesByEmpId.get(emp.id)
+      );
+      const isScheduledOff = Boolean(
+        scheduleInfo.effective_day_of_week && scheduleInfo.effective_day_of_week === todayWeekday
+      );
+      const hasCheckInLogOnTargetDate = allEmpLogs.some(
+        (l) =>
+          l.action_type === 'check_in' &&
+          (l.date_key === targetDate || l.shift_date_key === targetDate)
+      );
+      const workedOnDayOff = Boolean(isScheduledOff && hasCheckInLogOnTargetDate);
+      if (isScheduledOff && !workedOnDayOff) {
+        scheduledOffCount += 1;
+      }
+      if (currentStatus === 'absent' && isScheduledOff) {
+        scheduledOffAbsentCount += 1;
       }
 
       const lateMinutes = firstCheckIn ? Number(firstCheckIn.late_minutes || 0) : 0;
@@ -1909,10 +2412,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
               ? Number(latestLog.allowed_break_minutes) || defaultMaxBreak
               : defaultMaxBreak,
           nextCheckInAvailability,
+          scheduleTeamGroup: scheduleInfo.team_group,
+          defaultDayOff: scheduleInfo.default_day_of_week,
+          effectiveDayOff: scheduleInfo.effective_day_of_week,
+          isScheduledOff,
+          workedOnDayOff,
         };
       }
 
-      const linkedInfo = linkedUsersByEmpId.get(emp.id);
       const resolvedSystemRole =
         linkedInfo?.role ||
         emp.system_role ||
@@ -1955,6 +2462,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         breaksCount: breakStarts.length,
         lateMinutes,
         todayLogsCount: empLogs.length,
+        scheduleTeamGroup: scheduleInfo.team_group,
+        defaultDayOff: scheduleInfo.default_day_of_week,
+        effectiveDayOff: scheduleInfo.effective_day_of_week,
+        isScheduledOff,
+        workedOnDayOff,
       };
     });
 
@@ -1964,7 +2476,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       !canReadAttendanceLogs &&
       !canTrucks &&
       !canShortages &&
-      !canNotes;
+      !canNotes &&
+      !canScheduleRead;
 
     if (isKioskOnly) {
       return {
@@ -1993,12 +2506,17 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         teamMessages: [],
         myProfile: null,
         pendingHandover: null,
+        dayOffSchedule: null,
+        pendingDayOffSwaps: [],
         summary: {
           totalEmployees: employees.length,
           presentCount,
           onBreakCount,
           checkedOutCount,
           absentCount: 0,
+          scheduledOffCount: 0,
+          pendingDayOffSwapsCount: 0,
+          totalPendingSwapsCount: 0,
           lateCount: 0,
           unverifiedAttendanceCount: 0,
           unloadingTrucksCount: 0,
@@ -2165,6 +2683,90 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
 
     const canManageSettings = auth?.has('settings:manage');
+    const scheduleSettings = this.parseScheduleSettingsFromMap(settings);
+    const myEmployee = auth?.user ? this.resolveEmployeeFromList(auth, employees) : null;
+    const myEmployeeId = myEmployee?.id || '';
+    const enrichedMyEmp = myEmployeeId
+      ? enrichedEmployees.find((e) => e.id === myEmployeeId)
+      : null;
+    const userTeamGroup: ScheduleTeamGroup = enrichedMyEmp?.scheduleTeamGroup
+      ? enrichedMyEmp.scheduleTeamGroup
+      : myEmployee
+      ? inferScheduleTeam(myEmployee)
+      : inferScheduleTeam({ role: auth?.user?.role || '' });
+
+    let pendingDayOffSwaps: any[] = [];
+    if (canScheduleRead && rawPendingSwaps.length > 0) {
+      const visibleSwaps = canScheduleManage
+        ? rawPendingSwaps
+        : myEmployeeId
+        ? rawPendingSwaps.filter(
+            (s) =>
+              s.requester_employee_id === myEmployeeId ||
+              s.target_employee_id === myEmployeeId
+          )
+        : [];
+
+      if (visibleSwaps.length > 0) {
+        const empNameById = new Map<string, string>(employees.map((e) => [e.id, e.name]));
+        const missingSwapEmpIds = Array.from(
+          new Set(
+            visibleSwaps
+              .flatMap((s) => [s.requester_employee_id, s.target_employee_id])
+              .filter((id) => id && !empNameById.has(id))
+          )
+        );
+        if (missingSwapEmpIds.length > 0) {
+          const placeholders = missingSwapEmpIds.map(() => '?').join(', ');
+          const extraEmps = await this.queryAll<{ id: string; name: string }>(
+            `SELECT id, name FROM employees WHERE id IN (${placeholders})`,
+            missingSwapEmpIds
+          );
+          for (const e of extraEmps) {
+            empNameById.set(e.id, e.name);
+          }
+        }
+
+        pendingDayOffSwaps = visibleSwaps.map((s) => {
+          let awaitingMyAction = false;
+          if (!isInternalSnap) {
+            if (
+              s.status === 'pending_requester' &&
+              myEmployeeId &&
+              s.requester_employee_id === myEmployeeId &&
+              Number(s.requester_approved) === 0 &&
+              canScheduleSwap
+            ) {
+              awaitingMyAction = true;
+            } else if (
+              s.status === 'pending_peer' &&
+              myEmployeeId &&
+              s.target_employee_id === myEmployeeId &&
+              Number(s.target_approved) === 0 &&
+              canScheduleSwap
+            ) {
+              awaitingMyAction = true;
+            } else if (
+              s.status === 'pending_manager' &&
+              canScheduleManage &&
+              Number(s.manager_approved) === 0
+            ) {
+              awaitingMyAction = true;
+            }
+          }
+          return {
+            ...s,
+            requester_name: empNameById.get(s.requester_employee_id) || '',
+            target_name: s.target_employee_id
+              ? empNameById.get(s.target_employee_id) || ''
+              : '',
+            awaiting_my_action: awaitingMyAction,
+          };
+        });
+      }
+    }
+
+    const pendingDayOffSwapsCount = pendingDayOffSwaps.filter((s) => s.awaiting_my_action).length;
 
     // Never trigger legacy client rehydration when connected to authoritative Supabase PostgreSQL!
     const serverColdEmpty = false;
@@ -2202,7 +2804,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
             ? new Date().toISOString()
             : settings.last_cloud_sync || '',
       },
-      employees: enrichedEmployees,
+      employees: canAttendance ? enrichedEmployees : [],
       attendanceLogs: canReadAttendanceLogs ? attendanceLogs : [],
       suppliers: canTrucks ? suppliers : canSeeSupplierDirectory ? suppliers : [],
       truckLogs,
@@ -2213,14 +2815,36 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       teamMessages,
       pendingHandover,
       roleColleagues,
+      dayOffSchedule: canScheduleRead
+        ? {
+            weekStartDate,
+            todayWeekday,
+            userTeamGroup,
+            myEmployeeId,
+            canManage: canScheduleManage,
+            canSwap: canScheduleSwap,
+            settings: scheduleSettings,
+          }
+        : null,
+      pendingDayOffSwaps,
       summary: {
         totalEmployees: canAttendance ? employees.length : 0,
         presentCount: canAttendance ? presentCount : 0,
         onBreakCount: canAttendance ? onBreakCount : 0,
         checkedOutCount: canAttendance ? checkedOutCount : 0,
         absentCount: canAttendance
-          ? Math.max(0, employees.length - presentCount - onBreakCount - checkedOutCount)
+          ? Math.max(
+              0,
+              employees.length -
+                presentCount -
+                onBreakCount -
+                checkedOutCount -
+                scheduledOffAbsentCount
+            )
           : 0,
+        scheduledOffCount: canAttendance ? scheduledOffCount : 0,
+        pendingDayOffSwapsCount,
+        totalPendingSwapsCount: pendingDayOffSwaps.length,
         lateCount: canReadAttendanceLogs ? lateCount : 0,
         unverifiedAttendanceCount: canReadAttendanceLogs ? unverifiedAttendanceCount : 0,
         unloadingTrucksCount: canTrucks ? unloadingTrucksCount : 0,
@@ -2256,6 +2880,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       'system_users',
       'role_policies',
       'employees',
+      'employee_dayoff_defaults',
+      'weekly_dayoff_overrides',
+      'dayoff_swap_requests',
       'attendance_logs',
       'suppliers',
       'truck_logs',
@@ -2286,17 +2913,21 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       tableName: string,
       pk: string,
       rows: any[],
-      columns: string[]
+      columns: string[],
+      conflictColumns: string[] = [pk]
     ) => {
       if (!Array.isArray(rows) || rows.length === 0) return;
+      const conflictSet = new Set(conflictColumns);
       const placeholders = columns.map(() => '?').join(', ');
       const updateSet = columns
-        .filter((c) => c !== pk)
+        .filter((c) => c !== pk && !conflictSet.has(c))
         .map((c) => `${c} = EXCLUDED.${c}`)
         .join(', ');
-      const sql = `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders}) ON CONFLICT (${pk}) DO UPDATE SET ${updateSet}`;
+      const sql = `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders}) ON CONFLICT (${conflictColumns.join(', ')}) DO UPDATE SET ${updateSet}`;
       for (const row of rows) {
-        if (!row || row[pk] === undefined) continue;
+        if (!row || row[pk] === undefined || conflictColumns.some((c) => row[c] === undefined)) {
+          continue;
+        }
         const vals = columns.map((c) => (row[c] !== undefined ? row[c] : null));
         await this.execute(sql, vals);
       }
@@ -2431,6 +3062,54 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         'timestamp',
         'date_key',
         'synced',
+      ]);
+      await upsertRows('employee_dayoff_defaults', 'employee_id', tables.employee_dayoff_defaults, [
+        'employee_id',
+        'team_group',
+        'day_of_week',
+        'updated_by',
+        'updated_at',
+      ]);
+      await upsertRows(
+        'weekly_dayoff_overrides',
+        'id',
+        tables.weekly_dayoff_overrides,
+        [
+          'id',
+          'week_start_date',
+          'employee_id',
+          'team_group',
+          'day_of_week',
+          'source',
+          'swap_request_id',
+          'updated_by',
+          'updated_at',
+        ],
+        ['week_start_date', 'employee_id']
+      );
+      await upsertRows('dayoff_swap_requests', 'id', tables.dayoff_swap_requests, [
+        'id',
+        'request_type',
+        'scope',
+        'week_start_date',
+        'team_group',
+        'requester_employee_id',
+        'requester_from_day',
+        'target_employee_id',
+        'target_from_day',
+        'reason',
+        'requester_approved',
+        'requester_approved_at',
+        'target_approved',
+        'target_approved_at',
+        'manager_approved',
+        'manager_approved_by',
+        'manager_approved_at',
+        'status',
+        'rejection_reason',
+        'created_by_user_id',
+        'created_at',
+        'updated_at',
       ]);
     });
 

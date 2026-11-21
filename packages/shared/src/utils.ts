@@ -203,3 +203,119 @@ export function evaluateNextCheckInAvailability(params: {
   };
 }
 
+export type ScheduleWeekday = 'sat' | 'sun' | 'mon' | 'tue' | 'wed' | 'thu' | 'fri';
+
+export interface ScheduleWeekdayMeta {
+  code: ScheduleWeekday;
+  label: string;
+  shortLabel: string;
+  index: number;
+}
+
+export const SCHEDULE_WEEKDAYS: ReadonlyArray<ScheduleWeekdayMeta> = [
+  { code: 'sat', label: 'السبت', shortLabel: 'سبت', index: 0 },
+  { code: 'sun', label: 'الأحد', shortLabel: 'أحد', index: 1 },
+  { code: 'mon', label: 'الاثنين', shortLabel: 'اثنين', index: 2 },
+  { code: 'tue', label: 'الثلاثاء', shortLabel: 'ثلاثاء', index: 3 },
+  { code: 'wed', label: 'الأربعاء', shortLabel: 'أربعاء', index: 4 },
+  { code: 'thu', label: 'الخميس', shortLabel: 'خميس', index: 5 },
+  { code: 'fri', label: 'الجمعة', shortLabel: 'جمعة', index: 6 },
+];
+
+const UTC_DAY_TO_SCHEDULE_WEEKDAY: Record<number, ScheduleWeekday> = {
+  6: 'sat',
+  0: 'sun',
+  1: 'mon',
+  2: 'tue',
+  3: 'wed',
+  4: 'thu',
+  5: 'fri',
+};
+
+export function isScheduleWeekday(val: unknown): val is ScheduleWeekday {
+  return typeof val === 'string' && SCHEDULE_WEEKDAYS.some((d) => d.code === val);
+}
+
+export function getScheduleWeekdayLabel(code: string): string {
+  return SCHEDULE_WEEKDAYS.find((d) => d.code === code)?.label || String(code || '');
+}
+
+/**
+ * Returns the YYYY-MM-DD calendar date in Africa/Cairo timezone so server (UTC)
+ * and Egyptian branch clients agree on the active day.
+ */
+export function getCairoDateKey(date: Date = new Date()): string {
+  try {
+    const formatted = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Cairo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(formatted)) {
+      return formatted;
+    }
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Africa/Cairo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const y = parts.find((p) => p.type === 'year')?.value;
+    const m = parts.find((p) => p.type === 'month')?.value;
+    const d = parts.find((p) => p.type === 'day')?.value;
+    if (y && m && d) return `${y}-${m}-${d}`;
+  } catch {
+    // fallback below
+  }
+  return getLocalDateKey(date);
+}
+
+function resolveDateKeyOrCairoToday(dateKey?: string): string {
+  const clean = typeof dateKey === 'string' ? dateKey.trim() : '';
+  return /^\d{4}-\d{2}-\d{2}$/.test(clean) ? clean : getCairoDateKey();
+}
+
+export function getWeekdayCodeFromDateKey(dateKey: string): ScheduleWeekday {
+  const clean = resolveDateKeyOrCairoToday(dateKey);
+  const [y, m, d] = clean.split('-').map(Number);
+  const utcDay = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return UTC_DAY_TO_SCHEDULE_WEEKDAY[utcDay] || 'sat';
+}
+
+export function addDaysToDateKey(dateKey: string, deltaDays: number): string {
+  const clean = resolveDateKeyOrCairoToday(dateKey);
+  const [y, m, d] = clean.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + Math.trunc(deltaDays || 0)));
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getUTCDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+export function getSaturdayWeekStart(dateKey?: string): string {
+  const clean = resolveDateKeyOrCairoToday(dateKey);
+  const [y, m, d] = clean.split('-').map(Number);
+  const utcDay = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  const daysSinceSaturday = (utcDay + 1) % 7;
+  return addDaysToDateKey(clean, -daysSinceSaturday);
+}
+
+export function shiftWeekStart(weekStartSaturday: string, deltaWeeks: number): string {
+  const canonicalSat = getSaturdayWeekStart(weekStartSaturday);
+  return addDaysToDateKey(canonicalSat, Math.trunc(deltaWeeks || 0) * 7);
+}
+
+export function getWeekDateKeys(weekStartSaturday: string): Record<ScheduleWeekday, string> {
+  const sat = getSaturdayWeekStart(weekStartSaturday);
+  return {
+    sat,
+    sun: addDaysToDateKey(sat, 1),
+    mon: addDaysToDateKey(sat, 2),
+    tue: addDaysToDateKey(sat, 3),
+    wed: addDaysToDateKey(sat, 4),
+    thu: addDaysToDateKey(sat, 5),
+    fri: addDaysToDateKey(sat, 6),
+  };
+}
+

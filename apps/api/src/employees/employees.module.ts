@@ -341,10 +341,21 @@ export class EmployeesController {
         id,
       ]);
       const nowIso = new Date().toISOString();
-      await this.db.execute(
-        'UPDATE employees SET is_active = 0, updated_at = ? WHERE id = ?',
-        [nowIso, id]
-      );
+      await this.db.executeBatch([
+        {
+          sql: 'UPDATE employees SET is_active = 0, updated_at = ? WHERE id = ?',
+          params: [nowIso, id],
+        },
+        {
+          sql: `UPDATE dayoff_swap_requests
+                SET status = 'cancelled',
+                    rejection_reason = 'تم تعطيل حساب الموظف',
+                    updated_at = ?
+                WHERE status IN ('pending_requester', 'pending_peer', 'pending_manager')
+                  AND (requester_employee_id = ? OR target_employee_id = ?)`,
+          params: [nowIso, id, id],
+        },
+      ]);
       if (existing) {
         await this.db.syncEmployeeLoginAccount({ ...existing, is_active: 0 });
       }

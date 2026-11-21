@@ -78,10 +78,11 @@ function ensureStoreSyncChannel() {
     },
   });
 
-  ch.on('broadcast', { event: 'db_change' }, ({ payload }) => {
+  ch.on('broadcast', { event: 'db_change' }, (msg) => {
+    const payload = msg?.payload || { reason: 'cloud_change' };
     for (const listener of storeSyncListeners) {
       try {
-        listener(payload || { reason: 'cloud_change' });
+        listener(payload);
       } catch {
         // ignore
       }

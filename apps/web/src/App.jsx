@@ -6,6 +6,7 @@ import QrQuickModal from './components/QrQuickModal.jsx';
 import AttendanceView from './components/AttendanceView.jsx';
 import TrucksView from './components/TrucksView.jsx';
 import ShortagesView from './components/ShortagesView.jsx';
+import ScheduleView from './components/ScheduleView.jsx';
 import CctvNotesView from './components/CctvNotesView.jsx';
 import TeamChatView from './components/TeamChatView.jsx';
 import AdminDashboard from './components/AdminDashboard.jsx';
@@ -37,6 +38,7 @@ import {
   setLiteModeEnabled,
 } from './lib/api.js';
 import { subscribeSyncState } from './lib/localDb.js';
+import { playSuccessChime } from './lib/audio.js';
 import { subscribeGlobalStoreSync } from './lib/supabaseRealtime.js';
 import { emitWalkieSseEvent, useWalkieTalkie } from './lib/useWalkieTalkie.js';
 
@@ -63,6 +65,11 @@ function getPreferredAllowedTab(role, perms = []) {
   ]);
   const canTrk = hasAnyPermission(perms, role, ['trucks:read', 'trucks:write']);
   const canNot = hasAnyPermission(perms, role, ['notes:read', 'notes:write']);
+  const canSched = hasAnyPermission(perms, role, [
+    'schedule:read',
+    'schedule:manage',
+    'schedule:swap_request',
+  ]);
   const canDash = hasAnyPermission(perms, role, [
     'reports:view',
     'staff:manage',
@@ -77,6 +84,7 @@ function getPreferredAllowedTab(role, perms = []) {
   if (role === 'hall' && canSht) return 'shortages';
   if (canAtt) return 'attendance';
   if (canSht) return 'shortages';
+  if (canSched) return 'schedule';
   if (canTrk) return 'trucks';
   if (canNot) return 'notes';
   if (canDash) return 'dashboard';
@@ -90,7 +98,11 @@ export default function App() {
   const [activeTab, setActiveTab] = useState(() => {
     if (typeof window !== 'undefined') {
       const requestedTab = new URLSearchParams(window.location.search).get('tab');
-      if (['attendance', 'shortages', 'trucks', 'notes', 'chat', 'dashboard'].includes(requestedTab)) {
+      if (
+        ['attendance', 'shortages', 'schedule', 'trucks', 'notes', 'chat', 'dashboard'].includes(
+          requestedTab
+        )
+      ) {
         return requestedTab;
       }
     }
@@ -127,6 +139,13 @@ export default function App() {
   const [personLogTarget, setPersonLogTarget] = useState(null);
   const [dashboardSubTab, setDashboardSubTab] = useState(null);
   const [attendanceFilterRequest, setAttendanceFilterRequest] = useState(null);
+  const latestRealtimeMetaRef = useRef({
+    role: '',
+    myEmployeeId: '',
+    canSchedule: false,
+    canManageSchedule: false,
+  });
+  const seenSwapNotifRef = useRef(new Map());
 
   const showToast = useCallback((message, type = 'success') => {
     setToast({ message, type });
@@ -221,8 +240,44 @@ export default function App() {
         es = new EventSource(
           resolveApiUrl(`/api/events?token=${encodeURIComponent(authSession.token)}`)
         );
-        es.addEventListener('update', () => {
+        es.addEventListener('update', (ev) => {
+          try {
+            const payload = ev?.data ? JSON.parse(ev.data) : {};
+            if (
+              payload?.reason === 'day_off_schedule' ||
+              payload?.reason === 'day_off_swap' ||
+              payload?.reason === 'day_off_settings'
+            ) {
+              window.dispatchEvent(
+                new CustomEvent('zayed:schedule-updated', { detail: payload })
+              );
+            }
+          } catch {
+            // ignore malformed update event data
+          }
           loadData();
+        });
+        es.addEventListener('day_off_swap', (ev) => {
+          try {
+            const payload = JSON.parse(ev.data || '{}');
+            const meta = latestRealtimeMetaRef.current;
+            if (meta.role === 'kiosk' || !meta.canSchedule) return;
+            window.dispatchEvent(new CustomEvent('zayed:schedule-updated', { detail: payload }));
+            loadData();
+            const hasMeta = Boolean(payload?.requestId || payload?.action || payload?.status);
+            const dedupeKey = hasMeta
+              ? `${payload?.requestId || ''}:${payload?.action || ''}:${payload?.status || ''}`
+              : '';
+            const nowMs = Date.now();
+            const lastSeen = dedupeKey ? seenSwapNotifRef.current.get(dedupeKey) || 0 : 0;
+            if (!dedupeKey || nowMs - lastSeen > 4000) {
+              if (dedupeKey) seenSwapNotifRef.current.set(dedupeKey, nowMs);
+              playSuccessChime('alert');
+              showToast(payload?.message || 'يوجد تحديث جديد في طلبات تبديل الإجازات');
+            }
+          } catch {
+            // ignore
+          }
         });
         es.addEventListener('walkie_tx', (ev) => {
           try {
@@ -266,7 +321,41 @@ export default function App() {
 
     // Global Multi-Network Cloud Realtime Sync (< 100ms across 4G/5G/Wi-Fi anywhere)
     let cloudSyncDebounce = null;
-    const unsubscribeGlobalCloudSync = subscribeGlobalStoreSync(() => {
+    const unsubscribeGlobalCloudSync = subscribeGlobalStoreSync((payload) => {
+      if (
+        payload?.reason === 'day_off_swap' ||
+        payload?.reason === 'day_off_schedule' ||
+        payload?.reason === 'day_off_settings'
+      ) {
+        const meta = latestRealtimeMetaRef.current;
+        if (meta.role !== 'kiosk' && meta.canSchedule) {
+          window.dispatchEvent(
+            new CustomEvent('zayed:schedule-updated', { detail: payload || {} })
+          );
+          if (payload?.reason === 'day_off_swap') {
+            const targetIds = Array.isArray(payload?.targetEmployeeIds)
+              ? payload.targetEmployeeIds
+              : [];
+            const isTargetedEmp = Boolean(
+              meta.myEmployeeId && targetIds.includes(meta.myEmployeeId)
+            );
+            const isTargetedMgr = Boolean(payload?.notifyManagers && meta.canManageSchedule);
+            if (isTargetedEmp || isTargetedMgr) {
+              const hasMeta = Boolean(payload?.requestId || payload?.action || payload?.status);
+              const dedupeKey = hasMeta
+                ? `${payload?.requestId || ''}:${payload?.action || ''}:${payload?.status || ''}`
+                : '';
+              const nowMs = Date.now();
+              const lastSeen = dedupeKey ? seenSwapNotifRef.current.get(dedupeKey) || 0 : 0;
+              if (!dedupeKey || nowMs - lastSeen > 4000) {
+                if (dedupeKey) seenSwapNotifRef.current.set(dedupeKey, nowMs);
+                playSuccessChime('alert');
+                showToast(payload?.message || 'يوجد تحديث جديد في طلبات تبديل الإجازات');
+              }
+            }
+          }
+        }
+      }
       if (cloudSyncDebounce) clearTimeout(cloudSyncDebounce);
       cloudSyncDebounce = setTimeout(() => {
         loadData();
@@ -493,6 +582,16 @@ export default function App() {
     'shortages:write',
     'shortages:manage',
   ]);
+  const canSchedule = hasAnyPermission(permissions, role, [
+    'schedule:read',
+    'schedule:manage',
+    'schedule:swap_request',
+  ]);
+  const canManageSchedule = hasPermission(permissions, role, 'schedule:manage');
+  const canSwapSchedule = hasAnyPermission(permissions, role, [
+    'schedule:swap_request',
+    'schedule:manage',
+  ]);
   const canTrucks = hasAnyPermission(permissions, role, ['trucks:read', 'trucks:write']);
   const canNotes = hasAnyPermission(permissions, role, ['notes:read', 'notes:write']);
   const canChat = hasAnyPermission(permissions, role, ['chat:read', 'chat:write']);
@@ -506,12 +605,24 @@ export default function App() {
     'backup:manage',
   ]);
 
+  latestRealtimeMetaRef.current = {
+    role,
+    myEmployeeId:
+      data?.dayOffSchedule?.myEmployeeId ||
+      data?.myProfile?.employee_id ||
+      authUser?.employee_id ||
+      '',
+    canSchedule,
+    canManageSchedule,
+  };
+
   // Strict RBAC tab guard: never allow any role to view an unpermitted tab
   useEffect(() => {
     if (!authSession?.token || role === 'kiosk') return;
     const tabAllowed =
       (activeTab === 'attendance' && canAttendance) ||
       (activeTab === 'shortages' && canShortages) ||
+      (activeTab === 'schedule' && canSchedule) ||
       (activeTab === 'trucks' && canTrucks) ||
       (activeTab === 'notes' && canNotes) ||
       (activeTab === 'chat' && canChat) ||
@@ -527,6 +638,7 @@ export default function App() {
     activeTab,
     canAttendance,
     canShortages,
+    canSchedule,
     canTrucks,
     canNotes,
     canChat,
@@ -667,6 +779,7 @@ export default function App() {
   const permittedTabsCount = [
     canAttendance,
     canShortages,
+    canSchedule,
     canTrucks,
     canNotes,
     canChat,
@@ -810,6 +923,20 @@ export default function App() {
           />
         )}
 
+        {activeTab === 'schedule' && canSchedule && (
+          <ScheduleView
+            authUser={authUser}
+            permissions={permissions}
+            bootstrapData={data}
+            storeName={data?.settings?.store_name || 'زايد مارت'}
+            canManage={canManageSchedule}
+            canSwap={canSwapSchedule}
+            canExport={canExportReports || canManageSchedule}
+            onRefreshBootstrap={loadData}
+            onToast={showToast}
+          />
+        )}
+
         {activeTab === 'trucks' && canTrucks && (
           <TrucksView
             suppliers={data?.suppliers || []}
@@ -904,6 +1031,7 @@ export default function App() {
         canWriteTrucks={canWriteTrucks}
         canWriteNotes={canWriteNotes}
         canHandover={canHandover}
+        canSwapSchedule={canSwapSchedule}
         onOpenQr={() => setQrModalTab('code')}
         onOpenHandover={() => setShowHandoverModal(true)}
         onPrimaryAction={(action) => {
@@ -911,15 +1039,20 @@ export default function App() {
             shortage_add: 'shortages',
             truck_arrive: 'trucks',
             note_add: 'notes',
+            schedule_swap: 'schedule',
           };
           const targetTab = tabMap[action];
           if (targetTab && activeTab !== targetTab) {
             setActiveTab(targetTab);
             setTimeout(() => {
-              window.dispatchEvent(new CustomEvent('zayed:open-composer', { detail: { action } }));
+              window.dispatchEvent(
+                new CustomEvent('zayed:open-composer', { detail: { action, type: action } })
+              );
             }, 60);
           } else if (action) {
-            window.dispatchEvent(new CustomEvent('zayed:open-composer', { detail: { action } }));
+            window.dispatchEvent(
+              new CustomEvent('zayed:open-composer', { detail: { action, type: action } })
+            );
           }
         }}
       />

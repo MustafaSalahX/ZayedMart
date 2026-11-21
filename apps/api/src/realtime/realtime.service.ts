@@ -107,6 +107,57 @@ export class RealtimeService {
     await this.sendSupabaseHttpBroadcast('zayed_ops_sync_v1', 'db_change', payloadObj);
   }
 
+  async broadcastTargetedEvent(
+    eventName: string,
+    payloadObj: Record<string, any>,
+    targets: {
+      employeeIds?: string[];
+      userIds?: string[];
+      roles?: string[];
+      includeManagers?: boolean;
+    }
+  ): Promise<void> {
+    const empSet = new Set(
+      (targets?.employeeIds || []).map((v) => String(v || '').trim()).filter(Boolean)
+    );
+    const userSet = new Set(
+      (targets?.userIds || []).map((v) => String(v || '').trim()).filter(Boolean)
+    );
+    const roleSet = new Set(
+      (targets?.roles || []).map((v) => String(v || '').trim()).filter(Boolean)
+    );
+    const includeManagers = Boolean(targets?.includeManagers);
+
+    const serialized = JSON.stringify(payloadObj);
+    for (const client of this.sseClients) {
+      try {
+        const empId = String(client.auth?.user?.employee_id || '').trim();
+        const userId = String(client.auth?.user?.id || '').trim();
+        const role = String(client.auth?.user?.role || '').trim();
+        const matched =
+          (empId && empSet.has(empId)) ||
+          (userId && userSet.has(userId)) ||
+          (role && roleSet.has(role)) ||
+          (includeManagers && Boolean(client.auth?.has?.('schedule:manage')));
+        if (!matched) continue;
+        client.res.write(`event: ${eventName}\ndata: ${serialized}\n\n`);
+      } catch {
+        this.sseClients.delete(client);
+      }
+    }
+
+    await this.sendSupabaseHttpBroadcast('zayed_ops_sync_v1', 'db_change', {
+      reason: eventName,
+      action: payloadObj?.action || '',
+      requestId: payloadObj?.requestId || '',
+      status: payloadObj?.status || '',
+      targetEmployeeIds: Array.from(empSet),
+      notifyManagers: includeManagers,
+      message: payloadObj?.message || '',
+      at: new Date().toISOString(),
+    });
+  }
+
   async broadcastWalkieEvent(
     eventName: string,
     payloadObj: Record<string, any>,

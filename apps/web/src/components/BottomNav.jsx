@@ -36,6 +36,11 @@ export default function BottomNav({
     'shortages:write',
     'shortages:manage',
   ]);
+  const canSchedule = hasAnyPermission(permissions, role, [
+    'schedule:read',
+    'schedule:manage',
+    'schedule:swap_request',
+  ]);
   const canTrucks = hasAnyPermission(permissions, role, ['trucks:read', 'trucks:write']);
   const canNotes = hasAnyPermission(permissions, role, ['notes:read', 'notes:write']);
   const canChat = hasAnyPermission(permissions, role, ['chat:read', 'chat:write']);
@@ -75,6 +80,17 @@ export default function BottomNav({
       fullLabel: 'نواقص الصالة',
       icon: 'shopping_basket',
       badge: summary?.openShortagesCount || 0,
+      badgeTone: 'bg-[#B3261E] text-white',
+    });
+  }
+
+  if (canSchedule) {
+    items.push({
+      id: 'schedule',
+      label: 'الإجازات',
+      fullLabel: 'جدول الإجازات الأسبوعي',
+      icon: 'calendar_month',
+      badge: summary?.pendingDayOffSwapsCount || 0,
       badgeTone: 'bg-[#B3261E] text-white',
     });
   }

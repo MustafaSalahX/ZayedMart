@@ -59,6 +59,11 @@ export default function TopBar({
     'shortages:write',
     'shortages:manage',
   ]);
+  const canSchedule = hasAnyPermission(permissions, role, [
+    'schedule:read',
+    'schedule:manage',
+    'schedule:swap_request',
+  ]);
   const canTrucks = hasAnyPermission(permissions, role, ['trucks:read', 'trucks:write']);
   const canNotes = hasAnyPermission(permissions, role, ['notes:read', 'notes:write']);
   const canChat = hasAnyPermission(permissions, role, ['chat:read', 'chat:write']);
@@ -96,6 +101,15 @@ export default function TopBar({
       label: 'نواقص الصالة',
       icon: 'shopping_basket',
       alertCount: summary?.openShortagesCount || 0,
+    });
+  }
+
+  if (canSchedule) {
+    navTabs.push({
+      id: 'schedule',
+      label: 'جدول الإجازات',
+      icon: 'calendar_month',
+      alertCount: summary?.pendingDayOffSwapsCount || 0,
     });
   }
 
@@ -256,8 +270,8 @@ export default function TopBar({
 
             {/* Left side in RTL: Mobile Compact Actions + Desktop Full Controls */}
             <div className="flex items-center gap-1.5 shrink-0">
-              {/* Compact Date Pill (Always 1 tap on mobile & desktop) */}
-              {!isSingleShortageRole && (
+              {/* Compact Date Pill (Always 1 tap on mobile & desktop; hidden on weekly schedule tab) */}
+              {!isSingleShortageRole && activeTab !== 'schedule' && (
                 <div className="flex items-center gap-1 bg-[var(--g-surface-variant)] px-2 sm:px-2.5 min-h-[40px] rounded-full border border-[var(--g-border)] shrink-0">
                   <input
                     type="date"

@@ -4,6 +4,8 @@
  * وتجهيز الملخصات المنسقة لإرسالها على واتساب بنقرة واحدة
  */
 
+import { getScheduleWeekdayLabel, SCHEDULE_WEEKDAYS } from '@zayed-mart/shared';
+
 export function formatTimeArabic(isoString) {
   if (!isoString) return '—';
   const d = new Date(isoString);
@@ -929,4 +931,128 @@ export function buildPersonLogWhatsAppText(personData) {
   }
 
   return lines.join('\n');
+}
+
+// ─── Weekly Day-Off Schedule Exports (WhatsApp / Word / Excel CSV) ───
+
+export function formatWeeklyScheduleWhatsApp(scheduleData, storeName = 'زايد مارت') {
+  if (!scheduleData) return '';
+  const weekStart = scheduleData.weekStartDate || '';
+  const weekDates = scheduleData.weekDates || {};
+  const groups = scheduleData.groups || [];
+  const startStr = weekDates.sat || weekStart;
+  const endStr = weekDates.fri || '';
+
+  const lines = [
+    `📅 *جدول الإجازات الأسبوعي — ${storeName}*`,
+    `🗓️ الأسبوع: ${startStr}${endStr ? ` ← ${endStr}` : ''}`,
+    `━━━━━━━━━━━━━━━━━━`,
+  ];
+
+  for (const group of groups) {
+    const emps = group.employees || [];
+    lines.push(`\n👥 *${group.label}* (${emps.length} موظف):`);
+    for (const day of SCHEDULE_WEEKDAYS) {
+      const offEmps = emps.filter((e) => e.effective_day_of_week === day.code);
+      const cov = group.coverageByDay?.[day.code];
+      const shortDate = (weekDates[day.code] || '').slice(5);
+      const names =
+        offEmps.length > 0
+          ? offEmps.map((e) => `${e.name}${e.is_override ? ' (معدل)' : ''}`).join('، ')
+          : 'الجميع دوام';
+      const covSuffix = cov ? ` — متواجد: ${cov.onDutyCount}${cov.lowCoverage ? ' ⚠️' : ''}` : '';
+      lines.push(`• *${day.label}*${shortDate ? ` (${shortDate})` : ''}: ${names}${covSuffix}`);
+    }
+    const unassigned = emps.filter((e) => !e.effective_day_of_week);
+    if (unassigned.length > 0) {
+      lines.push(`⚠️ بدون يوم محدد: ${unassigned.map((e) => e.name).join('، ')}`);
+    }
+  }
+
+  return lines.join('\n');
+}
+
+export function exportWeeklyScheduleToWord(scheduleData, storeName = 'زايد مارت') {
+  if (!scheduleData) return;
+  const weekStart = scheduleData.weekStartDate || 'week';
+  const weekDates = scheduleData.weekDates || {};
+  const groups = scheduleData.groups || [];
+  const startStr = weekDates.sat || weekStart;
+  const endStr = weekDates.fri || '';
+
+  const dayHeaders = SCHEDULE_WEEKDAYS.map((d) => {
+    const shortDate = (weekDates[d.code] || '').slice(5);
+    return shortDate ? `${d.label} (${shortDate})` : d.label;
+  });
+
+  const sections = groups.map((group) => {
+    const emps = group.employees || [];
+    const rows = emps.map((emp) => [
+      emp.name || '—',
+      emp.effective_day_of_week
+        ? `${getScheduleWeekdayLabel(emp.effective_day_of_week)}${emp.is_override ? ' (معدل)' : ''}`
+        : 'غير محدد',
+      ...SCHEDULE_WEEKDAYS.map((d) => (emp.effective_day_of_week === d.code ? 'إجازة' : 'دوام')),
+    ]);
+
+    const minReq = group.coverageByDay?.sat?.minRequired;
+    rows.push([
+      'ملخص التغطية اليومية',
+      minReq !== undefined ? `الحد الأدنى: ${minReq}` : '—',
+      ...SCHEDULE_WEEKDAYS.map((d) => {
+        const cov = group.coverageByDay?.[d.code];
+        if (!cov) return '—';
+        return `إجازة ${cov.offCount} / دوام ${cov.onDutyCount}${cov.lowCoverage ? ' (منخفضة)' : ''}`;
+      }),
+    ]);
+
+    return {
+      title: `${group.label} (${emps.length} موظف)`,
+      headers: ['الموظف', 'يوم الإجازة', ...dayHeaders],
+      rows,
+    };
+  });
+
+  downloadWordDoc(
+    `جدول_الإجازات_${weekStart}.doc`,
+    `جدول الإجازات الأسبوعي — ${storeName}`,
+    `الأسبوع من ${startStr}${endStr ? ` إلى ${endStr}` : ''}`,
+    sections
+  );
+}
+
+export function exportWeeklyScheduleToCsv(scheduleData) {
+  if (!scheduleData) return;
+  const weekStart = scheduleData.weekStartDate || 'week';
+  const weekDates = scheduleData.weekDates || {};
+  const groups = scheduleData.groups || [];
+
+  const headers = [
+    'الفريق / المجموعة',
+    'الموظف',
+    'الكود',
+    'القسم',
+    'يوم الإجازة المعتمد',
+    'الإجازة الثابتة',
+    'تعديل أسبوعي',
+    ...SCHEDULE_WEEKDAYS.map((d) => `${d.label} (${weekDates[d.code] || d.code})`),
+  ];
+
+  const rows = [];
+  for (const group of groups) {
+    for (const emp of group.employees || []) {
+      rows.push([
+        group.label || group.id,
+        emp.name || '',
+        emp.emp_code || '',
+        emp.department || '',
+        emp.effective_day_of_week ? getScheduleWeekdayLabel(emp.effective_day_of_week) : 'غير محدد',
+        emp.default_day_of_week ? getScheduleWeekdayLabel(emp.default_day_of_week) : 'غير محدد',
+        emp.is_override ? 'نعم' : 'لا',
+        ...SCHEDULE_WEEKDAYS.map((d) => (emp.effective_day_of_week === d.code ? 'إجازة' : 'عمل')),
+      ]);
+    }
+  }
+
+  downloadExcelCsv(`جدول_الإجازات_${weekStart}.csv`, headers, rows);
 }
