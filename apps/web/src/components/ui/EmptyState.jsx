@@ -1,37 +1,76 @@
 import React from 'react';
 import Button from './Button.jsx';
+import Icon from './Icon.jsx';
 
 /**
- * Task-teaching empty state replacing generic blank screens.
+ * Detoxed Quiet Empty State:
+ * Transparent directly on canvas — ZERO outer card box, ZERO giant colored icon square,
+ * ZERO multi-sentence marketing prose.
  */
 export default function EmptyState({
-  icon = 'inbox',
-  title = 'لا توجد بيانات بعد',
+  icon = '',
+  title = 'لا توجد بيانات',
   description = '',
   actionLabel = '',
   actionIcon = 'add',
   onAction,
+  secondaryActionLabel = '',
+  onSecondaryAction,
+  compact = false,
   className = '',
 }) {
+  if (compact) {
+    return (
+      <div
+        className={`py-3.5 px-1 border-y border-line flex items-center justify-between gap-3 ${className}`}
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          {icon && <Icon name={icon} size={18} className="text-ink-muted" />}
+          <span className="text-xs sm:text-sm font-medium text-ink-muted truncate">
+            {title}
+          </span>
+        </div>
+        {actionLabel && onAction && (
+          <button
+            type="button"
+            onClick={onAction}
+            className="text-xs font-semibold text-primary hover:underline shrink-0 min-h-[44px] sm:min-h-[32px] px-1 inline-flex items-center gap-1 cursor-pointer"
+          >
+            <span>{actionLabel}</span>
+          </button>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div
-      className={`g-card p-6 sm:p-8 flex flex-col items-center justify-center text-center gap-3 ${className}`}
+      className={`py-10 px-4 flex flex-col items-center justify-center text-center gap-2.5 ${className}`}
     >
-      <div className="w-14 h-14 rounded-2xl bg-[var(--g-surface-variant)] text-[var(--g-primary)] flex items-center justify-center">
-        <span className="ms-icon filled text-3xl">{icon}</span>
-      </div>
-      <div className="space-y-1 max-w-sm">
-        <h4 className="text-sm sm:text-base font-black text-[var(--g-text)] m-0">{title}</h4>
+      {icon && (
+        <Icon name={icon} size={24} className="text-ink-muted opacity-70" />
+      )}
+      <div className="space-y-1 max-w-xs">
+        <p className="text-sm font-medium text-ink-muted m-0">{title}</p>
         {description && (
-          <p className="text-xs sm:text-sm font-medium text-[var(--g-muted)] m-0 leading-relaxed">
+          <p className="text-xs font-normal text-ink-muted opacity-85 m-0 leading-relaxed">
             {description}
           </p>
         )}
       </div>
-      {actionLabel && onAction && (
-        <Button variant="tonal" size="md" icon={actionIcon} onClick={onAction}>
-          {actionLabel}
-        </Button>
+      {(actionLabel || secondaryActionLabel) && (
+        <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+          {actionLabel && onAction && (
+            <Button variant="secondary" size="sm" icon={actionIcon} onClick={onAction}>
+              {actionLabel}
+            </Button>
+          )}
+          {secondaryActionLabel && onSecondaryAction && (
+            <Button variant="ghost" size="sm" onClick={onSecondaryAction}>
+              {secondaryActionLabel}
+            </Button>
+          )}
+        </div>
       )}
     </div>
   );

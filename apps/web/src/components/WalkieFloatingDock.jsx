@@ -1,13 +1,22 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
+import { useThemeArchitecture } from '../lib/themeContext.jsx';
+import { Icon } from './ui/index.js';
 
 /**
- * كبسولة اللاسلكي التكتيكية العائمة + شريط نداء الشرطة الفوري (Police Radio Auto-Dispatch Capsule)
- * - تستقبل وتُسمع صوت أي زميل يفتح الخط أو يتحدث تلقائياً بدون الحاجة لفتح النافذة مسبقاً
- * - تعرض شريط نداء وارد فوري (عادي أو طوارئ 🚨) مع زر (اضغط مطولاً للرد الفوري)
+ * Floating Walkie-Talkie Radio Capsule + Top Emergency Dispatch Banner.
+ * - Theme-adaptive horizontal capsule pill when idle on mobile
+ * - Tagged `.g-floating-chrome` so it automatically hides behind open sheets/modals
  */
-export default function WalkieFloatingDock({ walkie, hasBottomNav = true }) {
+export default function WalkieFloatingDock({
+  walkie,
+  hasBottomNav = true,
+  compactOnDesktop = false,
+}) {
+  const arch = useThemeArchitecture();
   const pointerIdRef = useRef(null);
   const replyPointerIdRef = useRef(null);
+  const didHoldTransmitRef = useRef(false);
+  const [mobileExpanded, setMobileExpanded] = useState(false);
 
   const {
     canUseWalkie,
@@ -22,14 +31,14 @@ export default function WalkieFloatingDock({ walkie, hasBottomNav = true }) {
     localSpeaking,
     setConsoleOpen,
     txElapsedSec,
-    activeUnits,
+    activeUnits = [],
     liveSpeakingUnits = [],
     incomingDispatchAlert,
     dismissDispatchAlert,
     activePlaybackCall,
     startTransmit,
     stopTransmit,
-  } = walkie;
+  } = walkie || {};
 
   if (!canUseWalkie) return null;
 
@@ -50,13 +59,14 @@ export default function WalkieFloatingDock({ walkie, hasBottomNav = true }) {
     if (liveOn && micMode !== 'muted') return;
     e.preventDefault();
     e.stopPropagation();
+    didHoldTransmitRef.current = true;
     try {
       e.currentTarget.setPointerCapture?.(e.pointerId);
       pointerIdRef.current = e.pointerId;
     } catch {
       // ignore
     }
-    startTransmit();
+    startTransmit?.();
   }
 
   function handleMicPointerUp(e) {
@@ -69,19 +79,23 @@ export default function WalkieFloatingDock({ walkie, hasBottomNav = true }) {
       // ignore
     }
     pointerIdRef.current = null;
-    stopTransmit();
+    stopTransmit?.();
   }
 
   function handleQuickMicClick(e) {
     e.stopPropagation();
+    if (didHoldTransmitRef.current) {
+      didHoldTransmitRef.current = false;
+      return;
+    }
     if (!liveOn) {
-      setConsoleOpen(true);
+      setConsoleOpen?.(true);
       return;
     }
     if (micMode === 'muted') {
-      setMicMode('vad');
+      setMicMode?.('vad');
     } else {
-      setMicMode('muted');
+      setMicMode?.('muted');
     }
   }
 
@@ -95,7 +109,7 @@ export default function WalkieFloatingDock({ walkie, hasBottomNav = true }) {
     } catch {
       // ignore
     }
-    startTransmit({ asEmergency: isEmergencyIncoming });
+    startTransmit?.({ asEmergency: isEmergencyIncoming });
   }
 
   function handleBannerReplyUp(e) {
@@ -108,53 +122,60 @@ export default function WalkieFloatingDock({ walkie, hasBottomNav = true }) {
       // ignore
     }
     replyPointerIdRef.current = null;
-    stopTransmit();
+    stopTransmit?.();
   }
 
   const showDispatchCard = Boolean((isReceiving || incomingDispatchAlert) && !localSpeaking);
+  const isRadioActive = Boolean(
+    liveOn || localSpeaking || isReceiving || mobileExpanded
+  );
+
+  const isMinimal = arch?.id === 'minimal';
+  const isGlass = arch?.id === 'liquid-glass';
+  const idlePillSurfaceCls = isMinimal
+    ? 'bg-surface border border-line text-ink shadow-xs hover:border-line-strong'
+    : isGlass
+    ? 'g-glass-capsule text-ink'
+    : 'bg-surface-elevated border border-line text-ink shadow-[var(--g-shadow-elevated)] hover:border-line-strong';
+
+  const channelShort =
+    incomingDispatchAlert?.channel_label || currentChannelMeta?.shortLabel || 'الطوارئ';
 
   return (
-    <div
-      className={`fixed left-3 sm:left-6 z-40 flex flex-col items-start gap-2 transition-all duration-200 ${
-        hasBottomNav ? 'bottom-21 md:bottom-6' : 'bottom-5'
-      }`}
-    >
-      {/* Live Police Radio Incoming Dispatch Banner (Pops up automatically on call/session open!) */}
+    <>
+      {/* 1. Top-Anchored Incoming Dispatch Banner */}
       {showDispatchCard && (
         <div
-          className={`w-[300px] sm:w-[340px] rounded-2xl p-3 shadow-2xl border-2 backdrop-blur-md animate-pop text-white ${
+          className={`fixed top-[calc(var(--topbar-h)+0.5rem)] inset-x-3 sm:inset-x-auto sm:end-6 sm:w-[340px] z-[45] rounded-2xl p-3.5 shadow-xl border backdrop-blur-md animate-pop text-[var(--g-radio-text)] ${
             isEmergencyIncoming
-              ? 'bg-[#3B0A0D]/95 border-[#FF453A] shadow-[0_10px_32px_rgba(255,69,58,0.55)]'
-              : 'bg-[#062819]/95 border-[#00E676] shadow-[0_10px_28px_rgba(0,230,118,0.35)]'
+              ? 'bg-[var(--g-radio-emergency-bg)] border-[var(--g-radio-emergency-bright)]'
+              : 'bg-[var(--g-radio-bg)] border-[var(--g-radio-signal-bright)]'
           }`}
+          role="region"
+          aria-label="نداء وارد"
         >
-          <div className="flex items-start justify-between gap-2">
+          <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
-              <span
-                className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${
+              <Icon
+                name={isEmergencyIncoming ? 'e911_emergency' : 'podcasts'}
+                size={18}
+                filled
+                className={
                   isEmergencyIncoming
-                    ? 'bg-[#FF453A] text-white animate-pulse'
-                    : 'bg-[#00E676] text-[#041E0F]'
-                }`}
-              >
-                <span className="ms-icon filled text-lg">
-                  {isEmergencyIncoming ? 'e911_emergency' : 'podcasts'}
-                </span>
-              </span>
+                    ? 'text-[var(--g-radio-emergency-bright)] animate-pulse'
+                    : 'text-[var(--g-radio-signal-bright)]'
+                }
+              />
               <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs font-black truncate">
-                    {isEmergencyIncoming
-                      ? `🚨 طوارئ: ${liveSpeakersLabel || 'نداء عاجل'}`
-                      : `${liveSpeakersLabel || 'زميل'} على الخط الآن`}
-                  </span>
+                <div className="text-xs sm:text-sm font-bold truncate">
+                  {isEmergencyIncoming
+                    ? `طوارئ · ${liveSpeakersLabel || 'نداء'}`
+                    : liveSpeakersLabel || 'نداء وارد'}
                 </div>
-                <div className="text-[10px] font-bold text-white/80 truncate">
+                <div className="text-[11px] font-medium text-[var(--g-radio-muted)] truncate">
                   {incomingDispatchAlert?.kind === 'session_open' && !isReceiving
-                    ? `فتح خط اللاسلكي (${incomingDispatchAlert.channel_label || currentChannelMeta.shortLabel})`
-                    : isEmergencyIncoming
-                    ? 'اختراق صوتي مباشر لكل القنوات — يُسمع تلقائياً'
-                    : `يتحدث الآن على ${currentChannelMeta.shortLabel} — يُسمع تلقائياً`}
+                    ? `${channelShort} · متصل`
+                    : `${channelShort} · مباشر`}
                 </div>
               </div>
             </div>
@@ -163,10 +184,10 @@ export default function WalkieFloatingDock({ walkie, hasBottomNav = true }) {
               <button
                 type="button"
                 onClick={dismissDispatchAlert}
-                aria-label="إغلاق التنبيه"
-                className="w-6 h-6 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-white/80 cursor-pointer shrink-0"
+                aria-label="إغلاق"
+                className="w-11 h-11 rounded-full bg-[var(--g-radio-surface)] border border-[var(--g-radio-border)] flex items-center justify-center text-[var(--g-radio-text)] cursor-pointer shrink-0"
               >
-                <span className="ms-icon text-sm">close</span>
+                <Icon name="close" size={16} />
               </button>
             )}
           </div>
@@ -178,155 +199,195 @@ export default function WalkieFloatingDock({ walkie, hasBottomNav = true }) {
               onPointerDown={handleBannerReplyDown}
               onPointerUp={handleBannerReplyUp}
               onPointerCancel={handleBannerReplyUp}
-              className={`flex-1 min-h-[38px] px-3 py-1.5 rounded-xl font-black text-xs select-none touch-none flex items-center justify-center gap-1.5 cursor-pointer transition-transform active:scale-96 ${
+              className={`flex-1 min-h-[44px] px-3 py-1.5 rounded-xl font-bold text-xs select-none touch-none flex items-center justify-center gap-1.5 cursor-pointer active:scale-96 ${
                 isEmergencyIncoming
-                  ? 'bg-white text-[#B91C1C]'
-                  : 'bg-[#00E676] text-[#041E0F]'
+                  ? 'bg-[var(--g-radio-emergency)] text-[var(--g-radio-text)]'
+                  : 'bg-[var(--g-radio-signal-bright)] text-[var(--g-radio-on-signal)]'
               }`}
             >
-              <span className="ms-icon filled text-base">mic</span>
-              <span>اضغط مطولاً للرد الفوري</span>
+              <Icon name="mic" size={16} filled />
+              <span>رد فوري</span>
             </button>
 
             <button
               type="button"
-              onClick={() => setConsoleOpen(true)}
-              className="min-h-[38px] px-3 py-1.5 rounded-xl bg-white/12 hover:bg-white/20 text-white text-xs font-extrabold flex items-center justify-center gap-1 cursor-pointer shrink-0"
+              onClick={() => setConsoleOpen?.(true)}
+              className="min-h-[44px] px-3 py-1.5 rounded-xl bg-[var(--g-radio-surface)] border border-[var(--g-radio-border)] text-[var(--g-radio-text)] text-xs font-semibold cursor-pointer shrink-0"
             >
-              <span className="ms-icon text-sm">open_in_full</span>
-              <span>اللوحة</span>
+              اللوحة
             </button>
           </div>
         </div>
       )}
 
+      {/* 2. Bottom-Left Floating Radio Control */}
       <div
-        className={`rounded-full p-1.5 pl-2 pr-2 shadow-xl border flex items-center gap-2 backdrop-blur-md transition-colors duration-200 ${
-          localSpeaking
-            ? 'bg-[#2B0B0E]/95 border-[#FF453A] text-white shadow-[0_8px_28px_rgba(255,69,58,0.45)]'
-            : isEmergencyIncoming && isReceiving
-            ? 'bg-[#3B0A0D]/95 border-[#FF453A] text-white shadow-[0_8px_28px_rgba(255,69,58,0.48)]'
-            : isReceiving
-            ? 'bg-[#07291A]/95 border-[#00E676] text-white shadow-[0_8px_28px_rgba(0,230,118,0.38)]'
-            : liveOn
-            ? 'bg-[#091C14]/95 border-[#00E676]/75 text-[#E6EDF3] shadow-[0_8px_24px_rgba(0,230,118,0.2)]'
-            : 'bg-[#0D1117]/95 border-[#2B3544] text-[#E6EDF3]'
+        className={`fixed g-floating-chrome left-3 sm:left-6 z-40 flex flex-col items-start gap-2 ${
+          hasBottomNav
+            ? 'bottom-[calc(var(--bottom-nav-h)+0.75rem)] md:bottom-6'
+            : 'bottom-[calc(1.25rem+var(--safe-bottom))] md:bottom-6'
         }`}
       >
-        {/* Primary ON / OFF Live Channel Power Pill (>= 48px touch height) */}
-        <button
-          type="button"
-          onClick={toggleLivePower}
-          disabled={connectingLive}
-          title={
-            liveOn
-              ? 'إيقاف مايك الخط الحي (يبقى الاستقبال التلقائي كالشرطة نشطاً)'
-              : 'فتح جلسة تحدث حية وإشعار جميع المتصلين على القناة فوراً (ON)'
-          }
-          aria-label={liveOn ? 'إيقاف الخط الحي لللاسلكي' : 'تشغيل الخط الحي لللاسلكي'}
-          className={`min-h-[48px] px-3.5 rounded-full select-none flex items-center justify-center gap-1.5 shrink-0 border-2 text-xs font-black transition-all duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-[#00E676] ${
-            liveOn
-              ? emergencyMode
-                ? 'bg-[#FF453A] hover:bg-[#D93025] border-white/80 text-white'
-                : 'bg-[#00E676] hover:bg-[#00C853] border-white/80 text-[#041E0F]'
-              : 'bg-[#16202E] hover:bg-[#1E2C3F] border-[#00E676] text-[#00E676]'
-          }`}
-        >
-          <span className="ms-icon filled text-lg">
-            {connectingLive ? 'sync' : emergencyMode && liveOn ? 'e911_emergency' : 'power_settings_new'}
-          </span>
-          <span className="num-ltr tracking-wide">
-            {connectingLive ? '...' : liveOn ? 'LIVE ON' : 'ON'}
-          </span>
-        </button>
-
-        {/* Channel Status / Expand Full Radio Console Button (min-h 44px) */}
-        <button
-          type="button"
-          onClick={() => setConsoleOpen(true)}
-          aria-label="فتح شاشة جهاز اللاسلكي الكاملة"
-          className="min-h-[44px] px-1.5 text-right flex flex-col justify-center min-w-0 max-w-[165px] sm:max-w-[225px] cursor-pointer focus-visible:outline-2 focus-visible:outline-[#00E676] rounded-xl"
-        >
-          <div className="flex items-center gap-1.5">
+        {/* Idle Compact Theme-Adaptive Radio Pill */}
+        {!isRadioActive && (
+          <button
+            type="button"
+            onClick={() => setConsoleOpen?.(true)}
+            aria-label={`اللاسلكي (${currentChannelMeta?.shortLabel || 'CH-01'})`}
+            className={`${
+              compactOnDesktop ? 'inline-flex' : 'inline-flex md:hidden'
+            } h-11 px-3 rounded-full items-center gap-2 cursor-pointer active:scale-95 transition-[transform,border-color,background-color] duration-150 ${idlePillSurfaceCls}`}
+          >
             <span
-              className={`w-2 h-2 rounded-full shrink-0 ${
-                localSpeaking
-                  ? 'bg-[#FF453A] animate-ping'
-                  : isReceiving
-                  ? 'bg-[#00E676] animate-ping'
-                  : liveOn || receiveMode === 'all'
-                  ? 'bg-[#00E676]'
-                  : 'bg-[#FBBF24]'
+              className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                receiveMode === 'all' ? 'bg-success-solid' : 'bg-warning-solid'
               }`}
+              aria-hidden="true"
             />
-            <span className="text-xs font-black truncate text-white">
-              {localSpeaking
-                ? `تتحدث حياً (${txElapsedSec.toFixed(0)}ث)`
-                : isReceiving && liveSpeakersLabel
-                ? `${liveSpeakersLabel} يتحدث...`
-                : liveOn
-                ? `خط حي مفتوح • ${currentChannelMeta.shortLabel}`
-                : `لاسلكي ${currentChannelMeta.shortLabel}`}
+            <Icon name="podcasts" size={17} />
+            <span className="num-ltr text-xs font-semibold leading-none">
+              {currentChannelMeta?.code || 'CH-01'}
             </span>
-          </div>
-          <div className="text-[10px] font-bold text-[#94A3B8] truncate flex items-center gap-1">
-            <span className="num-ltr text-[#00E676] font-extrabold">
-              {currentChannelMeta.code}
-            </span>
-            <span>•</span>
-            <span>
-              {liveOn
-                ? micMode === 'muted'
-                  ? 'مايك مكتوم • استماع بالخلفية'
-                  : activeUnits.length > 1
-                  ? `${activeUnits.length} متصلون بالخلفية`
-                  : 'متصل بالخلفية — تكلم فوراً'
-                : receiveMode === 'all'
-                ? 'استقبال الشرطة التلقائي نشط'
-                : receiveMode === 'emergency_only'
-                ? 'يستقبل الطوارئ تلقائياً 🚨'
-                : 'اضغط ON لفتح الخط'}
-            </span>
-          </div>
-        </button>
+          </button>
+        )}
 
-        {/* Live Mic / Instant Hold-to-Talk Control (48x48px) */}
-        <button
-          type="button"
-          onContextMenu={(e) => e.preventDefault()}
-          onClick={handleQuickMicClick}
-          onPointerDown={handleMicPointerDown}
-          onPointerUp={handleMicPointerUp}
-          onPointerCancel={handleMicPointerUp}
-          title={
-            !liveOn
-              ? 'اضغط مطولاً للتحدث الفوري أو انقر لفتح لوحة اللاسلكي'
-              : micMode === 'muted'
-              ? 'انقر لتفعيل التحدث التلقائي أو اضغط مطولاً للتحدث المؤقت'
-              : 'المايك الحي مفعل — انقر لكتم المايك مع بقاء الاستماع بالخلفية'
-          }
-          aria-label="زر التحدث والمايكروفون"
-          className={`w-12 h-12 rounded-full select-none touch-none flex items-center justify-center shrink-0 border transition-colors duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-[#00E676] ${
+        {/* Full Radio Capsule */}
+        <div
+          className={`${
+            isRadioActive ? 'flex' : compactOnDesktop ? 'hidden' : 'hidden md:flex'
+          } rounded-full p-1.5 px-2 shadow-xl border items-center gap-2 backdrop-blur-md transition-colors duration-200 ${
             localSpeaking
-              ? 'bg-[#FF3B30] border-white text-white'
-              : !liveOn
-              ? 'bg-white/8 hover:bg-white/15 border-[#00E676]/50 text-[#00E676]'
-              : micMode === 'muted'
-              ? 'bg-white/8 hover:bg-white/15 border-white/15 text-[#94A3B8]'
-              : 'bg-[#00E676]/20 hover:bg-[#00E676]/30 border-[#00E676] text-[#00E676]'
+              ? 'bg-[var(--g-radio-emergency-bg)] border-[var(--g-radio-emergency-bright)] text-[var(--g-radio-text)]'
+              : isEmergencyIncoming && isReceiving
+              ? 'bg-[var(--g-radio-emergency-bg)] border-[var(--g-radio-emergency-bright)] text-[var(--g-radio-text)]'
+              : isReceiving
+              ? 'bg-[var(--g-radio-bg)] border-[var(--g-radio-signal-bright)] text-[var(--g-radio-text)]'
+              : liveOn
+              ? 'bg-[var(--g-radio-bg)] border-[var(--g-radio-signal-border)] text-[var(--g-radio-text)]'
+              : 'bg-[var(--g-radio-bg)] border-[var(--g-radio-border)] text-[var(--g-radio-text)]'
           }`}
         >
-          <span className="ms-icon filled text-xl">
-            {localSpeaking
-              ? 'mic'
-              : !liveOn
-              ? 'record_voice_over'
-              : micMode === 'muted'
-              ? 'mic_off'
-              : 'mic'}
-          </span>
-        </button>
+          {/* Primary ON / OFF Button */}
+          <button
+            type="button"
+            onClick={toggleLivePower}
+            disabled={connectingLive}
+            aria-label={liveOn ? 'إيقاف اللاسلكي' : 'تشغيل اللاسلكي'}
+            className={`min-h-[48px] px-3.5 rounded-full select-none flex items-center justify-center gap-1.5 shrink-0 border-2 text-xs font-bold transition-[background-color,border-color,color,opacity] duration-150 cursor-pointer ${
+              liveOn
+                ? emergencyMode
+                  ? 'bg-[var(--g-radio-emergency)] border-[var(--g-radio-text)] text-[var(--g-radio-text)]'
+                  : 'bg-[var(--g-radio-signal-bright)] border-[var(--g-radio-on-signal)] text-[var(--g-radio-on-signal)]'
+                : 'bg-[var(--g-radio-surface)] border-[var(--g-radio-signal-bright)] text-[var(--g-radio-signal-bright)]'
+            }`}
+          >
+            <Icon
+              name={
+                connectingLive
+                  ? 'sync'
+                  : emergencyMode && liveOn
+                  ? 'e911_emergency'
+                  : 'power_settings_new'
+              }
+              size={18}
+              filled
+              spin={connectingLive}
+            />
+            <span className="num-ltr">
+              {connectingLive ? '...' : liveOn ? 'OFF' : 'ON'}
+            </span>
+          </button>
+
+          {/* Channel & Status */}
+          <button
+            type="button"
+            onClick={() => setConsoleOpen?.(true)}
+            aria-label="فتح اللاسلكي"
+            className="min-h-[44px] px-1.5 text-start flex flex-col justify-center min-w-0 max-w-[150px] sm:max-w-[210px] cursor-pointer rounded-xl"
+          >
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  localSpeaking
+                    ? 'bg-[var(--g-radio-emergency-bright)] animate-ping'
+                    : isReceiving
+                    ? 'bg-[var(--g-radio-signal-bright)] animate-ping'
+                    : liveOn || receiveMode === 'all'
+                    ? 'bg-[var(--g-radio-signal-bright)]'
+                    : 'bg-[var(--g-yellow-border)]'
+                }`}
+              />
+              <span className="text-xs font-bold truncate text-[var(--g-radio-text)]">
+                {localSpeaking
+                  ? `مباشر · ${Number(txElapsedSec || 0).toFixed(0)}ث`
+                  : isReceiving && liveSpeakersLabel
+                  ? liveSpeakersLabel
+                  : currentChannelMeta?.shortLabel || 'اللاسلكي'}
+              </span>
+            </div>
+            <div className="text-[11px] font-medium text-[var(--g-radio-muted)] truncate flex items-center gap-1">
+              <span className="num-ltr text-[var(--g-radio-signal-bright)] font-semibold">
+                {currentChannelMeta?.code || 'CH-01'}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span className="truncate">
+                {liveOn
+                  ? micMode === 'muted'
+                    ? 'استقبال'
+                    : activeUnits.length > 1
+                    ? `متصل (${activeUnits.length})`
+                    : 'متصل'
+                  : 'استقبال'}
+              </span>
+            </div>
+          </button>
+
+          {/* Mic / PTT Button */}
+          <button
+            type="button"
+            onContextMenu={(e) => e.preventDefault()}
+            onClick={handleQuickMicClick}
+            onPointerDown={handleMicPointerDown}
+            onPointerUp={handleMicPointerUp}
+            onPointerCancel={handleMicPointerUp}
+            aria-label="المايك"
+            className={`w-12 h-12 rounded-full select-none touch-none flex items-center justify-center shrink-0 border transition-colors duration-150 cursor-pointer ${
+              localSpeaking
+                ? 'bg-[var(--g-radio-emergency)] border-[var(--g-radio-text)] text-[var(--g-radio-text)]'
+                : !liveOn
+                ? 'bg-[var(--g-radio-surface)] border-[var(--g-radio-signal-border)] text-[var(--g-radio-signal-bright)]'
+                : micMode === 'muted'
+                ? 'bg-[var(--g-radio-surface)] border-[var(--g-radio-border)] text-[var(--g-radio-muted)]'
+                : 'bg-[var(--g-radio-signal-bg)] border-[var(--g-radio-signal-bright)] text-[var(--g-radio-signal-bright)]'
+            }`}
+          >
+            <Icon
+              name={
+                localSpeaking
+                  ? 'mic'
+                  : !liveOn
+                  ? 'record_voice_over'
+                  : micMode === 'muted'
+                  ? 'mic_off'
+                  : 'mic'
+              }
+              size={20}
+              filled
+            />
+          </button>
+
+          {mobileExpanded && !liveOn && !localSpeaking && !isReceiving && (
+            <button
+              type="button"
+              onClick={() => setMobileExpanded(false)}
+              aria-label="تصغير"
+              className="md:hidden w-11 h-11 rounded-full bg-[var(--g-radio-surface)] text-[var(--g-radio-muted)] flex items-center justify-center shrink-0 cursor-pointer"
+            >
+              <Icon name="chevron_left" size={16} />
+            </button>
+          )}
+        </div>
       </div>
-    </div>
+    </>
   );
 }

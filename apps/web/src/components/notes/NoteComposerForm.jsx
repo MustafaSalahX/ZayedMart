@@ -1,6 +1,7 @@
 import React from 'react';
 import ProofUploader from '../ProofUploader.jsx';
 import VoiceMicButton from '../VoiceMicButton.jsx';
+import { Button, Card, FilterChipRail, SectionHeader } from '../ui/index.js';
 
 /**
  * Reusable Note Composer used inline on desktop and inside BottomSheet on mobile.
@@ -30,142 +31,161 @@ export default function NoteComposerForm({
   onToast,
   inSheet = false,
 }) {
-  return (
-    <form
-      onSubmit={onSubmit}
-      className={inSheet ? 'space-y-4' : 'g-card p-4 sm:p-5 space-y-4'}
-    >
-      {!inSheet && (
-        <div className="flex items-center justify-between gap-2 border-b border-[var(--g-border)] pb-3">
-          <div className="flex items-center gap-2.5">
-            <div className="w-10 h-10 rounded-2xl bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] flex items-center justify-center shrink-0">
-              <span className="ms-icon filled text-xl">edit_note</span>
-            </div>
-            <div>
-              <h2 className="text-base sm:text-lg font-extrabold m-0">
-                تسجيل ملاحظة (لمس أو صوتي)
-              </h2>
-              <p className="text-xs text-[var(--g-muted)] m-0">
-                بدون كيبورد: اختر الوسم أو اضغط الإملاء الصوتي
-              </p>
-            </div>
+  const locationChipItems = locationTags.map((loc) => ({
+    id: loc,
+    label: loc,
+  }));
+
+  const categoryChipItems = categoryTags.map((cat) => ({
+    id: cat,
+    label: cat,
+  }));
+
+  const isAutoHandover = severity === 'urgent';
+
+  const formBody = (
+    <form onSubmit={onSubmit} className="space-y-4">
+      {!inSheet && <SectionHeader title="ملاحظة جديدة" />}
+
+      {/* Location */}
+      <div>
+        <label className="block text-xs font-medium text-ink-muted mb-1.5">
+          المكان
+        </label>
+        {inSheet ? (
+          <FilterChipRail
+            items={locationChipItems}
+            activeId={locationTag}
+            onSelect={setLocationTag}
+          />
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {locationTags.map((loc) => {
+              const active = locationTag === loc;
+              return (
+                <button
+                  key={loc}
+                  type="button"
+                  onClick={() => setLocationTag(loc)}
+                  className={`min-h-[44px] px-3 py-1.5 rounded-[var(--g-radius-md)] text-xs border transition-[background-color,border-color,color] duration-150 cursor-pointer ${
+                    active
+                      ? 'bg-primary-solid text-on-primary border-primary font-semibold'
+                      : 'bg-surface-2 border-line text-ink font-medium hover:border-line-strong'
+                  }`}
+                >
+                  {loc}
+                </button>
+              );
+            })}
           </div>
-        </div>
-      )}
-
-      {/* 1. Location Quick Chips */}
-      <div>
-        <label className="block text-xs font-bold text-[var(--g-muted)] mb-1.5">
-          1. المكان داخل الماركت:
-        </label>
-        <div className="flex flex-wrap gap-1.5">
-          {locationTags.map((loc) => (
-            <button
-              key={loc}
-              type="button"
-              onClick={() => setLocationTag(loc)}
-              className={`min-h-[44px] px-3.5 py-1.5 rounded-xl text-xs border transition-all active:scale-95 ${
-                locationTag === loc
-                  ? 'bg-[var(--g-primary)] text-white border-[var(--g-primary)] font-extrabold shadow-2xs'
-                  : 'bg-[var(--g-surface-variant)] border-[var(--g-border)] font-semibold'
-              }`}
-            >
-              {loc}
-            </button>
-          ))}
-        </div>
+        )}
       </div>
 
-      {/* 2. Category Quick Chips */}
+      {/* Category */}
       <div>
-        <label className="block text-xs font-bold text-[var(--g-muted)] mb-1.5">
-          2. نوع الملاحظة:
+        <label className="block text-xs font-medium text-ink-muted mb-1.5">
+          التصنيف
         </label>
-        <div className="flex flex-wrap gap-1.5">
-          {categoryTags.map((cat) => (
-            <button
-              key={cat}
-              type="button"
-              onClick={() => setCategoryTag(cat)}
-              className={`min-h-[44px] px-3.5 py-1.5 rounded-xl text-xs border transition-all active:scale-95 ${
-                categoryTag === cat
-                  ? 'g-pill-active border-transparent shadow-2xs'
-                  : 'bg-[var(--g-surface-variant)] border-[var(--g-border)] font-semibold'
-              }`}
-            >
-              {cat}
-            </button>
-          ))}
-        </div>
+        {inSheet ? (
+          <FilterChipRail
+            items={categoryChipItems}
+            activeId={categoryTag}
+            onSelect={setCategoryTag}
+          />
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {categoryTags.map((cat) => {
+              const active = categoryTag === cat;
+              return (
+                <button
+                  key={cat}
+                  type="button"
+                  onClick={() => setCategoryTag(cat)}
+                  className={`min-h-[44px] px-3 py-1.5 rounded-[var(--g-radius-md)] text-xs border transition-[background-color,border-color,color] duration-150 cursor-pointer ${
+                    active
+                      ? 'bg-primary-solid text-on-primary border-primary font-semibold'
+                      : 'bg-surface-2 border-line text-ink font-medium hover:border-line-strong'
+                  }`}
+                >
+                  {cat}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
-      {/* 3. Severity + Reference Timestamp */}
+      {/* Severity + DVR Time */}
       <div className="space-y-3">
         <div>
-          <label className="block text-xs font-bold text-[var(--g-muted)] mb-1.5">
-            3. درجة الأهمية:
+          <label className="block text-xs font-medium text-ink-muted mb-1.5">
+            الأهمية
           </label>
           <div className="grid grid-cols-3 gap-2">
-            {severities.map((sev) => (
-              <button
-                key={sev.id}
-                type="button"
-                onClick={() => setSeverity(sev.id)}
-                className={`min-h-[50px] py-2 px-1.5 rounded-2xl border text-xs font-extrabold flex flex-col sm:flex-row items-center justify-center gap-1 text-center leading-tight transition-all min-w-0 active:scale-95 ${
-                  severity === sev.id
-                    ? sev.activeStyle
-                    : 'bg-[var(--g-surface-variant)] border-[var(--g-border)] text-[var(--g-muted)]'
-                }`}
-              >
-                <span className="ms-icon text-base">{sev.icon}</span>
-                <span className="truncate max-w-full">{sev.label}</span>
-              </button>
-            ))}
+            {severities.map((sev) => {
+              const active = severity === sev.id;
+              return (
+                <button
+                  key={sev.id}
+                  type="button"
+                  onClick={() => setSeverity(sev.id)}
+                  className={`min-h-[44px] py-2 px-2 rounded-[var(--g-radius-md)] border text-xs font-semibold flex items-center justify-center transition-[background-color,border-color,color] duration-150 cursor-pointer ${
+                    active
+                      ? sev.activeStyle
+                      : 'bg-surface-2 border-line text-ink-muted hover:text-ink'
+                  }`}
+                >
+                  <span className="truncate">{sev.label}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-center">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-end">
           <div>
-            <label className="block text-xs font-bold text-[var(--g-muted)] mb-1">
-              وقت الواقعة بالثانية (مرجع التسجيل):
+            <label className="block text-xs font-medium text-ink-muted mb-1">
+              وقت DVR
             </label>
             <div className="flex items-center gap-1.5">
               <input
                 type="text"
                 value={dvrTimestamp}
                 onChange={(e) => setDvrTimestamp(e.target.value)}
-                className="g-input w-full text-sm font-extrabold num-ltr text-center"
+                className="g-input w-full text-sm font-semibold num-ltr text-center"
                 placeholder="HH:MM:SS"
               />
-              <button
+              <Button
                 type="button"
+                variant="secondary"
+                size="md"
                 onClick={onResetTimestamp}
-                className="min-h-[44px] px-3 py-2 rounded-xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-xs font-extrabold shrink-0"
+                className="shrink-0"
               >
                 الآن
-              </button>
+              </Button>
             </div>
           </div>
 
-          <label className="min-h-[44px] flex items-center gap-2 p-3 rounded-2xl bg-[var(--g-surface-variant)] text-xs font-bold cursor-pointer sm:mt-5">
+          <label className="min-h-[44px] flex items-center gap-2 px-3 py-2 rounded-[var(--g-radius-md)] border border-line text-xs font-medium text-ink cursor-pointer">
             <input
               type="checkbox"
-              checked={keepOpenForHandover}
+              checked={Boolean(keepOpenForHandover || isAutoHandover)}
+              disabled={isAutoHandover}
               onChange={(e) => setKeepOpenForHandover(e.target.checked)}
-              className="w-4 h-4 accent-[#0B57D0]"
+              className="w-4 h-4 accent-[var(--g-primary-solid)]"
             />
-            <span>نقل للوردية التالية للمتابعة</span>
+            <span>نقل للوردية التالية</span>
           </label>
         </div>
       </div>
 
-      {/* 4. Arabic Voice-to-Text + Textarea */}
+      {/* Textarea + Voice */}
       <div>
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-          <label className="text-xs font-bold text-[var(--g-muted)]">
-            تفاصيل الملاحظة:
-          </label>
+        <div className="flex items-center justify-between gap-2 mb-1.5">
+          <label className="text-xs font-medium text-ink-muted">التفاصيل</label>
           <VoiceMicButton
+            small
             onToast={onToast}
             onTranscript={(spoken) =>
               setContent((prev) => (prev ? `${prev} ${spoken}` : spoken))
@@ -176,33 +196,32 @@ export default function NoteComposerForm({
           rows={3}
           value={content}
           onChange={(e) => setContent(e.target.value)}
-          placeholder="اضغط زر الإملاء الصوتي وتحدث بالعامية ليكتب النظام تلقائياً، أو اتركها فارغة لحفظ الوسوم المختارة..."
+          placeholder="اكتب الملاحظة..."
           className="g-input w-full resize-none"
         />
       </div>
 
-      {/* 5. Optional Screenshot / Phone Photo */}
       <ProofUploader
         value={proofDataUrl}
         onChange={setProofDataUrl}
-        label="سكرين شوت (Ctrl+V) أو صورة من الفون"
+        label="صورة مرفقة"
         compact
       />
 
-      <button
+      <Button
         type="submit"
-        disabled={submitting || !canWrite}
-        className="w-full min-h-[50px] py-3 rounded-full bg-[var(--g-primary)] text-white font-extrabold text-base flex items-center justify-center gap-2 shadow-sm disabled:opacity-50"
+        variant="primary"
+        size="lg"
+        fullWidth
+        loading={submitting}
+        disabled={!canWrite}
       >
-        <span className="ms-icon filled">add_task</span>
-        <span>
-          {submitting
-            ? 'جاري الحفظ...'
-            : canWrite
-            ? 'حفظ الملاحظة الآن'
-            : 'عرض فقط (بدون صلاحية إضافة)'}
-        </span>
-      </button>
+        {submitting ? 'جاري الحفظ...' : canWrite ? 'حفظ الملاحظة' : 'للعرض فقط'}
+      </Button>
     </form>
   );
+
+  if (inSheet) return formBody;
+
+  return <Card padding="md">{formBody}</Card>;
 }

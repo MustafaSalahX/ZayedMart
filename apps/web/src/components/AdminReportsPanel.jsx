@@ -1,5 +1,20 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { apiRequest, formatRequestedQty } from '../lib/api.js';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Button,
+  CockpitMetricStrip,
+  EmptyState,
+  FilterChipRail,
+  GroupedList,
+  SearchFilterBar,
+  SectionHeader,
+  SkeletonKpiStrip,
+  SkeletonList,
+  StatusDot,
+} from './ui/index.js';
+import {
+  apiRequest,
+  formatRequestedQty,
+} from '../lib/api.js';
 import {
   buildShortagesWhatsAppText,
   exportRangeReportCsv,
@@ -7,6 +22,7 @@ import {
   exportShortagesCsv,
   exportShortagesWord,
   formatTimeArabic,
+  openWhatsAppShare,
 } from '../lib/exportUtils.js';
 
 function shiftDateKey(baseDateKey, offsetDays) {
@@ -18,6 +34,11 @@ function shiftDateKey(baseDateKey, offsetDays) {
   return `${y}-${m}-${d}`;
 }
 
+/**
+ * Detoxed Multi-Day Reports & Analytics Panel (`التقارير`).
+ * Pure date range header, `<CockpitMetricStrip />`, and hairline-divided tabular `<GroupedList>` rows
+ * with zero nested mini stat boxes and zero progress-bar clutter.
+ */
 export default function AdminReportsPanel({
   data,
   canExportReports = false,
@@ -33,10 +54,22 @@ export default function AdminReportsPanel({
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState(null);
 
+  const [exportingRangeExcel, setExportingRangeExcel] = useState(false);
+  const [exportingShortagesExcel, setExportingShortagesExcel] = useState(false);
+
+  const [shortageSearch, setShortageSearch] = useState('');
+  const [showAllShortages, setShowAllShortages] = useState(false);
+  const [empSearch, setEmpSearch] = useState('');
+  const [empSort, setEmpSort] = useState('present');
+  const [supSearch, setSupSearch] = useState('');
+  const [supSort, setSupSort] = useState('deliveries');
+
+  const isFallbackMode =
+    data?.connectionMode === 'direct_cloud' || data?.connectionMode === 'offline_cached';
+
   const fetchReport = useCallback(
     async (fDate, tDate) => {
-      if (data?.connectionMode !== 'local_server') {
-        // Graceful fallback in Direct Cloud mode using loaded snapshot
+      if (isFallbackMode) {
         const shList = data?.shortages || [];
         setReport({
           period: { from: fDate, to: tDate },
@@ -49,8 +82,9 @@ export default function AdminReportsPanel({
               (acc, l) => acc + (l.late_minutes || 0),
               0
             ),
-            breaksCount: (data?.attendanceLogs || []).filter((l) => l.action_type === 'break_start')
-              .length,
+            breaksCount: (data?.attendanceLogs || []).filter(
+              (l) => l.action_type === 'break_start'
+            ).length,
             trucksTotal: (data?.truckLogs || []).length,
             trucksCompleted: data?.summary?.completedTrucksCount || 0,
             avgUnloadMinutes: 0,
@@ -84,12 +118,12 @@ export default function AdminReportsPanel({
         );
         setReport(res);
       } catch (err) {
-        onToast?.(err.message || 'تعذر تحميل التقرير الشامل', 'error');
+        onToast?.(err?.message || 'تعذر تحميل التقرير', 'error');
       } finally {
         setLoading(false);
       }
     },
-    [data, onToast]
+    [data, isFallbackMode, onToast]
   );
 
   useEffect(() => {
@@ -116,449 +150,597 @@ export default function AdminReportsPanel({
 
   const t = report?.totals || {};
   const storeName = data?.settings?.store_name || 'زايد مارت';
+  const branchName = data?.settings?.branch_name || '';
+
+  const overviewMetrics = useMemo(
+    () => [
+      {
+        id: 'shortages',
+        label: 'النواقص',
+        value: t.shortagesOpen || 0,
+        secondary:
+          (t.shortagesOutOfStock || 0) > 0
+            ? `${t.shortagesOutOfStock} نفد · توفّر ${t.shortagesResolved || 0}`
+            : `توفّر ${t.shortagesResolved || 0}`,
+        tone: (t.shortagesOpen || 0) > 0 ? 'danger' : 'neutral',
+        dotTone: (t.shortagesOpen || 0) > 0 ? 'danger' : '',
+        onClick: () => setActiveSection('shortages'),
+      },
+      {
+        id: 'attendance',
+        label: 'الحضور',
+        value: t.uniqueEmployeesPresent || 0,
+        secondary: `من ${t.totalActiveStaff || 0} · ${t.attendanceEvents || 0} حركة`,
+        tone: 'neutral',
+        onClick: () => setActiveSection('employees'),
+      },
+      {
+        id: 'late',
+        label: 'التأخير',
+        value: t.totalLateInstances || 0,
+        secondary:
+          (t.totalLateMinutes || 0) > 0
+            ? `${t.totalLateMinutes}د · ${t.breaksCount || 0} بريك`
+            : `${t.breaksCount || 0} بريك`,
+        tone: (t.totalLateInstances || 0) > 0 ? 'warning' : 'neutral',
+        dotTone: (t.totalLateInstances || 0) > 0 ? 'warning' : '',
+        onClick: () => setActiveSection('employees'),
+      },
+      {
+        id: 'trucks',
+        label: 'العربيات',
+        value: t.trucksTotal || 0,
+        secondary:
+          (t.trucksWithShortage || 0) > 0
+            ? `متوسط ${t.avgUnloadMinutes || 0}د · ${t.trucksWithShortage} ملاحظات`
+            : `متوسط ${t.avgUnloadMinutes || 0}د`,
+        tone: (t.trucksWithShortage || 0) > 0 ? 'danger' : 'neutral',
+        dotTone: (t.trucksWithShortage || 0) > 0 ? 'danger' : '',
+        onClick: () => setActiveSection('suppliers'),
+      },
+    ],
+    [t]
+  );
+
+  const filteredShortages = useMemo(() => {
+    const list = report?.shortagesList || [];
+    const q = shortageSearch.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter((sh) =>
+      `${sh.item_name} ${sh.category} ${sh.recorded_by || ''}`.toLowerCase().includes(q)
+    );
+  }, [report?.shortagesList, shortageSearch]);
+
+  const filteredEmployees = useMemo(() => {
+    const list = [...(report?.employeeStats || [])];
+    const q = empSearch.trim().toLowerCase();
+    const matched = q
+      ? list.filter((e) =>
+          `${e.name} ${e.emp_code || ''} ${e.department}`.toLowerCase().includes(q)
+        )
+      : list;
+
+    return matched.sort((a, b) => {
+      if (empSort === 'late') {
+        return (
+          (b.lateCount || 0) - (a.lateCount || 0) ||
+          (b.totalLateMinutes || 0) - (a.totalLateMinutes || 0)
+        );
+      }
+      if (empSort === 'breaks') {
+        return (b.breaksCount ?? b.breaks ?? 0) - (a.breaksCount ?? a.breaks ?? 0);
+      }
+      return (b.daysPresent || 0) - (a.daysPresent || 0);
+    });
+  }, [report?.employeeStats, empSearch, empSort]);
+
+  const filteredSuppliers = useMemo(() => {
+    const list = [...(report?.supplierStats || [])];
+    const q = supSearch.trim().toLowerCase();
+    const matched = q
+      ? list.filter((s) =>
+          `${s.name || s.supplier_name} ${s.category}`.toLowerCase().includes(q)
+        )
+      : list;
+
+    return matched.sort((a, b) => {
+      if (supSort === 'duration') {
+        return (b.avgDurationMinutes || 0) - (a.avgDurationMinutes || 0);
+      }
+      if (supSort === 'issues') {
+        return (
+          (b.issuesCount || 0) +
+          (b.hasPendingReturn ? 1 : 0) -
+          ((a.issuesCount || 0) + (a.hasPendingReturn ? 1 : 0))
+        );
+      }
+      return (b.deliveriesCount || 0) - (a.deliveriesCount || 0);
+    });
+  }, [report?.supplierStats, supSearch, supSort]);
+
+  async function handleExportRangeExcel() {
+    if (!report || exportingRangeExcel) return;
+    setExportingRangeExcel(true);
+    try {
+      await exportRangeReportCsv(report, storeName, branchName);
+      onToast?.('تم تصدير Excel');
+    } catch (err) {
+      onToast?.(err?.message || 'تعذر تصدير Excel', 'error');
+    } finally {
+      setExportingRangeExcel(false);
+    }
+  }
+
+  async function handleExportShortagesExcel() {
+    if (!report || exportingShortagesExcel) return;
+    setExportingShortagesExcel(true);
+    try {
+      await exportShortagesCsv(
+        report.shortagesList || [],
+        `${fromDate}_${toDate}`,
+        storeName
+      );
+      onToast?.('تم تصدير كشف النواقص');
+    } catch (err) {
+      onToast?.(err?.message || 'تعذر تصدير كشف النواقص', 'error');
+    } finally {
+      setExportingShortagesExcel(false);
+    }
+  }
 
   return (
-    <div className="space-y-4">
-      {/* Date Range Filter + 1-Tap Export Controls */}
-      <div className="g-card p-4 sm:p-5 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
-            <h3 className="text-base sm:text-lg font-black text-[var(--g-text)] flex items-center gap-2">
-              <span className="ms-icon filled text-xl text-[var(--g-primary)]">analytics</span>
-              <span>مركز التقارير الشاملة والإحصائيات</span>
-            </h3>
-            <p className="text-xs text-[var(--g-text-muted)] mt-0.5">
-              متابعة كاملة للحضور والتأخير، نواقص الصالة، الموردين، وملاحظات الكاميرات لأي فترة
-            </p>
-          </div>
+    <div className="space-y-5">
+      <div className="space-y-3">
+        <SectionHeader
+          title="التقارير"
+          subtitle={`${fromDate} — ${toDate}`}
+          actions={
+            canExportReports &&
+            report && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon="table_view"
+                  loading={exportingRangeExcel}
+                  onClick={handleExportRangeExcel}
+                >
+                  Excel
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon="description"
+                  onClick={() => {
+                    exportRangeReportWord(report, storeName, branchName);
+                    onToast?.('تم تصدير Word');
+                  }}
+                >
+                  Word
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon="share"
+                  onClick={() => {
+                    const txt = buildShortagesWhatsAppText(
+                      report.shortagesList || [],
+                      storeName
+                    );
+                    openWhatsAppShare(txt);
+                    onToast?.('تم تجهيز التقرير لواتساب');
+                  }}
+                >
+                  واتساب
+                </Button>
+              </div>
+            )
+          }
+        />
 
-          {canExportReports && report && (
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => exportRangeReportCsv(report)}
-                className="min-h-[44px] px-4 py-2 rounded-xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-xs sm:text-sm font-black flex items-center gap-1.5 shadow-sm active:scale-95"
-              >
-                <span className="ms-icon text-lg">download</span>
-                <span>تصدير Excel</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => exportRangeReportWord(report)}
-                className="min-h-[44px] px-4 py-2 rounded-xl bg-[var(--g-primary)] text-white text-xs sm:text-sm font-black flex items-center gap-1.5 shadow-sm active:scale-95"
-              >
-                <span className="ms-icon text-lg">description</span>
-                <span>تصدير Word (.doc)</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const txt = buildShortagesWhatsAppText(report.shortagesList || [], storeName);
-                  window.open(`https://wa.me/?text=${encodeURIComponent(txt)}`, '_blank');
-                }}
-                className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[var(--g-surface)] hover:bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-[var(--g-text)] text-xs sm:text-sm font-extrabold flex items-center gap-1.5 active:scale-95"
-              >
-                <span className="ms-icon text-lg text-[#146C2E]">share</span>
-                <span>كشف النواقص واتساب</span>
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* 1-Tap Date Presets */}
-        <div className="flex flex-wrap items-center gap-2">
-          {[
+        <FilterChipRail
+          activeId={preset}
+          onSelect={(id) => (id === 'custom' ? setPreset('custom') : applyPreset(id))}
+          items={[
             { id: 'today', label: 'اليوم' },
             { id: 'yesterday', label: 'أمس' },
-            { id: '7days', label: 'آخر 7 أيام' },
-            { id: '30days', label: 'آخر 30 يوم' },
-            { id: 'custom', label: 'فترة مخصصة 📅' },
-          ].map((p) => (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => (p.id === 'custom' ? setPreset('custom') : applyPreset(p.id))}
-              className={`min-h-[42px] px-3.5 py-1.5 rounded-full text-xs sm:text-sm font-extrabold border transition-all ${
-                preset === p.id
-                  ? 'bg-[var(--g-primary)] text-white border-[var(--g-primary)]'
-                  : 'bg-[var(--g-surface-2)] text-[var(--g-text)] border-[var(--g-border)]'
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
-        </div>
+            { id: '7days', label: '7 أيام' },
+            { id: '30days', label: '30 يوم' },
+            { id: 'custom', label: 'مخصص' },
+          ]}
+        />
 
         {preset === 'custom' && (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 p-3 rounded-2xl bg-[var(--g-surface-2)] border border-[var(--g-border)] items-end">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 py-2 border-y border-line items-end">
             <div>
-              <label className="block text-xs font-bold text-[var(--g-text-muted)] mb-1">من تاريخ</label>
+              <label className="block text-xs font-medium text-ink-muted mb-1">
+                من
+              </label>
               <input
                 type="date"
                 value={fromDate}
                 onChange={(e) => setFromDate(e.target.value)}
-                className="g-input min-h-[46px] num-ltr font-bold"
+                className="g-input num-ltr"
               />
             </div>
             <div>
-              <label className="block text-xs font-bold text-[var(--g-text-muted)] mb-1">إلى تاريخ</label>
+              <label className="block text-xs font-medium text-ink-muted mb-1">
+                إلى
+              </label>
               <input
                 type="date"
                 value={toDate}
                 onChange={(e) => setToDate(e.target.value)}
-                className="g-input min-h-[46px] num-ltr font-bold"
+                className="g-input num-ltr"
               />
             </div>
-            <button
-              type="button"
+            <Button
+              variant="primary"
+              size="md"
+              fullWidth
               onClick={() => fetchReport(fromDate, toDate)}
-              className="min-h-[46px] rounded-xl bg-[var(--g-primary)] text-white font-black text-sm"
             >
-              تحديث التقرير
-            </button>
+              تحديث
+            </Button>
+          </div>
+        )}
+
+        {isFallbackMode && (
+          <div className="text-xs font-medium text-warning">
+            وضع أوفلاين — عرض بيانات اليوم فقط
           </div>
         )}
       </div>
 
-      {/* Report Sub-sections Navigation — 2x2 Touch Grid on Mobile */}
-      <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 pb-1">
-        {[
-          { id: 'overview', label: 'ملخص الأرقام', icon: 'dashboard' },
-          { id: 'shortages', label: `تقارير النواقص (${t.shortagesTotal || 0})`, icon: 'shopping_basket' },
-          { id: 'employees', label: `التزام الموظفين (${report?.employeeStats?.length || 0})`, icon: 'badge' },
-          { id: 'suppliers', label: `الموردون والعربيات (${report?.supplierStats?.length || 0})`, icon: 'local_shipping' },
-        ].map((sec) => (
-          <button
-            key={sec.id}
-            type="button"
-            onClick={() => setActiveSection(sec.id)}
-            className={`min-h-[46px] px-3 py-2 rounded-2xl sm:rounded-full text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 border transition-all active:scale-95 ${
-              activeSection === sec.id
-                ? 'bg-[var(--g-primary)] text-white border-[var(--g-primary)] shadow-sm'
-                : 'bg-[var(--g-surface)] text-[var(--g-text)] border-[var(--g-border)]'
-            }`}
-          >
-            <span className="ms-icon text-lg shrink-0">{sec.icon}</span>
-            <span className="truncate">{sec.label}</span>
-          </button>
-        ))}
-      </div>
+      <FilterChipRail
+        activeId={activeSection}
+        onSelect={setActiveSection}
+        items={[
+          { id: 'overview', label: 'الملخص' },
+          {
+            id: 'shortages',
+            label: 'النواقص',
+            count: t.shortagesTotal || 0,
+            alert: (t.shortagesOpen || 0) > 0,
+          },
+          {
+            id: 'employees',
+            label: 'الموظفون',
+            count: report?.employeeStats?.length || 0,
+          },
+          {
+            id: 'suppliers',
+            label: 'الموردون',
+            count: report?.supplierStats?.length || 0,
+          },
+        ]}
+      />
 
       {loading ? (
-        <div className="g-card p-8 text-center text-sm font-bold text-[var(--g-text-muted)]">
-          جاري تجميع التقارير والإحصائيات...
+        <div className="space-y-4">
+          <SkeletonKpiStrip count={4} />
+          <SkeletonList rows={4} />
         </div>
       ) : (
         <>
-          {/* 1. OVERVIEW SECTION */}
+          {/* 1. OVERVIEW */}
           {activeSection === 'overview' && (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                {[
-                  {
-                    label: 'نواقص مطلوبة الآن',
-                    val: t.shortagesOpen || 0,
-                    sub: `تم توفير ${t.shortagesResolved || 0} خلال الفترة`,
-                    tone: 'text-[var(--g-red)]',
-                  },
-                  {
-                    label: 'موظفون سجلوا حضور',
-                    val: `${t.uniqueEmployeesPresent || 0} / ${t.totalActiveStaff || 0}`,
-                    sub: `إجمالي الحركات: ${t.attendanceEvents || 0}`,
-                    tone: 'text-[var(--g-green)]',
-                  },
-                  {
-                    label: 'مرات التأخير المسجلة',
-                    val: t.totalLateInstances || 0,
-                    sub: `إجمالي ${t.totalLateMinutes || 0} دقيقة تأخير`,
-                    tone: 'text-[var(--g-yellow)]',
-                  },
-                  {
-                    label: 'عربيات الموردين',
-                    val: t.trucksTotal || 0,
-                    sub: `متوسط التنزيل: ${t.avgUnloadMinutes || 0} د`,
-                    tone: 'text-[var(--g-primary)]',
-                  },
-                ].map((card) => (
-                  <div key={card.label} className="g-card p-4 space-y-1">
-                    <div className="text-xs font-bold text-[var(--g-text-muted)]">{card.label}</div>
-                    <div className={`text-2xl sm:text-3xl font-black num-ltr ${card.tone}`}>
-                      {card.val}
-                    </div>
-                    <div className="text-[11px] text-[var(--g-text-muted)]">{card.sub}</div>
-                  </div>
-                ))}
-              </div>
+            <div className="space-y-6">
+              <CockpitMetricStrip items={overviewMetrics} columns={4} />
 
-              {/* Shortages by Category Breakdown */}
               {(report?.shortagesByCategory || []).length > 0 && (
-                <div className="g-card p-4 sm:p-5 space-y-3">
-                  <h4 className="text-sm sm:text-base font-black text-[var(--g-text)]">
-                    توزيع النواقص حسب أقسام السوبر ماركت
-                  </h4>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-                    {report.shortagesByCategory.map((cat) => (
-                      <div
-                        key={cat.category}
-                        className="p-3 rounded-2xl bg-[var(--g-surface-2)] border border-[var(--g-border)] flex items-center justify-between"
-                      >
-                        <div>
-                          <div className="font-extrabold text-sm text-[var(--g-text)]">
-                            {cat.category}
-                          </div>
-                          <div className="text-xs text-[var(--g-text-muted)]">
-                            إجمالي البلاغات: {cat.total} • تم توفير: {cat.resolved}
-                          </div>
-                        </div>
-                        <span
-                          className={`px-3 py-1 rounded-full text-xs font-black ${
-                            cat.open > 0
-                              ? 'bg-[var(--g-red-bg)] text-[var(--g-red)]'
-                              : 'bg-[var(--g-green-bg)] text-[var(--g-green)]'
-                          }`}
-                        >
-                          مفتوح: {cat.open}
+                <GroupedList
+                  label="النواقص حسب القسم"
+                  count={report.shortagesByCategory.length}
+                >
+                  {report.shortagesByCategory.map((cat) => (
+                    <div
+                      key={cat.category}
+                      className="min-h-[48px] px-3.5 py-2.5 flex items-center justify-between gap-3"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <StatusDot tone={cat.open > 0 ? 'danger' : 'success'} />
+                        <span className="text-xs sm:text-sm font-medium text-ink truncate">
+                          {cat.category}
                         </span>
                       </div>
-                    ))}
-                  </div>
-                </div>
+                      <div className="w-full sm:w-auto flex items-center justify-between sm:justify-end gap-3 flex-wrap text-xs num-ltr shrink-0">
+                        <span className={cat.open > 0 ? 'text-danger font-semibold' : 'text-ink-muted'}>
+                          مفتوح {cat.open}
+                        </span>
+                        <span className="text-ink-muted">توفّر {cat.resolved}</span>
+                        <span className="font-semibold text-ink">{cat.total}</span>
+                      </div>
+                    </div>
+                  ))}
+                </GroupedList>
               )}
             </div>
           )}
 
-          {/* 2. SHORTAGES REPORT SECTION */}
+          {/* 2. SHORTAGES */}
           {activeSection === 'shortages' && (
-            <div className="space-y-4">
+            <div className="space-y-6">
               {(report?.topShortageItems || []).length > 0 && (
-                <div className="g-card p-4 sm:p-5 space-y-3">
-                  <div className="flex items-center justify-between flex-wrap gap-2">
-                    <h4 className="text-sm sm:text-base font-black text-[var(--g-text)]">
-                      الأصناف الأكثر طلباً ونفاداً خلال الفترة
-                    </h4>
-                    {canExportReports && (
+                <GroupedList
+                  label="الأكثر تكراراً"
+                  count={report.topShortageItems.length}
+                  actions={
+                    canExportReports ? (
                       <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            exportShortagesCsv(
-                              report.shortagesList || [],
-                              `${fromDate}_${toDate}`
-                            )
-                          }
-                          className="min-h-[40px] px-3.5 py-1.5 rounded-xl bg-[var(--g-surface)] hover:bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-[var(--g-text)] text-xs font-extrabold"
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          loading={exportingShortagesExcel}
+                          onClick={handleExportShortagesExcel}
                         >
-                          شيت النواقص Excel
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
+                          Excel
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
                             exportShortagesWord(
                               report.shortagesList || [],
                               `${fromDate}_${toDate}`,
                               storeName
-                            )
-                          }
-                          className="min-h-[40px] px-3.5 py-1.5 rounded-xl bg-[var(--g-surface)] hover:bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-[var(--g-text)] text-xs font-extrabold"
+                            );
+                            onToast?.('تم تصدير كشف النواقص');
+                          }}
                         >
-                          ملف النواقص Word
-                        </button>
+                          Word
+                        </Button>
                       </div>
-                    )}
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    {report.topShortageItems.map((it) => (
-                      <div
-                        key={it.item_name}
-                        className="p-3 rounded-2xl bg-[var(--g-surface-2)] border border-[var(--g-border)] flex items-center justify-between gap-2"
-                      >
-                        <div className="min-w-0">
-                          <div className="font-extrabold text-sm text-[var(--g-text)] truncate">
-                            {it.item_name}
-                          </div>
-                          <div className="text-xs text-[var(--g-text-muted)]">
-                            {it.category} • الكمية الأخيرة:{' '}
-                            <strong>{formatRequestedQty(it.latestQty, it.unit)}</strong>
-                          </div>
+                    ) : null
+                  }
+                >
+                  {report.topShortageItems.map((it) => (
+                    <div
+                      key={it.item_name}
+                      className="min-h-[48px] px-3.5 py-2.5 flex items-center justify-between gap-3"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-xs sm:text-sm font-medium text-ink truncate">
+                          {it.item_name}
                         </div>
-                        <span className="px-2.5 py-1 rounded-xl bg-[var(--g-primary-container)] text-[var(--g-on-primary-container)] text-xs font-black shrink-0">
-                          تكرر {it.timesReported} مرة
-                        </span>
+                        <div className="text-xs text-ink-muted truncate">
+                          {it.category} · {formatRequestedQty(it.latestQty, it.unit)}
+                        </div>
                       </div>
-                    ))}
-                  </div>
-                </div>
+                      <span className="num-ltr text-xs font-semibold text-ink shrink-0">
+                        ×{it.timesReported}
+                      </span>
+                    </div>
+                  ))}
+                </GroupedList>
               )}
 
-              <div className="g-card p-4 sm:p-5 space-y-3">
-                <h4 className="text-sm sm:text-base font-black text-[var(--g-text)]">
-                  سجل النواقص التفصيلي ({(report?.shortagesList || []).length})
-                </h4>
-                {(report?.shortagesList || []).length === 0 ? (
-                  <p className="text-center py-6 text-xs text-[var(--g-text-muted)]">
-                    لا توجد نواقص مسجلة في هذه الفترة.
-                  </p>
+              <div className="space-y-3">
+                <SectionHeader title="سجل النواقص" count={filteredShortages.length} />
+
+                {(report?.shortagesList || []).length > 4 && (
+                  <SearchFilterBar
+                    value={shortageSearch}
+                    onChange={setShortageSearch}
+                    placeholder="بحث باسم الصنف أو القسم..."
+                  />
+                )}
+
+                {filteredShortages.length === 0 ? (
+                  <EmptyState compact title="لا توجد نواقص في هذه الفترة" />
                 ) : (
-                  <div className="space-y-2 max-h-96 overflow-y-auto">
-                    {report.shortagesList.map((sh) => (
-                      <div
-                        key={sh.id}
-                        className="p-3 rounded-2xl bg-[var(--g-surface-2)] border border-[var(--g-border)] flex flex-col sm:flex-row sm:items-center justify-between gap-2"
-                      >
-                        <div>
-                          <div className="font-extrabold text-sm text-[var(--g-text)]">
-                            {sh.item_name}{' '}
-                            <span className="text-xs font-bold text-[var(--g-primary)]">
-                              ({formatRequestedQty(sh.requested_qty, sh.unit)})
-                            </span>
-                          </div>
-                          <div className="text-xs text-[var(--g-text-muted)]">
-                            {sh.category} • سجله: {sh.recorded_by} • {sh.date_key}{' '}
-                            {formatTimeArabic(sh.created_at)}
-                          </div>
-                        </div>
-                        <span
-                          className={`self-start sm:self-center px-2.5 py-1 rounded-full text-xs font-extrabold ${
-                            sh.status === 'resolved'
-                              ? 'bg-[var(--g-green-bg)] text-[var(--g-green)]'
-                              : sh.status === 'ordered'
-                              ? 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]'
-                              : 'bg-[var(--g-red-bg)] text-[var(--g-red)]'
-                          }`}
-                        >
-                          {sh.status === 'resolved'
-                            ? 'تم التوفير ✓'
+                  <>
+                    <GroupedList>
+                      {(showAllShortages
+                        ? filteredShortages
+                        : filteredShortages.slice(0, 15)
+                      ).map((sh) => {
+                        const tone =
+                          sh.status === 'resolved'
+                            ? 'success'
                             : sh.status === 'ordered'
-                            ? 'تم الطلب 🚚'
-                            : 'مطلوب الآن'}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
+                            ? 'warning'
+                            : 'danger';
+                        const statusLabel =
+                          sh.status === 'resolved'
+                            ? 'توفّر'
+                            : sh.status === 'ordered'
+                            ? 'تم الطلب'
+                            : 'مطلوب';
+
+                        return (
+                          <div
+                            key={sh.id}
+                            className="min-h-[52px] px-3.5 py-2.5 flex items-center justify-between gap-3"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="text-xs sm:text-sm font-medium text-ink truncate">
+                                {sh.item_name}{' '}
+                                <span className="text-ink-muted font-normal">
+                                  · {formatRequestedQty(sh.requested_qty, sh.unit)}
+                                </span>
+                              </div>
+                              <div className="text-xs text-ink-muted truncate">
+                                {sh.category} · {sh.recorded_by} ·{' '}
+                                <span className="num-ltr">
+                                  {sh.date_key} {formatTimeArabic(sh.created_at)}
+                                </span>
+                              </div>
+                            </div>
+                            <StatusDot tone={tone} label={statusLabel} tintedText />
+                          </div>
+                        );
+                      })}
+                    </GroupedList>
+
+                    {filteredShortages.length > 15 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        fullWidth
+                        onClick={() => setShowAllShortages((v) => !v)}
+                      >
+                        {showAllShortages
+                          ? 'عرض أقل'
+                          : `عرض الكل (${filteredShortages.length})`}
+                      </Button>
+                    )}
+                  </>
                 )}
               </div>
             </div>
           )}
 
-          {/* 3. EMPLOYEES REPORT SECTION */}
+          {/* 3. EMPLOYEES */}
           {activeSection === 'employees' && (
-            <div className="g-card p-4 sm:p-5 space-y-3">
-              <h4 className="text-sm sm:text-base font-black text-[var(--g-text)]">
-                تقرير حضور والتزام الموظفين ({fromDate} إلى {toDate})
-              </h4>
-              {(report?.employeeStats || []).length === 0 ? (
-                <p className="text-center py-6 text-xs text-[var(--g-text-muted)]">
-                  لا توجد بيانات موظفين في هذه الفترة.
-                </p>
-              ) : (
-                <div className="space-y-2.5">
-                  {report.employeeStats.map((emp) => (
-                    <div
-                      key={emp.id}
-                      className="p-3.5 rounded-2xl bg-[var(--g-surface-2)] border border-[var(--g-border)] flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-                    >
-                      <div>
-                        <div className="font-extrabold text-sm sm:text-base text-[var(--g-text)] flex items-center gap-2">
-                          <span>{emp.name}</span>
-                          {isOwner && emp.emp_code && (
-                            <span className="text-xs text-[var(--g-primary)] num-ltr">
-                              🔑 #{emp.emp_code}
-                            </span>
-                          )}
-                          {onOpenPersonLog && (
-                            <button
-                              type="button"
-                              onClick={() => onOpenPersonLog(emp.id, emp.name)}
-                              className="px-2.5 py-0.5 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-[11px] font-extrabold"
-                            >
-                              سجل الموظف الكامل 📋
-                            </button>
-                          )}
-                        </div>
-                        <div className="text-xs text-[var(--g-text-muted)]">
-                          {emp.department} • مواعيد الشفت (12 ساعة): {emp.shift_start || '08:00'} → {emp.shift_end || '20:00'}
-                        </div>
-                      </div>
+            <div className="space-y-3">
+              <SectionHeader title="التزام الموظفين" count={filteredEmployees.length} />
 
-                      <div className="grid grid-cols-3 sm:flex items-center gap-2 text-center">
-                        <div className="px-3 py-1.5 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)]">
-                          <div className="text-[10px] text-[var(--g-text-muted)]">أيام الحضور</div>
-                          <div className="text-sm font-black text-[var(--g-green)] num-ltr">
-                            {emp.daysPresent}
+              {(report?.employeeStats || []).length > 0 && (
+                <div className="space-y-2.5">
+                  <SearchFilterBar
+                    value={empSearch}
+                    onChange={setEmpSearch}
+                    placeholder="بحث باسم الموظف أو القسم..."
+                  />
+                  <FilterChipRail
+                    activeId={empSort}
+                    onSelect={setEmpSort}
+                    items={[
+                      { id: 'present', label: 'الأكثر حضوراً' },
+                      { id: 'late', label: 'الأكثر تأخيراً' },
+                      { id: 'breaks', label: 'الاستراحات' },
+                    ]}
+                  />
+                </div>
+              )}
+
+              {filteredEmployees.length === 0 ? (
+                <EmptyState compact title="لا توجد بيانات موظفين" />
+              ) : (
+                <GroupedList>
+                  {filteredEmployees.map((emp) => {
+                    const breaksVal = emp.breaksCount ?? emp.breaks ?? 0;
+                    return (
+                      <div
+                        key={emp.id}
+                        className="min-h-[56px] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-semibold text-ink truncate">
+                            {emp.name}
+                            {isOwner && emp.emp_code && (
+                              <span className="num-ltr text-xs font-normal text-ink-muted">
+                                {' '}
+                                · #{emp.emp_code}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-ink-muted truncate num-ltr">
+                            {emp.department} · {emp.shift_start || '08:00'}–{emp.shift_end || '20:00'}
                           </div>
                         </div>
-                        <div className="px-3 py-1.5 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)]">
-                          <div className="text-[10px] text-[var(--g-text-muted)]">تأخير</div>
-                          <div className="text-sm font-black text-[var(--g-red)] num-ltr">
-                            {emp.lateCount} ({emp.totalLateMinutes}د)
-                          </div>
-                        </div>
-                        <div className="px-3 py-1.5 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)]">
-                          <div className="text-[10px] text-[var(--g-text-muted)]">استراحات</div>
-                          <div className="text-sm font-black text-[var(--g-text)] num-ltr">
-                            {emp.breaksCount}
-                          </div>
+
+                        <div className="w-full sm:w-auto flex items-center justify-between sm:justify-end gap-3 flex-wrap text-xs num-ltr shrink-0">
+                          <span className="font-semibold text-ink">
+                            {emp.daysPresent} يوم
+                          </span>
+                          <span
+                            className={
+                              emp.lateCount > 0
+                                ? 'text-danger font-semibold'
+                                : 'text-ink-muted'
+                            }
+                          >
+                            {emp.lateCount} تأخير
+                            {emp.totalLateMinutes > 0 ? ` (${emp.totalLateMinutes}د)` : ''}
+                          </span>
+                          <span className="text-ink-muted">{breaksVal} بريك</span>
+                          {onOpenPersonLog && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => onOpenPersonLog(emp.id, emp.name)}
+                            >
+                              سجل
+                            </Button>
+                          )}
                         </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
+                    );
+                  })}
+                </GroupedList>
               )}
             </div>
           )}
 
-          {/* 4. SUPPLIERS REPORT SECTION */}
+          {/* 4. SUPPLIERS */}
           {activeSection === 'suppliers' && (
-            <div className="g-card p-4 sm:p-5 space-y-3">
-              <h4 className="text-sm sm:text-base font-black text-[var(--g-text)]">
-                تقرير عربيات الموردين وزمن التنزيل والمرتجعات
-              </h4>
-              {(report?.supplierStats || []).length === 0 ? (
-                <p className="text-center py-6 text-xs text-[var(--g-text-muted)]">
-                  لا توجد عربيات موردين مسجلة في هذه الفترة.
-                </p>
-              ) : (
+            <div className="space-y-3">
+              <SectionHeader title="الموردون" count={filteredSuppliers.length} />
+
+              {(report?.supplierStats || []).length > 0 && (
                 <div className="space-y-2.5">
-                  {report.supplierStats.map((sup) => (
+                  <SearchFilterBar
+                    value={supSearch}
+                    onChange={setSupSearch}
+                    placeholder="بحث باسم المورد..."
+                  />
+                  <FilterChipRail
+                    activeId={supSort}
+                    onSelect={setSupSort}
+                    items={[
+                      { id: 'deliveries', label: 'الأكثر توريداً' },
+                      { id: 'duration', label: 'مدة التنزيل' },
+                      { id: 'issues', label: 'الملاحظات' },
+                    ]}
+                  />
+                </div>
+              )}
+
+              {filteredSuppliers.length === 0 ? (
+                <EmptyState compact title="لا توجد عربيات في هذه الفترة" />
+              ) : (
+                <GroupedList>
+                  {filteredSuppliers.map((sup) => (
                     <div
-                      key={sup.id}
-                      className="p-3.5 rounded-2xl bg-[var(--g-surface-2)] border border-[var(--g-border)] flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                      key={sup.id || sup.supplier_name || sup.name}
+                      className="min-h-[54px] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                     >
-                      <div>
-                        <div className="font-extrabold text-sm sm:text-base text-[var(--g-text)] flex items-center gap-2 flex-wrap">
-                          <span>{sup.name}</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline gap-2 min-w-0">
+                          <span className="text-sm font-semibold text-ink truncate">
+                            {sup.name || sup.supplier_name}
+                          </span>
                           {sup.hasPendingReturn && (
-                            <span className="px-2 py-0.5 rounded-full bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] text-[11px] font-black">
-                              مرتجع معلق ⚠️
+                            <span className="text-xs font-medium text-warning shrink-0">
+                              مرتجع
                             </span>
                           )}
                         </div>
-                        <div className="text-xs text-[var(--g-text-muted)]">{sup.category}</div>
+                        <div className="text-xs text-ink-muted truncate">
+                          {sup.category}
+                        </div>
                       </div>
 
-                      <div className="grid grid-cols-3 sm:flex items-center gap-2 text-center">
-                        <div className="px-3 py-1.5 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)]">
-                          <div className="text-[10px] text-[var(--g-text-muted)]">الطلبيات</div>
-                          <div className="text-sm font-black text-[var(--g-primary)] num-ltr">
-                            {sup.deliveriesCount}
-                          </div>
-                        </div>
-                        <div className="px-3 py-1.5 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)]">
-                          <div className="text-[10px] text-[var(--g-text-muted)]">متوسط التنزيل</div>
-                          <div className="text-sm font-black text-[var(--g-text)] num-ltr">
-                            {sup.avgDurationMinutes} د
-                          </div>
-                        </div>
-                        <div className="px-3 py-1.5 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)]">
-                          <div className="text-[10px] text-[var(--g-text-muted)]">نواقص/مرتجع</div>
-                          <div className="text-sm font-black text-[var(--g-red)] num-ltr">
-                            {sup.issuesCount}
-                          </div>
-                        </div>
+                      <div className="w-full sm:w-auto flex items-center justify-between sm:justify-end gap-3 flex-wrap text-xs num-ltr shrink-0">
+                        <span className="font-semibold text-ink">
+                          {sup.deliveriesCount} طلبية
+                        </span>
+                        <span className="text-ink-muted">{sup.avgDurationMinutes}د</span>
+                        <span
+                          className={
+                            sup.issuesCount > 0
+                              ? 'text-danger font-semibold'
+                              : 'text-ink-muted'
+                          }
+                        >
+                          {sup.issuesCount} ملاحظات
+                        </span>
                       </div>
                     </div>
                   ))}
-                </div>
+                </GroupedList>
               )}
             </div>
           )}

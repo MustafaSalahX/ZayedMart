@@ -4,57 +4,68 @@ import {
   extractImageFromClipboardEvent,
   readImageFromClipboardButton,
 } from '../lib/imageUtils.js';
+import { Button, Icon } from './ui/index.js';
 
 /**
- * مكون إرفاق الصور الاختياري لـ "زايد مارت"
- * يدعم فقط:
- * 1) تصوير مع الرفع من الفون (تطبيق كاميرا الهاتف الأصلي عند الرفع)
- * 2) اختيار صورة جاهزة من الفون أو الكمبيوتر
- * 3) لصق سكرين شوت فوري (Ctrl + V أو زر اللصق من الحافظة)
- * بدون أي كاميرات مراقبة حية وبدون فتح ويب كام داخل المتصفح.
+ * Compact 1-Row Inline Proof Uploader (`ProofUploader`):
+ * Supports phone camera capture, gallery picker, clipboard paste, and drag-and-drop.
  */
 export default function ProofUploader({
   value,
   onChange,
-  label = 'إثبات بالصورة أو السكرين شوت (اختياري)',
+  label = 'إرفاق صورة',
   compact = false,
+  globalPaste = false,
 }) {
   const phoneCameraInputRef = useRef(null);
   const galleryFileInputRef = useRef(null);
+  const statusTimerRef = useRef(null);
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState('');
+  const [status, setStatus] = useState(null);
   const [dragActive, setDragActive] = useState(false);
 
   useEffect(() => {
-    async function handleGlobalPaste(e) {
-      try {
-        const imgData = await extractImageFromClipboardEvent(e);
-        if (imgData) {
-          e.preventDefault();
-          onChange(imgData);
-          setMsg('تم لصق السكرين شوت بنجاح!');
-          setTimeout(() => setMsg(''), 2500);
-        }
-      } catch (err) {
-        setMsg(err.message || 'تعذر لصق الصورة');
-      }
-    }
+    return () => {
+      if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+    };
+  }, []);
 
-    window.addEventListener('paste', handleGlobalPaste);
-    return () => window.removeEventListener('paste', handleGlobalPaste);
-  }, [onChange]);
+  function showStatus(text, tone = 'success') {
+    setStatus({ text, tone });
+    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+    statusTimerRef.current = setTimeout(() => setStatus(null), 2400);
+  }
+
+  async function processClipboardEvent(e) {
+    try {
+      const imgData = await extractImageFromClipboardEvent(e);
+      if (imgData) {
+        e.preventDefault();
+        onChange?.(imgData);
+        showStatus('تم لصق الصورة', 'success');
+      }
+    } catch (err) {
+      showStatus(err.message || 'تعذر لصق الصورة', 'error');
+    }
+  }
+
+  useEffect(() => {
+    if (!globalPaste) return undefined;
+    window.addEventListener('paste', processClipboardEvent);
+    return () => window.removeEventListener('paste', processClipboardEvent);
+  });
 
   async function handleFileSelect(e) {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
     setBusy(true);
-    setMsg('');
+    setStatus(null);
     try {
       const compressed = await compressImageFile(file);
-      onChange(compressed);
+      onChange?.(compressed);
     } catch (err) {
-      setMsg(err.message || 'تعذر رفع الصورة');
+      showStatus(err.message || 'تعذر رفع الصورة', 'error');
     } finally {
       setBusy(false);
     }
@@ -62,14 +73,12 @@ export default function ProofUploader({
 
   async function handlePasteButton() {
     setBusy(true);
-    setMsg('');
+    setStatus(null);
     try {
       const compressed = await readImageFromClipboardButton();
-      onChange(compressed);
-      setMsg('تم لصق السكرين شوت من الحافظة!');
-      setTimeout(() => setMsg(''), 2500);
+      onChange?.(compressed);
     } catch (err) {
-      setMsg(err.message);
+      showStatus(err.message || 'لا توجد صورة في الحافظة', 'error');
     } finally {
       setBusy(false);
     }
@@ -81,12 +90,12 @@ export default function ProofUploader({
     const file = e.dataTransfer?.files?.[0];
     if (!file) return;
     setBusy(true);
-    setMsg('');
+    setStatus(null);
     try {
       const compressed = await compressImageFile(file);
-      onChange(compressed);
+      onChange?.(compressed);
     } catch (err) {
-      setMsg(err.message || 'الملف غير صالح');
+      showStatus(err.message || 'ملف غير صالح', 'error');
     } finally {
       setBusy(false);
     }
@@ -94,29 +103,18 @@ export default function ProofUploader({
 
   return (
     <div
+      tabIndex={0}
+      onPaste={globalPaste ? undefined : processClipboardEvent}
       onDragOver={(e) => {
         e.preventDefault();
         setDragActive(true);
       }}
       onDragLeave={() => setDragActive(false)}
       onDrop={handleDrop}
-      className={`rounded-2xl border-2 border-dashed p-3.5 transition-colors ${
-        dragActive
-          ? 'border-[#1A73E8] bg-[#E8F0FE]/50'
-          : 'border-[var(--g-border)] bg-[var(--g-surface-variant)]/60'
+      className={`space-y-1.5 outline-none rounded-[var(--g-radius-md)] transition-colors duration-150 ${
+        dragActive ? 'bg-primary-container/25 ring-1 ring-[var(--g-primary)] p-2' : ''
       }`}
     >
-      <div className="flex items-center justify-between gap-2 mb-2.5">
-        <div className="flex items-center gap-1.5 text-sm font-semibold">
-          <span className="ms-icon text-[var(--g-primary)]">add_photo_alternate</span>
-          <span>{label}</span>
-        </div>
-        <span className="text-xs px-2.5 py-0.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] text-[var(--g-muted)]">
-          اختياري
-        </span>
-      </div>
-
-      {/* Hidden native inputs: Phone capture-upload & standard file/gallery picker */}
       <input
         ref={phoneCameraInputRef}
         type="file"
@@ -134,71 +132,80 @@ export default function ProofUploader({
       />
 
       {value ? (
-        <div className="flex flex-wrap sm:flex-nowrap items-center gap-3 bg-[var(--g-surface)] p-2.5 rounded-xl border border-[var(--g-border)]">
-          <img
-            src={value}
-            alt="مرفق الإثبات"
-            className="w-16 h-16 sm:w-20 sm:h-20 object-cover rounded-lg border border-[var(--g-border)] shrink-0"
-          />
-          <div className="flex-1 min-w-[140px]">
-            <div className="text-xs sm:text-sm font-semibold text-[var(--g-green)] flex items-center gap-1">
-              <span className="ms-icon filled text-base">check_circle</span>
-              <span>تم إرفاق الصورة وجاهزة للحفظ</span>
-            </div>
-            <p className="text-[11px] sm:text-xs text-[var(--g-muted)] mt-0.5">
-              يمكنك استبدالها أو الضغط على حذف لإلغائها
-            </p>
+        <div className="flex items-center justify-between gap-2.5 p-2 rounded-[var(--g-radius-md)] bg-surface-2 border border-line">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <img
+              src={value}
+              alt="مرفق"
+              className="w-12 h-12 object-cover rounded-[var(--g-radius-sm)] border border-line shrink-0"
+            />
+            <span className="text-xs font-medium text-ink truncate">{label}</span>
           </div>
-          <button
-            type="button"
-            onClick={() => onChange('')}
-            className="w-full sm:w-auto justify-center px-3 py-2 rounded-xl bg-[var(--g-red-bg)] text-[var(--g-red)] text-xs font-bold flex items-center gap-1 hover:opacity-90"
-          >
-            <span className="ms-icon text-base">delete</span>
-            <span>حذف</span>
-          </button>
+
+          <div className="flex items-center gap-1 shrink-0">
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={busy}
+              onClick={() => galleryFileInputRef.current?.click()}
+            >
+              تغيير
+            </Button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onChange?.('')}
+              aria-label="حذف الصورة"
+              className="w-10 h-10 rounded-full hover:bg-danger-bg text-ink-muted hover:text-danger flex items-center justify-center transition-colors duration-150 cursor-pointer"
+            >
+              <Icon name="close" size={16} />
+            </button>
+          </div>
         </div>
       ) : (
-        <div className={`grid ${compact ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-1 sm:grid-cols-3'} gap-2`}>
-          <button
-            type="button"
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Button
+            variant="secondary"
+            size="sm"
+            icon="photo_camera"
+            loading={busy}
             disabled={busy}
             onClick={() => phoneCameraInputRef.current?.click()}
-            className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)] hover:border-[var(--g-primary)] text-sm font-semibold transition-all"
           >
-            <span className="ms-icon text-[var(--g-primary)]">photo_camera</span>
-            <span>تصوير ورفع من الفون</span>
-          </button>
-
-          <button
-            type="button"
+            كاميرا
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon="image"
             disabled={busy}
             onClick={() => galleryFileInputRef.current?.click()}
-            className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)] hover:border-[var(--g-primary)] text-sm font-semibold transition-all"
           >
-            <span className="ms-icon text-[#188038]">image</span>
-            <span>صورة من الفون / الجهاز</span>
-          </button>
-
-          <button
-            type="button"
-            disabled={busy}
-            onClick={handlePasteButton}
-            className="flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)] hover:border-[var(--g-primary)] text-sm font-semibold transition-all"
-          >
-            <span className="ms-icon text-[#E37400]">content_paste</span>
-            <span>لصق سكرين (Ctrl+V)</span>
-          </button>
+            صورة
+          </Button>
+          {!compact && (
+            <Button
+              variant="secondary"
+              size="sm"
+              icon="content_paste"
+              disabled={busy}
+              onClick={handlePasteButton}
+            >
+              لصق
+            </Button>
+          )}
         </div>
       )}
 
-      {busy && (
-        <p className="text-xs text-[var(--g-primary)] mt-2 font-medium">
-          جاري تجهيز وضغط الصورة...
+      {status && (
+        <p
+          role={status.tone === 'error' ? 'alert' : 'status'}
+          className={`text-xs m-0 font-medium ${
+            status.tone === 'error' ? 'text-danger' : 'text-success'
+          }`}
+        >
+          {status.text}
         </p>
-      )}
-      {msg && (
-        <p className="text-xs text-[var(--g-primary)] mt-2 font-medium">{msg}</p>
       )}
     </div>
   );

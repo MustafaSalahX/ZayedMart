@@ -29,6 +29,18 @@ import {
 } from '../common/decorators';
 import { DatabaseService } from '../database/database.service';
 
+const LOGIN_ROLE_ORDER = [
+  'owner',
+  'manager',
+  'supervisor',
+  'cashier',
+  'cctv',
+  'security',
+  'hall',
+  'warehouse',
+  'delivery',
+];
+
 @Controller('api')
 export class AuthController {
   private readonly rateLimiter = createLoginRateLimiter({
@@ -47,6 +59,7 @@ export class AuthController {
       ok: true,
       store_name: settings.store_name || 'زايد مارت',
       branch_name: settings.branch_name || 'الفرع الرئيسي',
+      login_show_role_cards: settings.login_show_role_cards !== 'false',
     };
   }
 
@@ -54,10 +67,68 @@ export class AuthController {
   @Get('auth/profiles')
   async getProfiles() {
     const settings = await this.db.getSettingsMap();
+    const showRoleCards = settings.login_show_role_cards !== 'false';
+    let profiles: any[] = [];
+
+    if (showRoleCards) {
+      const [users, rolePolicies, employees] = await Promise.all([
+        this.db.queryAll<any>(
+          "SELECT id, display_name, role, avatar_color, avatar_url, avatar_preset, employee_id FROM system_users WHERE is_active = 1 AND role != 'kiosk' ORDER BY display_name ASC"
+        ),
+        this.db.queryAll<any>(
+          'SELECT role, avatar_url, avatar_preset, avatar_color FROM role_policies'
+        ),
+        this.db.queryAll<any>(
+          'SELECT id, avatar_url, avatar_preset FROM employees WHERE is_active = 1'
+        ),
+      ]);
+
+      const policyMap = new Map<string, any>(rolePolicies.map((rp) => [rp.role, rp]));
+      const empMap = new Map<string, any>(employees.map((e) => [e.id, e]));
+
+      profiles = users
+        .map((u) => {
+          const roleMeta = ROLES_METADATA[u.role] || {
+            label: u.role,
+            shortLabel: u.role,
+            icon: 'person',
+            color: '#0B57D0',
+          };
+          const rp = policyMap.get(u.role) || null;
+          const emp = u.employee_id ? empMap.get(u.employee_id) || null : null;
+          const avatarUrl = this.db.resolveEffectiveAvatarUrl(u, emp, rp);
+          const avatarPreset = String(
+            u.avatar_preset || emp?.avatar_preset || rp?.avatar_preset || ''
+          ).trim();
+          return {
+            id: u.id,
+            role: u.role,
+            role_label: roleMeta.label,
+            role_short_label: roleMeta.shortLabel || roleMeta.label,
+            role_icon: roleMeta.icon || 'person',
+            display_name: u.display_name,
+            avatar_url: avatarUrl,
+            avatar_color: u.avatar_color || rp?.avatar_color || roleMeta.color || '#0B57D0',
+            avatar_preset: avatarPreset,
+            has_custom_photo: Boolean(avatarUrl),
+          };
+        })
+        .sort((a, b) => {
+          const ia = LOGIN_ROLE_ORDER.indexOf(a.role);
+          const ib = LOGIN_ROLE_ORDER.indexOf(b.role);
+          const ra = ia === -1 ? 99 : ia;
+          const rb = ib === -1 ? 99 : ib;
+          if (ra !== rb) return ra - rb;
+          return String(a.display_name || '').localeCompare(String(b.display_name || ''), 'ar');
+        });
+    }
+
     return {
       ok: true,
       store_name: settings.store_name || 'زايد مارت',
       branch_name: settings.branch_name || 'الفرع الرئيسي',
+      login_show_role_cards: showRoleCards,
+      profiles,
     };
   }
 
@@ -69,8 +140,13 @@ export class AuthController {
       const rawPassword = normalizeDigits(
         String(body?.password ?? body?.pin ?? '').trim()
       );
+      const rawUsername = String(body?.username ?? '').trim().toLowerCase();
+      const rawUserId = String(body?.user_id ?? '').trim();
       const ip = getClientIp(req);
-      const targetKey = 'password_login';
+      const isTargetedLogin = Boolean(rawUserId || rawUsername);
+      const targetKey = isTargetedLogin
+        ? `acct:${rawUserId || rawUsername}`
+        : 'password_login';
 
       const blockCheck = this.rateLimiter.checkBlocked(ip, targetKey);
       if (blockCheck.blocked) {
@@ -88,25 +164,49 @@ export class AuthController {
         });
       }
 
-      const activeUsers = await this.db.queryAll<any>(
-        'SELECT * FROM system_users WHERE is_active = 1'
-      );
-
       let matchedUser: any = null;
-      for (const candidate of activeUsers) {
-        const isMatch = verifyPinHash(rawPassword, candidate.pin_salt, candidate.pin_hash);
-        if (isMatch && !matchedUser) {
+
+      if (isTargetedLogin) {
+        const candidate = rawUserId
+          ? await this.db.queryOne<any>(
+              'SELECT * FROM system_users WHERE id = ? AND is_active = 1 LIMIT 1',
+              [rawUserId]
+            )
+          : await this.db.queryOne<any>(
+              'SELECT * FROM system_users WHERE LOWER(username) = LOWER(?) AND is_active = 1 LIMIT 1',
+              [rawUsername]
+            );
+        if (candidate && verifyPinHash(rawPassword, candidate.pin_salt, candidate.pin_hash)) {
           matchedUser = candidate;
         }
-      }
-
-      if (!matchedUser) {
-        const matchedEmp = await this.db.queryOne<any>(
-          "SELECT * FROM employees WHERE is_active = 1 AND emp_code = ? AND COALESCE(login_enabled, 1) = 1 AND COALESCE(system_role, '') != 'none' LIMIT 1",
-          [rawPassword]
+      } else {
+        const activeUsers = await this.db.queryAll<any>(
+          'SELECT * FROM system_users WHERE is_active = 1'
         );
-        if (matchedEmp) {
-          matchedUser = await this.db.syncEmployeeLoginAccount(matchedEmp);
+
+        for (const candidate of activeUsers) {
+          const isMatch = verifyPinHash(rawPassword, candidate.pin_salt, candidate.pin_hash);
+          if (isMatch && !matchedUser) {
+            matchedUser = candidate;
+          }
+        }
+
+        // Only allow initial emp_code auto-provisioning if NO system_users account exists yet for that employee.
+        // Once a system_users row exists, system_users.pin_hash is the single authoritative password!
+        if (!matchedUser) {
+          const matchedEmp = await this.db.queryOne<any>(
+            `SELECT * FROM employees
+             WHERE is_active = 1
+               AND emp_code = ?
+               AND COALESCE(login_enabled, 1) = 1
+               AND COALESCE(system_role, '') != 'none'
+               AND NOT EXISTS (SELECT 1 FROM system_users su WHERE su.employee_id = employees.id)
+             LIMIT 1`,
+            [rawPassword]
+          );
+          if (matchedEmp) {
+            matchedUser = await this.db.syncEmployeeLoginAccount(matchedEmp);
+          }
         }
       }
 
@@ -114,14 +214,14 @@ export class AuthController {
         const failInfo = this.rateLimiter.recordFailure(ip, targetKey);
         await this.db.recordAuditLog({
           userId: '',
-          userName: 'محاولة دخول',
+          userName: rawUsername || 'محاولة دخول',
           role: '',
           action: failInfo.lockedNow
             ? 'حظر مؤقت بسبب محاولات خاطئة متكررة'
-            : 'فشل تسجيل دخول (كلمة مرور خاطئة)',
+            : 'فشل تسجيل دخول (بيانات غير صحيحة)',
           details: failInfo.lockedNow
             ? 'تم قفل المحاولات لمدة 60 ثانية بعد استنفاد الحد المسموح'
-            : `كلمة المرور غير صحيحة (متبقي ${failInfo.remaining} محاولات)`,
+            : `محاولة دخول فاشلة (متبقي ${failInfo.remaining} محاولات)`,
           ip,
           severity: failInfo.lockedNow ? 'critical' : 'warning',
         });
@@ -130,6 +230,8 @@ export class AuthController {
           ok: false,
           error: failInfo.lockedNow
             ? 'تم قفل الدخول لمدة 60 ثانية بسبب تكرار كلمة المرور الخاطئة!'
+            : rawUsername
+            ? 'اسم المستخدم أو كلمة المرور غير صحيحة'
             : 'كلمة المرور غير صحيحة',
         });
       }
@@ -141,25 +243,40 @@ export class AuthController {
         matchedUser.id,
       ]);
 
-      const token = await this.db.issueSessionForUser(
-        matchedUser,
-        ip,
-        String(req.headers['user-agent'] || '')
-      );
-      const permissions = await this.db.getRolePermissions(
-        matchedUser.role,
-        matchedUser.custom_permissions_json
-      );
+      const [token, permissions, rolePolicyRow, empRow] = await Promise.all([
+        this.db.issueSessionForUser(
+          matchedUser,
+          ip,
+          String(req.headers['user-agent'] || '')
+        ),
+        this.db.getRolePermissions(
+          matchedUser.role,
+          matchedUser.custom_permissions_json
+        ),
+        this.db.queryOne<any>(
+          'SELECT role, avatar_url, avatar_preset, avatar_color FROM role_policies WHERE role = ? LIMIT 1',
+          [matchedUser.role]
+        ),
+        matchedUser.employee_id
+          ? this.db.queryOne<any>('SELECT * FROM employees WHERE id = ? LIMIT 1', [
+              matchedUser.employee_id,
+            ])
+          : Promise.resolve(null),
+      ]);
+
       const roleMeta = ROLES_METADATA[matchedUser.role] || {
         label: matchedUser.role,
       };
+      const publicUser = this.db.buildPublicUserPayload(matchedUser, empRow, rolePolicyRow);
 
       await this.db.recordAuditLog({
         userId: matchedUser.id,
         userName: matchedUser.display_name,
         role: matchedUser.role,
         action: 'تسجيل دخول ناجح',
-        details: `تم تحديد الصلاحية تلقائياً: (${roleMeta.label})`,
+        details: isTargetedLogin
+          ? `دخول مباشر عبر ${rawUsername ? `اسم المستخدم (@${matchedUser.username})` : 'بطاقة الدور'} (${roleMeta.label})`
+          : `تم تحديد الصلاحية تلقائياً: (${roleMeta.label})`,
         ip,
         severity: 'info',
       });
@@ -167,14 +284,7 @@ export class AuthController {
       return res.json({
         ok: true,
         token,
-        user: {
-          id: matchedUser.id,
-          username: matchedUser.username,
-          display_name: matchedUser.display_name,
-          role: matchedUser.role,
-          role_label: roleMeta.label,
-          avatar_color: matchedUser.avatar_color,
-        },
+        user: publicUser,
         permissions,
       });
     } catch (err: any) {
@@ -268,14 +378,32 @@ export class AuthController {
         'SELECT * FROM system_users WHERE id = ? LIMIT 1',
         [auth.user.id]
       );
-      const empRow = userRow?.employee_id
-        ? await this.db.queryOne<any>('SELECT * FROM employees WHERE id = ? LIMIT 1', [
-            userRow.employee_id,
-          ])
-        : null;
+      const [empRow, rolePolicyRow, sessionsCountRow] = await Promise.all([
+        userRow?.employee_id
+          ? this.db.queryOne<any>('SELECT * FROM employees WHERE id = ? LIMIT 1', [
+              userRow.employee_id,
+            ])
+          : Promise.resolve(null),
+        this.db.queryOne<any>(
+          'SELECT role, avatar_url, avatar_preset, avatar_color FROM role_policies WHERE role = ? LIMIT 1',
+          [auth.user.role]
+        ),
+        this.db.queryOne<{ c: any }>(
+          'SELECT COUNT(*) as c FROM user_sessions WHERE user_id = ? AND revoked = 0 AND expires_at > ?',
+          [auth.user.id, new Date().toISOString()]
+        ),
+      ]);
       const myPass = userRow
         ? decryptPasswordForAdmin(userRow.pin_cipher, secretHex) || empRow?.emp_code || ''
         : '';
+      const effectiveAvatarUrl = this.db.resolveEffectiveAvatarUrl(
+        userRow,
+        empRow,
+        rolePolicyRow
+      );
+      const resolvedPreset = String(
+        userRow?.avatar_preset || empRow?.avatar_preset || rolePolicyRow?.avatar_preset || ''
+      ).trim();
 
       const empId = empRow?.id || '';
       const myAttendanceLogs = empId
@@ -312,12 +440,23 @@ export class AuthController {
       return res.json({
         ok: true,
         profile: {
+          id: auth.user.id,
           user_id: auth.user.id,
-          username: auth.user.username,
-          display_name: auth.user.display_name,
+          username: userRow?.username || auth.user.username,
+          display_name: userRow?.display_name || auth.user.display_name,
           role: auth.user.role,
           role_label: auth.user.role_label,
-          avatar_color: auth.user.avatar_color,
+          avatar_color: userRow?.avatar_color || auth.user.avatar_color,
+          avatar_url: effectiveAvatarUrl,
+          own_avatar_url: String(userRow?.avatar_url || '').trim(),
+          effective_avatar_url: effectiveAvatarUrl,
+          role_default_avatar_url: String(rolePolicyRow?.avatar_url || '').trim(),
+          avatar_preset: resolvedPreset,
+          preferences: this.db.parsePreferencesJson(userRow?.preferences_json),
+          password_changed_at: userRow?.password_changed_at || '',
+          username_changed_at: userRow?.username_changed_at || '',
+          last_login_at: userRow?.last_login_at || '',
+          active_sessions_count: Number(sessionsCountRow?.c || 1),
           my_password: auth.user.role === 'kiosk' ? '' : myPass,
           employee_id: empId,
           emp_code: empRow?.emp_code || '',
@@ -327,6 +466,21 @@ export class AuthController {
           shift_end: empRow?.shift_end || '20:00',
           phone: empRow?.phone || '',
           qr_payload: empRow ? `ZMART:EMP:${empRow.id}` : '',
+          employee: empRow
+            ? {
+                id: empRow.id,
+                emp_code: empRow.emp_code || '',
+                name: empRow.name,
+                department: empRow.department,
+                role_title: empRow.role_title || '',
+                shift_start: empRow.shift_start || '08:00',
+                shift_end: empRow.shift_end || '20:00',
+                phone: empRow.phone || '',
+                avatar_color: empRow.avatar_color || auth.user.avatar_color,
+                avatar_url: empRow.avatar_url || effectiveAvatarUrl,
+                avatar_preset: empRow.avatar_preset || resolvedPreset,
+              }
+            : null,
         },
         stats: {
           checkInsCount,

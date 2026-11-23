@@ -1,6 +1,12 @@
 import React from 'react';
 import { formatRequestedQty, normalizeDigitsClient } from '../../lib/api.js';
 import VoiceMicButton from '../VoiceMicButton.jsx';
+import { Button, Card, FilterChipRail, Icon, SegmentedControl } from '../ui/index.js';
+
+const COMPOSER_MODE_OPTIONS = [
+  { id: 'shortage', labelAr: 'صنف ناقص' },
+  { id: 'suggestion', labelAr: 'اقتراح صنف' },
+];
 
 export default function ShortageComposerForm({
   categories = [],
@@ -39,91 +45,86 @@ export default function ShortageComposerForm({
   const parsedLiveQty = parseQtyInputForPayload(qtyInput);
   const liveQtyPreview = !parsedLiveQty.ok
     ? 'رقم غير صحيح'
-    : formatRequestedQty(parsedLiveQty.value, unit);
+    : parsedLiveQty.value !== null
+    ? formatRequestedQty(parsedLiveQty.value, unit)
+    : '';
 
-  return (
-    <form
-      onSubmit={onSubmit}
-      className={
-        inSheet
-          ? 'space-y-4'
-          : 'g-card p-4 sm:p-5 space-y-4 border-2 border-[var(--g-primary)]/20'
-      }
-    >
-      {/* Toggle between Shortage vs Cashier Product Suggestion */}
-      <div className="grid grid-cols-2 gap-2 p-1.5 rounded-2xl bg-[var(--g-surface-variant)]">
-        <button
-          type="button"
-          onClick={() => setIsSuggestion(false)}
-          className={`min-h-[44px] py-2 px-3 rounded-xl text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all ${
-            !isSuggestion
-              ? 'bg-[var(--g-surface)] text-[var(--g-primary)] shadow-xs'
-              : 'text-[var(--g-muted)]'
-          }`}
-        >
-          <span className="ms-icon text-base">production_quantity_limits</span>
-          <span>صنف ناقص بالصالة</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setIsSuggestion(true)}
-          className={`min-h-[44px] py-2 px-3 rounded-xl text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 transition-all ${
-            isSuggestion
-              ? 'bg-[var(--g-purple-bg)] text-[var(--g-purple)] shadow-xs border border-[var(--g-purple-border)]/40'
-              : 'text-[var(--g-muted)]'
-          }`}
-        >
-          <span className="ms-icon text-base">lightbulb</span>
-          <span>اقتراح صنف جديد</span>
-        </button>
-      </div>
+  const categoryChipItems = categories.map((cat) => ({
+    id: cat.id,
+    label: cat.label,
+  }));
 
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <div className="flex items-center gap-2">
-          <span className="w-7 h-7 rounded-full bg-[var(--g-primary)] text-white text-sm font-black flex items-center justify-center num-ltr">
-            1
-          </span>
-          <h3 className="text-sm sm:text-base font-black text-[var(--g-text)] m-0">
-            {isSuggestion ? 'القسم واسم الصنف المقترح' : 'اختر القسم واكتب اسم الصنف الناقص'}
-          </h3>
+  const formBody = (
+    <form onSubmit={onSubmit} className="space-y-4">
+      {/* Mode Switcher */}
+      <SegmentedControl
+        options={COMPOSER_MODE_OPTIONS}
+        value={isSuggestion ? 'suggestion' : 'shortage'}
+        onChange={(v) => setIsSuggestion(v === 'suggestion')}
+        ariaLabel="نوع التسجيل"
+        fullWidth
+      />
+
+      {/* Category Selector */}
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-medium text-ink-muted">القسم</span>
+          <VoiceMicButton
+            small
+            onTranscript={(txt) => setItemName((prev) => (prev ? `${prev} ${txt}` : txt))}
+            onToast={onToast}
+          />
         </div>
-        <VoiceMicButton
-          onTranscript={(txt) => setItemName((prev) => (prev ? `${prev} ${txt}` : txt))}
-          onToast={onToast}
-        />
+
+        {inSheet ? (
+          <FilterChipRail
+            items={categoryChipItems}
+            activeId={selectedCategory}
+            onSelect={setSelectedCategory}
+          />
+        ) : (
+          <>
+            <div className="sm:hidden">
+              <FilterChipRail
+                items={categoryChipItems}
+                activeId={selectedCategory}
+                onSelect={setSelectedCategory}
+              />
+            </div>
+            <div className="hidden sm:grid sm:grid-cols-5 gap-1.5">
+              {categories.map((cat) => {
+                const active = selectedCategory === cat.id;
+                return (
+                  <button
+                    key={cat.id}
+                    type="button"
+                    onClick={() => setSelectedCategory(cat.id)}
+                    className={`min-h-[44px] px-2.5 py-1.5 rounded-[var(--g-radius-md)] border text-xs font-medium flex items-center justify-center text-center transition-[background-color,border-color,color] duration-150 cursor-pointer ${
+                      active
+                        ? 'border-primary bg-primary-solid text-on-primary font-semibold'
+                        : 'border-line bg-surface-2 text-ink hover:border-line-strong'
+                    }`}
+                  >
+                    <span className="truncate">{cat.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
       </div>
 
-      {/* Step 1: Category Grid with Crisp Material Symbols */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-        {categories.map((cat) => {
-          const active = selectedCategory === cat.id;
-          return (
-            <button
-              key={cat.id}
-              type="button"
-              onClick={() => setSelectedCategory(cat.id)}
-              className={`min-h-[44px] px-3 py-2 rounded-2xl border text-xs font-extrabold flex items-center justify-center gap-1.5 transition-all active:scale-[0.98] ${
-                active
-                  ? 'border-[var(--g-primary)] bg-[var(--g-primary-solid)] text-white shadow-sm'
-                  : 'border-[var(--g-border)] bg-[var(--g-surface-2)] text-[var(--g-text)] hover:border-[var(--g-primary)]'
-              }`}
-            >
-              <span className={`ms-icon text-base ${active ? 'filled' : 'text-[var(--g-primary)]'}`}>
-                {cat.icon}
-              </span>
-              <span className="truncate">{cat.label}</span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Item Name Input */}
+      {/* Item Name */}
       <div>
-        <label className="block text-xs sm:text-sm font-extrabold text-[var(--g-text)] mb-1.5">
-          اسم الصنف المطلوب (يُحفظ تلقائياً في الكتالوج السريع)
+        <label
+          htmlFor="shortage-item-name"
+          className="block text-xs font-medium text-ink-muted mb-1.5"
+        >
+          اسم الصنف
         </label>
         <div className="relative">
           <input
+            id="shortage-item-name"
             ref={nameInputRef}
             type="text"
             value={itemName}
@@ -131,8 +132,8 @@ export default function ShortageComposerForm({
               setItemName(e.target.value);
               setSelectedCatalogId('');
             }}
-            placeholder="مثال: لبن جهينة 1 لتر / زيت كريستال ذرة / سكر..."
-            className="g-input min-h-[52px] text-base font-extrabold pl-10"
+            placeholder="اسم الصنف..."
+            className="g-input pe-12"
           />
           {itemName && (
             <button
@@ -140,39 +141,29 @@ export default function ShortageComposerForm({
               onClick={() => {
                 setItemName('');
                 setSelectedCatalogId('');
+                nameInputRef?.current?.focus();
               }}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-[var(--g-surface-2)] text-[var(--g-text-muted)] flex items-center justify-center"
-              title="مسح الاسم"
+              aria-label="مسح"
+              className="absolute end-1.5 top-1/2 -translate-y-1/2 w-11 h-11 rounded-full text-ink-muted hover:text-ink flex items-center justify-center cursor-pointer"
             >
-              <span className="ms-icon text-lg">close</span>
+              <Icon name="close" size={18} />
             </button>
           )}
         </div>
       </div>
 
-      {/* Step 2: Nullable / Zero / Positive Quantity Picker */}
-      <div className="p-3.5 rounded-2xl bg-[var(--g-surface-2)] border border-[var(--g-border)] space-y-3">
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <div className="flex items-center gap-2">
-            <span className="w-7 h-7 rounded-full bg-[var(--g-primary)] text-white text-sm font-black flex items-center justify-center num-ltr">
-              2
+      {/* Quantity Picker */}
+      <div className="pt-2 border-t border-line space-y-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-medium text-ink-muted">الكمية</span>
+          {liveQtyPreview && (
+            <span className="text-xs font-semibold text-primary num-ltr">
+              {liveQtyPreview}
             </span>
-            <div>
-              <div className="text-sm font-black text-[var(--g-text)]">
-                الكمية المطلوبة (اختياري)
-              </div>
-              <div className="text-[11px] text-[var(--g-text-muted)]">
-                اتركها فاضية أو اختر 0 أو اكتب العدد
-              </div>
-            </div>
-          </div>
-
-          <span className="px-3 py-1 rounded-full text-xs font-black bg-[var(--g-primary-container)] text-[var(--g-on-primary-container)] num-ltr">
-            {liveQtyPreview}
-          </span>
+          )}
         </div>
 
-        <div className="flex flex-wrap gap-2">
+        <div className="flex items-center gap-1.5 overflow-x-auto sm:flex-wrap no-scrollbar pb-0.5">
           {qtyPresets.map((preset) => {
             const isSelected = normalizeDigitsClient(qtyInput).trim() === preset.value;
             return (
@@ -180,10 +171,10 @@ export default function ShortageComposerForm({
                 key={preset.label}
                 type="button"
                 onClick={() => setQtyInput(preset.value)}
-                className={`min-h-[42px] px-3 py-1.5 rounded-xl border text-xs font-black transition-all active:scale-[0.97] num-ltr ${
+                className={`min-h-[44px] px-3 py-1 rounded-[var(--g-radius-sm)] border text-xs font-medium num-ltr shrink-0 cursor-pointer ${
                   isSelected
-                    ? 'border-[var(--g-primary)] bg-[var(--g-primary-solid)] text-white shadow-sm'
-                    : 'border-[var(--g-border)] bg-[var(--g-surface)] text-[var(--g-text)]'
+                    ? 'border-primary bg-primary-solid text-on-primary font-semibold'
+                    : 'border-line bg-surface text-ink hover:border-line-strong'
                 }`}
               >
                 {preset.label}
@@ -196,54 +187,53 @@ export default function ShortageComposerForm({
           <button
             type="button"
             onClick={() => setQtyInput((prev) => adjustQty(prev, 1))}
-            className="w-13 h-13 rounded-2xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-2xl font-black flex items-center justify-center shrink-0 shadow-sm active:scale-95"
+            className="w-12 h-12 rounded-[var(--g-radius-md)] bg-success-solid text-on-success flex items-center justify-center shrink-0 cursor-pointer"
             aria-label="زيادة الكمية"
           >
-            +
+            <Icon name="add" size={20} weight="bold" />
           </button>
 
-          <div className="relative flex-1">
-            <input
-              type="text"
-              inputMode="decimal"
-              dir="ltr"
-              value={qtyInput}
-              onChange={(e) => setQtyInput(normalizeDigitsClient(e.target.value))}
-              placeholder="فاضي (بدون تحديد كمية)"
-              className="g-input min-h-[52px] text-center text-lg font-black num-ltr"
-            />
-            {qtyInput !== '' && (
-              <button
-                type="button"
-                onClick={() => setQtyInput('')}
-                className="absolute left-2.5 top-1/2 -translate-y-1/2 px-2.5 py-1 rounded-lg bg-[var(--g-surface-2)] text-xs font-bold text-[var(--g-text-muted)]"
-              >
-                تفريغ
-              </button>
-            )}
-          </div>
+          <input
+            type="text"
+            inputMode="decimal"
+            dir="ltr"
+            value={qtyInput}
+            onChange={(e) => setQtyInput(normalizeDigitsClient(e.target.value))}
+            placeholder="0"
+            className="g-input flex-1 min-w-0 text-center text-base font-semibold num-ltr"
+          />
+
+          {qtyInput !== '' && (
+            <button
+              type="button"
+              onClick={() => setQtyInput('')}
+              aria-label="تفريغ"
+              className="w-11 h-12 rounded-[var(--g-radius-md)] bg-surface-2 border border-line text-ink-muted hover:text-danger flex items-center justify-center shrink-0 cursor-pointer"
+            >
+              <Icon name="backspace" size={18} />
+            </button>
+          )}
 
           <button
             type="button"
             onClick={() => setQtyInput((prev) => adjustQty(prev, -1))}
-            className="w-13 h-13 rounded-2xl bg-[var(--g-surface)] border border-[var(--g-border)] text-[var(--g-text)] text-2xl font-black flex items-center justify-center shrink-0 active:scale-95"
+            className="w-12 h-12 rounded-[var(--g-radius-md)] bg-surface-2 border border-line text-ink flex items-center justify-center shrink-0 cursor-pointer"
             aria-label="تقليل الكمية"
           >
-            −
+            <Icon name="remove" size={20} weight="bold" />
           </button>
         </div>
 
-        <div className="flex items-center gap-1.5 flex-wrap pt-1">
-          <span className="text-xs font-bold text-[var(--g-text-muted)] ml-1">الوحدة:</span>
+        <div className="flex items-center gap-1.5 flex-wrap">
           {unitOptions.map((u) => (
             <button
               key={u || '__none'}
               type="button"
               onClick={() => setUnit(u)}
-              className={`min-h-[38px] px-3 py-1 rounded-full text-xs font-extrabold border transition-all ${
+              className={`min-h-[40px] px-3 py-1 rounded-full text-xs font-medium border cursor-pointer ${
                 unit === u
-                  ? 'border-[var(--g-primary)] bg-[var(--g-primary-solid)] text-white shadow-2xs'
-                  : 'border-[var(--g-border)] bg-[var(--g-surface)] text-[var(--g-text)] hover:border-[var(--g-primary)]'
+                  ? 'border-primary bg-primary-solid text-on-primary font-semibold'
+                  : 'border-line bg-surface text-ink hover:border-line-strong'
               }`}
             >
               {u || 'بدون وحدة'}
@@ -252,71 +242,51 @@ export default function ShortageComposerForm({
         </div>
       </div>
 
-      {/* Step 3: Urgency 2-Big Buttons */}
-      <div className="grid grid-cols-2 gap-2.5">
-        <button
-          type="button"
-          onClick={() => setUrgency('out_of_stock')}
-          className={`min-h-[50px] p-3 rounded-2xl border-2 font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 transition-all active:scale-[0.99] ${
-            urgency === 'out_of_stock'
-              ? 'border-[#9E1C17] bg-[#C5221F] text-white shadow-sm'
-              : 'border-[var(--g-border)] bg-[var(--g-surface)] hover:bg-[var(--g-red-bg)] hover:border-[var(--g-red-border)] text-[var(--g-text)]'
-          }`}
-        >
-          <span
-            className={`ms-icon filled text-xl ${
-              urgency === 'out_of_stock' ? 'text-white' : 'text-[#C5221F]'
+      {/* Urgency */}
+      {!isSuggestion && (
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => setUrgency('out_of_stock')}
+            className={`min-h-[44px] px-3 rounded-[var(--g-radius-md)] border font-semibold text-xs sm:text-sm flex items-center justify-center cursor-pointer ${
+              urgency === 'out_of_stock'
+                ? 'border-[var(--g-danger-solid)] bg-danger-solid text-on-danger'
+                : 'border-line bg-surface text-ink hover:border-line-strong'
             }`}
           >
-            error
-          </span>
-          <span>خلص تماماً</span>
-        </button>
+            نفد تماماً
+          </button>
 
-        <button
-          type="button"
-          onClick={() => setUrgency('low_stock')}
-          className={`min-h-[50px] p-3 rounded-2xl border-2 font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 transition-all active:scale-[0.99] ${
-            urgency === 'low_stock'
-              ? 'border-[#9A4A00] bg-[#C25E00] text-white shadow-sm'
-              : 'border-[var(--g-border)] bg-[var(--g-surface)] hover:bg-[var(--g-yellow-bg)] hover:border-[var(--g-yellow-border)] text-[var(--g-text)]'
-          }`}
-        >
-          <span
-            className={`ms-icon filled text-xl ${
-              urgency === 'low_stock' ? 'text-white' : 'text-[#C25E00]'
+          <button
+            type="button"
+            onClick={() => setUrgency('low_stock')}
+            className={`min-h-[44px] px-3 rounded-[var(--g-radius-md)] border font-semibold text-xs sm:text-sm flex items-center justify-center cursor-pointer ${
+              urgency === 'low_stock'
+                ? 'border-[var(--g-warning-solid)] bg-warning-solid text-on-warning'
+                : 'border-line bg-surface text-ink hover:border-line-strong'
             }`}
           >
-            warning
-          </span>
-          <span>قرب يخلص</span>
-        </button>
-      </div>
+            قرب يخلص
+          </button>
+        </div>
+      )}
 
-      {/* Optional Extra Note / Supplier Toggle */}
+      {/* Optional Extra Note / Supplier */}
       <div>
         <button
           type="button"
           onClick={() => setShowExtraFields((v) => !v)}
-          className="text-xs sm:text-sm font-bold text-[var(--g-primary)] flex items-center gap-1 py-1"
+          className="min-h-[44px] text-xs font-medium text-primary flex items-center gap-1 py-1 cursor-pointer"
         >
-          <span className="ms-icon text-base">
-            {showExtraFields ? 'expand_less' : 'add_circle'}
-          </span>
-          <span>
-            {showExtraFields
-              ? 'إخفاء الملاحظة الإضافية'
-              : 'إضافة ملاحظة أو تحديد مورد (اختياري)'}
-          </span>
+          <Icon name={showExtraFields ? 'expand_less' : 'add'} size={16} />
+          <span>ملاحظة أو مورد</span>
         </button>
 
         {showExtraFields && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2 p-3 rounded-2xl bg-[var(--g-surface-2)] border border-[var(--g-border)]">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-line">
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="text-xs font-bold text-[var(--g-text-muted)]">
-                  ملاحظة قصيرة (اختياري)
-                </label>
+                <label className="text-xs font-medium text-ink-muted">ملاحظة</label>
                 <VoiceMicButton
                   small
                   onTranscript={(txt) => setNotes((p) => (p ? `${p} ${txt}` : txt))}
@@ -327,25 +297,25 @@ export default function ShortageComposerForm({
                 type="text"
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
-                placeholder="مثال: مطلوب الحجم العائلي..."
-                className="g-input min-h-[44px] text-sm"
+                placeholder="ملاحظة..."
+                className="g-input"
               />
             </div>
 
             {suppliers.length > 0 && (canManageShortages || canManageRecords) && (
               <div>
-                <label className="block text-xs font-bold text-[var(--g-text-muted)] mb-1">
-                  ربط بمورد (اختياري)
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  المورد
                 </label>
                 <select
                   value={supplierId}
                   onChange={(e) => setSupplierId(e.target.value)}
-                  className="g-input min-h-[44px] text-sm"
+                  className="g-input"
                 >
-                  <option value="">— بدون تحديد مورد —</option>
+                  <option value="">بدون مورد</option>
                   {suppliers.map((sup) => (
                     <option key={sup.id} value={sup.id}>
-                      {sup.name} ({sup.category})
+                      {sup.name}
                     </option>
                   ))}
                 </select>
@@ -355,15 +325,23 @@ export default function ShortageComposerForm({
         )}
       </div>
 
-      {/* Primary Submit Button */}
-      <button
+      <Button
         type="submit"
-        disabled={submitting}
-        className="w-full min-h-[54px] rounded-2xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-sm sm:text-base font-black shadow-md flex items-center justify-center gap-2 transition-all active:scale-[0.99] disabled:opacity-60"
+        variant={isSuggestion ? 'primary' : 'success'}
+        size="lg"
+        fullWidth
+        loading={submitting}
       >
-        <span className="ms-icon filled text-2xl">add_shopping_cart</span>
-        <span>{submitting ? 'جاري التسجيل...' : 'تسجيل الصنف في النواقص الآن'}</span>
-      </button>
+        {submitting
+          ? 'جاري التسجيل...'
+          : isSuggestion
+          ? 'تسجيل المقترح'
+          : 'تسجيل الناقص'}
+      </Button>
     </form>
   );
+
+  if (inSheet) return formBody;
+
+  return <Card padding="md">{formBody}</Card>;
 }

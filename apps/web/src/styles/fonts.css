@@ -1,0 +1,99 @@
+/* Local Tajawal Font Family from /public/Tajawal (100% Offline-Safe Fallback for Capacitor APK & PWA) */
+@font-face {
+  font-family: 'Tajawal';
+  src: url('/Tajawal/Tajawal-ExtraLight.ttf') format('truetype');
+  font-weight: 200;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Tajawal';
+  src: url('/Tajawal/Tajawal-Light.ttf') format('truetype');
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Tajawal';
+  src: url('/Tajawal/Tajawal-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Tajawal';
+  src: url('/Tajawal/Tajawal-Medium.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Tajawal';
+  src: url('/Tajawal/Tajawal-Bold.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Tajawal';
+  src: url('/Tajawal/Tajawal-ExtraBold.ttf') format('truetype');
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Tajawal';
+  src: url('/Tajawal/Tajawal-Black.ttf') format('truetype');
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --font-cairo: 'Cairo', 'Tajawal', 'Readex Pro', system-ui, -apple-system, sans-serif;
+  --font-ibm: 'IBM Plex Sans Arabic', 'Tajawal', 'Cairo', system-ui, -apple-system, sans-serif;
+  --font-tajawal: 'Tajawal', 'Cairo', 'IBM Plex Sans Arabic', system-ui, -apple-system, sans-serif;
+  --font-readex: 'Readex Pro', 'Tajawal', 'Cairo', system-ui, -apple-system, sans-serif;
+  --font-num: 'Plus Jakarta Sans', 'IBM Plex Sans Arabic', 'Tajawal', system-ui, sans-serif;
+  --g-theme-font-default: var(--font-cairo);
+  --g-font: var(--g-theme-font-default);
+}
+
+/* Explicit user font overrides (data-font on <html> + legacy body classes) */
+html[data-font='auto'] {
+  --g-font: var(--g-theme-font-default);
+}
+
+html[data-font='cairo'],
+.font-cairo {
+  --g-font: var(--font-cairo);
+}
+
+html[data-font='ibm'],
+.font-ibm {
+  --g-font: var(--font-ibm);
+}
+
+html[data-font='tajawal'],
+.font-tajawal {
+  --g-font: var(--font-tajawal);
+}
+
+html[data-font='readex'],
+.font-readex {
+  --g-font: var(--font-readex);
+}
+
+/* Dark Mode Optical Compensation for Arabic ligatures */
+[data-mode='dark'] {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Safe LTR tabular number formatting — NEVER overrides display (grid/flex/hidden)! */
+.num-ltr {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  direction: ltr;
+  unicode-bidi: isolate;
+}

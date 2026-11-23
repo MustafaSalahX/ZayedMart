@@ -15,6 +15,12 @@ CREATE TABLE IF NOT EXISTS public.system_users (
   pin_hash TEXT NOT NULL,
   pin_cipher TEXT DEFAULT '',
   avatar_color TEXT DEFAULT '#0B57D0',
+  avatar_url TEXT DEFAULT '',
+  avatar_preset TEXT DEFAULT '',
+  preferences_json TEXT DEFAULT '{}',
+  session_version INTEGER DEFAULT 1,
+  password_changed_at TEXT DEFAULT '',
+  username_changed_at TEXT DEFAULT '',
   is_active INTEGER DEFAULT 1,
   employee_id TEXT DEFAULT '',
   custom_permissions_json TEXT DEFAULT '[]',
@@ -26,6 +32,9 @@ CREATE TABLE IF NOT EXISTS public.system_users (
 CREATE TABLE IF NOT EXISTS public.role_policies (
   role TEXT PRIMARY KEY,
   permissions_json TEXT NOT NULL,
+  avatar_url TEXT DEFAULT '',
+  avatar_preset TEXT DEFAULT '',
+  avatar_color TEXT DEFAULT '',
   updated_at TEXT NOT NULL
 );
 
@@ -60,6 +69,8 @@ CREATE TABLE IF NOT EXISTS public.employees (
   shift_start TEXT DEFAULT '08:00',
   shift_end TEXT DEFAULT '20:00',
   avatar_color TEXT DEFAULT '#1A73E8',
+  avatar_url TEXT DEFAULT '',
+  avatar_preset TEXT DEFAULT '',
   phone TEXT DEFAULT '',
   is_active INTEGER DEFAULT 1,
   system_role TEXT DEFAULT '',
@@ -85,6 +96,10 @@ CREATE TABLE IF NOT EXISTS public.attendance_logs (
   recorded_by TEXT NOT NULL,
   verified_by_cctv INTEGER DEFAULT 0,
   verified_at TEXT DEFAULT '',
+  verified_by TEXT DEFAULT '',
+  cctv_status TEXT DEFAULT 'pending',
+  cctv_observed_time TEXT DEFAULT '',
+  cctv_note TEXT DEFAULT '',
   synced INTEGER DEFAULT 1
 );
 
@@ -231,6 +246,7 @@ CREATE TABLE IF NOT EXISTS public.walkie_presence (
   role TEXT NOT NULL,
   role_label TEXT DEFAULT '',
   avatar_color TEXT DEFAULT '#146C2E',
+  avatar_url TEXT DEFAULT '',
   channel TEXT NOT NULL DEFAULT 'security',
   status TEXT NOT NULL DEFAULT 'listening',
   live_on INTEGER DEFAULT 1,
@@ -298,6 +314,11 @@ CREATE INDEX IF NOT EXISTS idx_dayoff_swaps_requester_pending
 CREATE INDEX IF NOT EXISTS idx_dayoff_swaps_target_pending
   ON public.dayoff_swap_requests(target_employee_id, week_start_date)
   WHERE status IN ('pending_requester', 'pending_peer', 'pending_manager');
+CREATE INDEX IF NOT EXISTS idx_attendance_logs_cctv_status
+  ON public.attendance_logs (date_key, cctv_status)
+  WHERE cctv_status <> 'confirmed';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_system_users_username_lower
+  ON public.system_users (LOWER(username));
 
 DO $$
 DECLARE

@@ -9,7 +9,10 @@ export interface AuthContext {
     role: string;
     role_label: string;
     avatar_color: string;
+    avatar_url: string;
+    avatar_preset: string;
     employee_id?: string;
+    preferences?: Record<string, any>;
   };
   permissions: string[];
   actorLabel: string;

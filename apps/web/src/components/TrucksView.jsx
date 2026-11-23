@@ -3,37 +3,33 @@ import ProofUploader from './ProofUploader.jsx';
 import VoiceMicButton from './VoiceMicButton.jsx';
 import { postActionWithOfflineSupport, apiRequest } from '../lib/api.js';
 import { playSuccessChime, speakArabicConfirmation } from '../lib/audio.js';
-import { formatTimeArabic, formatTimeWithSeconds } from '../lib/exportUtils.js';
+import { formatTimeArabic } from '../lib/exportUtils.js';
+import {
+  BottomSheet,
+  Button,
+  Card,
+  ConfirmSheet,
+  EmptyState,
+  GroupedList,
+  Icon,
+  SearchFilterBar,
+  SectionHeader,
+  StatusDot,
+} from './ui/index.js';
 
 const QUICK_TRUCK_NOTES = [
-  'العدد مطابق للفاتورة بالكامل',
-  'يوجد نقص في عدد الكراتين',
-  'يوجد عبوات تالفة تم إرجاعها للمندوب',
-  'تم خصم المرتجع السابق من الفاتورة',
-  'تاريخ صلاحية قريب يحتاج متابعة',
+  'مطابق للفاتورة',
+  'نقص كراتين',
+  'تالف مرتجع للمندوب',
+  'تم خصم المرتجع السابق',
+  'صلاحية قريبة',
 ];
 
 const CONDITION_META = {
-  pending: {
-    label: 'جاري التنزيل',
-    icon: 'hourglass_top',
-    badge: 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]',
-  },
-  complete: {
-    label: 'سليمة وكاملة',
-    icon: 'check_circle',
-    badge: 'bg-[var(--g-green-bg)] text-[var(--g-green)]',
-  },
-  shortage: {
-    label: 'يوجد نواقص',
-    icon: 'warning',
-    badge: 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]',
-  },
-  return_damaged: {
-    label: 'مرتجع / تالف',
-    icon: 'sync_problem',
-    badge: 'bg-[var(--g-red-bg)] text-[var(--g-red)]',
-  },
+  pending: { label: 'قيد التنزيل', tone: 'warning' },
+  complete: { label: 'سليمة', tone: 'success' },
+  shortage: { label: 'نواقص', tone: 'warning' },
+  return_damaged: { label: 'مرتجع / تالف', tone: 'danger' },
 };
 
 const CALL_ALLOWED_ROLES = new Set(['owner', 'manager', 'supervisor', 'cctv', 'security']);
@@ -67,21 +63,21 @@ export default function TrucksView({
   const [completingTruck, setCompletingTruck] = useState(null);
   const [clearPrevReturn, setClearPrevReturn] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [busyId, setBusyId] = useState('');
   const [editingTruckLog, setEditingTruckLog] = useState(null);
+  const [deletingTruck, setDeletingTruck] = useState(null);
 
-  // Live tick every 15s for Smart Truck Unload Timers (Feature #6)
   useEffect(() => {
     const t = setInterval(() => setTick((n) => n + 1), 15000);
     return () => clearInterval(t);
   }, []);
 
-  // SmartFab hook: open custom truck arrival modal from anywhere on Trucks tab
   useEffect(() => {
     function handleOpenComposer(ev) {
       if (ev?.detail?.action === 'truck_arrive' && canWrite) {
         openArrivalModal({
           isCustom: true,
-          name: 'مورد عام / طلبية',
+          name: 'طلبية خاصة',
           category: 'بقالة جافة',
         });
       }
@@ -97,14 +93,12 @@ export default function TrucksView({
   const filteredSuppliers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return suppliers;
-    return suppliers.filter((s) =>
-      `${s.name} ${s.category}`.toLowerCase().includes(q)
-    );
+    return suppliers.filter((s) => `${s.name} ${s.category}`.toLowerCase().includes(q));
   }, [suppliers, searchQuery]);
 
   function openArrivalModal(sup) {
     if (!canWrite) {
-      onToast?.('عرض فقط — دورك الحالي لا يملك صلاحية تسجيل عربيات', 'error');
+      onToast?.('للعرض فقط', 'error');
       return;
     }
     if (sup?.has_pending_return === 1) {
@@ -132,7 +126,7 @@ export default function TrucksView({
     if (submitting) return;
     const isCustom = arrivalModalSupplier?.isCustom;
     if (isCustom && !customSupplierName.trim()) {
-      onToast?.('يرجى كتابة اسم المورد أو الشركة', 'error');
+      onToast?.('أدخل اسم المورد', 'error');
       return;
     }
 
@@ -159,14 +153,12 @@ export default function TrucksView({
       playSuccessChime('in');
       speakArabicConfirmation(`تم تسجيل وصول عربية ${supTitle}`, voiceConfirmEnabled);
       onToast?.(
-        res.queuedOffline
-          ? `تم حفظ وصول عربية "${supTitle}" محلياً`
-          : `تم تسجيل وصول عربية "${supTitle}" وبدء عداد التنزيل`
+        res.queuedOffline ? `تم حفظ وصول ${supTitle} محلياً` : `تم تسجيل وصول ${supTitle}`
       );
       setArrivalModalSupplier(null);
       onRefresh?.();
     } catch (err) {
-      onToast?.(err.message || 'تعذر تسجيل وصول العربية', 'error');
+      onToast?.(err.message || 'تعذر تسجيل الوصول', 'error');
     } finally {
       setSubmitting(false);
     }
@@ -198,30 +190,34 @@ export default function TrucksView({
         `تم إنهاء استلام طلبية ${completingTruck.supplier_name}`,
         voiceConfirmEnabled
       );
-      onToast?.(`تم إغلاق استلام عربية "${completingTruck.supplier_name}" بنجاح`);
+      onToast?.(`تم إنهاء استلام ${completingTruck.supplier_name}`);
       setCompletingTruck(null);
       onRefresh?.();
     } catch (err) {
-      onToast?.(err.message || 'تعذر إنهاء الطلبية', 'error');
+      onToast?.(err.message || 'تعذر إنهاء الاستلام', 'error');
     } finally {
       setSubmitting(false);
     }
   }
 
-  async function handleClearSupplierReturn(supId, e) {
-    e.stopPropagation();
+  async function handleClearSupplierReturn(supId) {
+    if (busyId) return;
+    setBusyId(`clear_${supId}`);
     try {
       await apiRequest(`/api/suppliers/${supId}/clear-return`, 'POST');
-      onToast?.('تم مسح تنبيه المرتجع السابق للمورد ✓');
+      onToast?.('تمت تسوية المرتجع');
       onRefresh?.();
     } catch (err) {
       onToast?.(err.message, 'error');
+    } finally {
+      setBusyId('');
     }
   }
 
   async function handleSaveEditedTruck(e) {
-    e.preventDefault();
-    if (!editingTruckLog) return;
+    e?.preventDefault();
+    if (!editingTruckLog || busyId) return;
+    setBusyId(editingTruckLog.id);
     try {
       await apiRequest(`/api/trucks/${editingTruckLog.id}`, 'PUT', {
         supplier_name: editingTruckLog.supplier_name,
@@ -233,26 +229,35 @@ export default function TrucksView({
         notes: editingTruckLog.notes || '',
       });
       setEditingTruckLog(null);
-      onToast?.('تم تعديل سجل العربية بنجاح ✓');
+      onToast?.('تم حفظ التعديل');
       onRefresh?.();
     } catch (err) {
       onToast?.(err.message, 'error');
+    } finally {
+      setBusyId('');
     }
   }
 
-  async function handleDeleteTruckLog(truck) {
-    if (!window.confirm(`حذف سجل عربية "${truck.supplier_name}" نهائياً؟`)) return;
+  async function executeDeleteTruckLog() {
+    if (!deletingTruck || busyId) return;
+    setBusyId(deletingTruck.id);
     try {
-      await apiRequest(`/api/trucks/${truck.id}`, 'DELETE');
-      onToast?.('تم حذف سجل العربية');
+      await apiRequest(`/api/trucks/${deletingTruck.id}`, 'DELETE');
+      onToast?.('تم الحذف');
+      setDeletingTruck(null);
       onRefresh?.();
     } catch (err) {
       onToast?.(err.message, 'error');
+    } finally {
+      setBusyId('');
     }
   }
 
   function getElapsedMins(arrivalTime) {
-    return Math.max(1, Math.floor((Date.now() - new Date(arrivalTime).getTime()) / 60000));
+    if (!arrivalTime) return 1;
+    const ts = new Date(arrivalTime).getTime();
+    if (!Number.isFinite(ts)) return 1;
+    return Math.max(1, Math.floor((Date.now() - ts) / 60000));
   }
 
   const matchedSupplierForCompletion = completingTruck?.supplier_id
@@ -260,404 +265,338 @@ export default function TrucksView({
     : null;
 
   return (
-    <div className="space-y-5">
-      {/* Feature #5: Top Supplier Return Alert Summary */}
+    <div className="space-y-6">
+      {/* Pending Supplier Returns Hairline Strip */}
       {suppliersWithReturns.length > 0 && (
-        <div className="p-3.5 rounded-2xl bg-[var(--g-yellow-bg)] border border-[#F29900]/60 flex items-start gap-2.5">
-          <span className="ms-icon filled text-xl text-[var(--g-yellow)] shrink-0 mt-0.5">
-            assignment_return
-          </span>
-          <div className="text-xs sm:text-sm font-bold text-[var(--g-yellow)]">
-            تذكير مرتجعات الموردين: يوجد مرتجع سابق مفتوح لدى (
-            {suppliersWithReturns.map((s) => s.name).join('، ')}) — سيظهر تنبيه تلقائي فور وصول
-            عربيتهم لتسوية المرتجع مع المندوب.
-          </div>
+        <div className="py-2 border-y border-line flex items-center gap-2 text-xs">
+          <StatusDot
+            tone="warning"
+            tintedText
+            label={`مرتجع معلق: ${suppliersWithReturns.map((s) => s.name).join('، ')}`}
+          />
         </div>
       )}
 
-      {/* 1. Active Unloading Bay with Smart Timer Orange Highlighting (Feature #6) */}
+      {/* 1. Active Unloading Bay */}
       {activeUnloading.length > 0 && (
-        <section className="g-card p-4 sm:p-5 border-2 border-[var(--g-primary)]/40 bg-[var(--g-primary-container)]/15">
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-3.5">
-            <div className="flex items-center gap-2">
-              <span className="ms-icon filled text-[var(--g-primary)] text-2xl">
-                local_shipping
-              </span>
-              <h2 className="text-base sm:text-lg font-extrabold m-0">
-                عربيات جاري تنزيلها الآن ({activeUnloading.length})
-              </h2>
-            </div>
-            <span className="text-xs text-[var(--g-muted)]">
-              يتلون الكرت بالبرتقالي تلقائياً عند تجاوز {maxUnloadMinutes} دقيقة
-            </span>
-          </div>
+        <section className="space-y-3">
+          <SectionHeader title="قيد التنزيل" count={activeUnloading.length} />
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {activeUnloading.map((truck) => {
               const elapsed = getElapsedMins(truck.arrival_time);
               const delayed = elapsed > maxUnloadMinutes;
-              const pct = Math.min(100, Math.round((elapsed / maxUnloadMinutes) * 100));
+              const safeMax = Math.max(1, Number(maxUnloadMinutes) || 60);
+              const pct = Math.min(100, Math.round((elapsed / safeMax) * 100));
               const truckSupplier = suppliers.find(
                 (s) => s.id === truck.supplier_id || s.name === truck.supplier_name
               );
 
               return (
-                <div
+                <Card
                   key={truck.id}
-                  className={`g-card p-4 flex flex-col justify-between gap-3 ${
-                    delayed ? 'g-smart-timer-orange' : ''
-                  }`}
+                  alert={delayed}
+                  padding="md"
+                  className="flex flex-col justify-between gap-3"
                 >
                   <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="font-extrabold text-base sm:text-lg">
+                    <div className="min-w-0 space-y-0.5">
+                      <div className="font-semibold text-base text-ink truncate">
                         {truck.supplier_name}
                       </div>
-                      <div className="text-xs text-[var(--g-muted)] mt-0.5">
+                      <div className="text-xs text-ink-muted truncate">
                         {truck.category}
-                        {truck.plate_or_driver ? ` • ${truck.plate_or_driver}` : ''}
-                        {truck.invoice_number ? ` • فاتورة: ${truck.invoice_number}` : ''}
+                        {truck.plate_or_driver ? ` · ${truck.plate_or_driver}` : ''}
+                        {truck.invoice_number ? ` · #${truck.invoice_number}` : ''}
                       </div>
-                      {canCallPhone && truckSupplier?.phone && (
-                        <a
-                          href={`tel:${truckSupplier.phone}`}
-                          onClick={(e) => e.stopPropagation()}
-                          className="mt-1.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[var(--g-primary-container)] text-[var(--g-primary)] text-xs font-extrabold no-underline"
-                        >
-                          <span className="ms-icon filled text-sm">call</span>
-                          <span>اتصال بالمورد:</span>
-                          <span className="num-ltr">{truckSupplier.phone}</span>
-                        </a>
-                      )}
                     </div>
-                    <span
-                      className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-extrabold num-ltr shrink-0 ${
-                        delayed
-                          ? 'bg-[#C25E00] text-white'
-                          : 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]'
-                      }`}
-                    >
-                      <span className="ms-icon text-sm">timer</span>
-                      <span>{elapsed} د</span>
-                    </span>
+
+                    <StatusDot
+                      tone={delayed ? 'danger' : 'warning'}
+                      tintedText={delayed}
+                      label={`${elapsed} د`}
+                    />
                   </div>
 
-                  {/* Smart Timer Progress Bar */}
-                  <div className="w-full h-1.5 rounded-full bg-[var(--g-border)] overflow-hidden">
+                  <div className="w-full h-1.5 rounded-full bg-surface-2 overflow-hidden">
                     <div
                       style={{ width: `${pct}%` }}
-                      className={`h-full rounded-full transition-all ${
-                        delayed ? 'bg-[#F29900]' : 'bg-[var(--g-primary)]'
+                      className={`h-full rounded-full ${
+                        delayed ? 'bg-warning-solid' : 'bg-primary-solid'
                       }`}
                     />
                   </div>
 
-                  {delayed && (
-                    <div className="text-xs font-extrabold text-[var(--g-orange-text)] flex items-center gap-1">
-                      <span className="ms-icon filled text-base">alarm</span>
-                      <span>
-                        تأخرت العربية في التنزيل أكثر من الحد المسموح ({maxUnloadMinutes} دقيقة)!
-                      </span>
-                    </div>
-                  )}
-
-                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--g-border)]">
-                    <span className="text-xs text-[var(--g-muted)]">
-                      وصلت:{' '}
-                      <strong className="num-ltr text-[var(--g-text)]">
-                        {formatTimeArabic(truck.arrival_time)}
-                      </strong>{' '}
-                      ({truck.recorded_by})
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-line">
+                    <span className="text-xs text-ink-muted">
+                      <span className="num-ltr">{formatTimeArabic(truck.arrival_time)}</span>
+                      {' · '}
+                      {truck.recorded_by}
                     </span>
 
-                    <div className="flex flex-wrap items-center justify-end gap-2 w-full sm:w-auto">
-                      {truck.arrival_proof_url && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onPreviewImage?.(
-                              truck.arrival_proof_url,
-                              `وصول عربية ${truck.supplier_name}`
-                            )
-                          }
-                          className="px-3 py-2 rounded-full bg-[var(--g-surface-variant)] text-xs font-bold flex items-center justify-center gap-1"
+                    <div className="w-full sm:w-auto flex flex-wrap items-center gap-1.5">
+                      {canCallPhone && truckSupplier?.phone && (
+                        <a
+                          href={`tel:${truckSupplier.phone}`}
+                          aria-label={`اتصال ${truck.supplier_name}`}
+                          className="w-11 h-11 rounded-full bg-surface-2 border border-line text-primary flex items-center justify-center no-underline"
                         >
-                          <span className="ms-icon text-base">image</span>
-                          <span>الصورة</span>
-                        </button>
+                          <Icon name="call" size={18} />
+                        </a>
+                      )}
+                      {truck.arrival_proof_url && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          icon="image"
+                          onClick={() =>
+                            onPreviewImage?.(truck.arrival_proof_url, truck.supplier_name)
+                          }
+                        >
+                          صورة
+                        </Button>
                       )}
                       {canWrite && (
-                        <button
+                        <Button
                           type="button"
+                          variant="success"
+                          size="sm"
                           onClick={() => openCompleteModal(truck)}
-                          className="flex-1 sm:flex-none min-h-[46px] px-4 py-2.5 rounded-2xl sm:rounded-full bg-[#146C2E] hover:bg-[#0F5223] text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 shadow-xs active:scale-95"
+                          className="flex-1 sm:flex-none"
                         >
-                          <span className="ms-icon filled text-lg">task_alt</span>
-                          <span>إنهاء الاستلام ✓</span>
-                        </button>
+                          إنهاء الاستلام
+                        </Button>
                       )}
                       {canManageRecords && (
                         <>
                           <button
                             type="button"
                             onClick={() => setEditingTruckLog({ ...truck })}
-                            className="w-9 h-9 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] flex items-center justify-center text-[var(--g-primary)]"
-                            title="تعديل سجل العربية"
+                            aria-label={`تعديل ${truck.supplier_name}`}
+                            className="w-11 h-11 rounded-full text-ink-muted hover:text-primary hover:bg-surface-2 flex items-center justify-center cursor-pointer"
                           >
-                            <span className="ms-icon text-base">edit</span>
+                            <Icon name="edit" size={18} />
                           </button>
                           <button
                             type="button"
-                            onClick={() => handleDeleteTruckLog(truck)}
-                            className="w-9 h-9 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] flex items-center justify-center"
-                            title="حذف سجل العربية"
+                            onClick={() => setDeletingTruck(truck)}
+                            aria-label={`حذف ${truck.supplier_name}`}
+                            className="w-11 h-11 rounded-full text-danger hover:bg-danger-bg flex items-center justify-center cursor-pointer"
                           >
-                            <span className="ms-icon text-base">delete</span>
+                            <Icon name="delete" size={18} />
                           </button>
                         </>
                       )}
                     </div>
                   </div>
-                </div>
+                </Card>
               );
             })}
           </div>
         </section>
       )}
 
-      {/* 2. Search + New Supplier Truck Arrival */}
+      {/* 2. Search + Custom Arrival Trigger */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
-        <div className="g-search-bar flex-1 flex items-center gap-2.5 px-4 py-2.5">
-          <span className="ms-icon text-[var(--g-muted)]">search</span>
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="ابحث عن اسم الشركة أو تصنيف البضاعة..."
-            className="bg-transparent border-none outline-none w-full text-sm sm:text-base text-[var(--g-text)]"
-          />
-          {searchQuery && (
-            <button
-              type="button"
-              onClick={() => setSearchQuery('')}
-              className="text-[var(--g-muted)] flex items-center"
-            >
-              <span className="ms-icon text-lg">close</span>
-            </button>
-          )}
-        </div>
-
-        <button
-          type="button"
-          onClick={() => openArrivalModal({ isCustom: true })}
-          className="px-5 py-2.5 rounded-full bg-[var(--g-primary)] text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 shadow-xs shrink-0"
-        >
-          <span className="ms-icon filled text-lg">add_circle</span>
-          <span>مورد آخر / طلبية خاصة</span>
-        </button>
+        <SearchFilterBar
+          value={searchQuery}
+          onChange={setSearchQuery}
+          placeholder="بحث في الموردين"
+          className="flex-1"
+        />
+        {canWrite && (
+          <Button
+            type="button"
+            variant="primary"
+            size="md"
+            icon="add"
+            onClick={() => openArrivalModal({ isCustom: true })}
+            className="w-full sm:w-auto shrink-0"
+          >
+            عربية خاصة
+          </Button>
+        )}
       </div>
 
-      {/* Supplier Cards */}
+      {/* Suppliers Grid */}
       {suppliers.length === 0 ? (
-        <div className="g-card p-6 sm:p-8 text-center space-y-3 border-2 border-dashed border-[var(--g-border)]">
-          <div className="w-14 h-14 mx-auto rounded-3xl bg-[var(--g-green-bg)] text-[var(--g-green)] flex items-center justify-center">
-            <span className="ms-icon filled text-3xl">add_business</span>
-          </div>
-          <div>
-            <h3 className="text-base sm:text-lg font-extrabold m-0">
-              قائمة الموردين الدائمين جاهزة لإضافة شركات التوريد الحقيقية
-            </h3>
-            <p className="text-xs sm:text-sm text-[var(--g-muted)] m-0 mt-1 max-w-lg mx-auto">
-              يمكنك تسجيل أي عربية الآن من زر "مورد آخر / طلبية خاصة" أعلاه، أو إضافة مورديك الدائمين مرة واحدة لتسجيل وصول عربياتهم بلمسة وتفعيل تنبيه المرتجعات التلقائي.
-            </p>
-          </div>
-          {canManageSuppliers && (
-            <button
-              type="button"
-              onClick={() => onJumpToRealData?.('staff')}
-              className="px-6 py-3 rounded-full bg-[#146C2E] text-white text-xs sm:text-sm font-extrabold inline-flex items-center gap-2 shadow-xs"
-            >
-              <span className="ms-icon filled text-lg">local_shipping</span>
-              <span>+ إضافة الموردين الحقيقيين الآن</span>
-            </button>
-          )}
-        </div>
+        <EmptyState
+          compact
+          title="لا يوجد موردون"
+          actionLabel={canManageSuppliers ? 'إضافة مورد' : undefined}
+          onAction={canManageSuppliers ? () => onJumpToRealData?.('staff') : undefined}
+        />
+      ) : filteredSuppliers.length === 0 ? (
+        <EmptyState compact title="لا توجد نتائج" />
       ) : (
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-        {filteredSuppliers.map((sup) => (
-          <div
-            key={sup.id}
-            onClick={() => openArrivalModal(sup)}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => e.key === 'Enter' && openArrivalModal(sup)}
-            className={`g-card g-card-interactive p-4 cursor-pointer flex flex-col justify-between gap-3 ${
-              sup.has_pending_return ? 'g-smart-timer-orange' : ''
-            }`}
-          >
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <div
-                  style={{ backgroundColor: sup.color || '#0B57D0' }}
-                  className="w-12 h-12 rounded-2xl text-white flex items-center justify-center shrink-0 shadow-2xs"
-                >
-                  <span className="ms-icon filled text-2xl">{sup.icon || 'local_shipping'}</span>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+          {filteredSuppliers.map((sup) => (
+            <Card
+              key={sup.id}
+              padding="sm"
+              alert={Boolean(sup.has_pending_return)}
+              className="flex flex-col justify-between gap-2.5"
+            >
+              <div className="flex items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span
+                    style={{ backgroundColor: sup.color || 'var(--g-primary-solid)' }}
+                    className="w-2.5 h-2.5 rounded-full shrink-0"
+                    aria-hidden="true"
+                  />
+                  <div className="min-w-0">
+                    <div className="font-semibold text-sm text-ink truncate">
+                      {sup.name}
+                    </div>
+                    <div className="text-xs text-ink-muted truncate">{sup.category}</div>
+                  </div>
                 </div>
-                <div className="min-w-0">
-                  <div className="font-extrabold text-base truncate">{sup.name}</div>
-                  <div className="text-xs text-[var(--g-muted)]">{sup.category}</div>
-                </div>
-              </div>
 
-              <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-extrabold shrink-0">
-                <span>وصلت</span>
-                <span className="ms-icon text-sm">local_shipping</span>
-              </span>
-            </div>
-
-            {canCallPhone && sup.phone && (
-              <div onClick={(e) => e.stopPropagation()} className="flex items-center">
-                <a
-                  href={`tel:${sup.phone}`}
-                  onClick={(e) => e.stopPropagation()}
-                  className="w-full min-h-[38px] px-3 py-1.5 rounded-xl bg-[var(--g-primary-container)]/50 hover:bg-[var(--g-primary-container)] text-[var(--g-primary)] border border-[var(--g-primary)]/30 text-xs font-extrabold flex items-center justify-between gap-2 active:scale-95 transition-all no-underline"
-                >
-                  <span className="flex items-center gap-1.5">
-                    <span className="ms-icon filled text-base">call</span>
-                    <span>اتصال بالمورد</span>
-                  </span>
-                  <span className="num-ltr font-black">{sup.phone}</span>
-                </a>
-              </div>
-            )}
-
-            {sup.has_pending_return === 1 && (
-              <div className="p-2.5 rounded-xl bg-[var(--g-surface)]/85 border border-[var(--g-orange-border)] text-[var(--g-orange-text)] text-xs font-bold flex items-start justify-between gap-2">
-                <div className="flex items-start gap-1.5">
-                  <span className="ms-icon filled text-base shrink-0 mt-0.5">warning</span>
-                  <span>
-                    {sup.pending_return_note || 'تنبيه: يوجد مرتجع سابق مع هذا المورد!'}
-                  </span>
-                </div>
-                {canClearReturn && (
-                  <button
+                {canWrite && (
+                  <Button
                     type="button"
-                    onClick={(e) => handleClearSupplierReturn(sup.id, e)}
-                    className="underline text-[11px] shrink-0 font-extrabold"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => openArrivalModal(sup)}
+                    className="shrink-0"
                   >
-                    تسوية
-                  </button>
+                    وصلت
+                  </Button>
                 )}
               </div>
-            )}
-          </div>
-        ))}
-      </div>
+
+              {(sup.phone && canCallPhone) || sup.has_pending_return === 1 ? (
+                <div className="pt-2 border-t border-line flex items-center justify-between gap-2 flex-wrap text-xs">
+                  {canCallPhone && sup.phone ? (
+                    <a
+                      href={`tel:${sup.phone}`}
+                      className="min-h-[36px] inline-flex items-center gap-1.5 text-primary font-medium no-underline num-ltr"
+                    >
+                      <Icon name="call" size={14} />
+                      <span>{sup.phone}</span>
+                    </a>
+                  ) : (
+                    <span />
+                  )}
+
+                  {sup.has_pending_return === 1 && (
+                    <div className="flex items-center gap-2">
+                      <StatusDot
+                        tone="warning"
+                        tintedText
+                        label={sup.pending_return_note || 'مرتجع'}
+                      />
+                      {canClearReturn && (
+                        <button
+                          type="button"
+                          disabled={busyId === `clear_${sup.id}`}
+                          onClick={() => handleClearSupplierReturn(sup.id)}
+                          className="min-h-[36px] px-2 text-xs font-semibold text-primary hover:underline cursor-pointer"
+                        >
+                          تسوية
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </Card>
+          ))}
+        </div>
       )}
 
-      {/* 3. Completed Deliveries Log */}
-      <section className="g-card p-4 sm:p-5">
-        <div className="flex items-center gap-2 mb-3.5">
-          <span className="ms-icon filled text-[var(--g-primary)]">inventory</span>
-          <h2 className="text-base sm:text-lg font-extrabold m-0">
-            سجل الطلبيات والعربيات المستلمة اليوم ({completedToday.length})
-          </h2>
-        </div>
+      {/* 3. Completed Deliveries Hairline Log */}
+      <section className="space-y-2.5">
+        <SectionHeader title="سجل اليوم" count={completedToday.length} />
 
         {completedToday.length === 0 ? (
-          <div className="text-center py-8 text-[var(--g-muted)] text-sm">
-            لا توجد طلبيات مكتملة في هذا التاريخ بعد.
-          </div>
+          <EmptyState compact title="لا توجد طلبيات اليوم" />
         ) : (
-          <div className="space-y-2.5">
+          <GroupedList>
             {completedToday.map((t) => {
               const cond = CONDITION_META[t.delivery_condition] || CONDITION_META.complete;
               return (
                 <div
                   key={t.id}
-                  className="p-3.5 rounded-2xl bg-[var(--g-surface-variant)]/55 border border-[var(--g-border)] flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                  className="px-3.5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
                 >
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-extrabold text-sm sm:text-base">{t.supplier_name}</span>
-                      <span
-                        className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-extrabold ${cond.badge}`}
-                      >
-                        <span className="ms-icon text-sm">{cond.icon}</span>
-                        <span>{cond.label}</span>
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <StatusDot tone={cond.tone} />
+                      <span className="font-semibold text-sm text-ink">
+                        {t.supplier_name}
                       </span>
-                      <span className="text-xs text-[var(--g-muted)]">({t.category})</span>
+                      <span className="text-xs text-ink-muted">
+                        · {cond.label} · {t.category}
+                      </span>
                     </div>
-                    <div className="text-xs text-[var(--g-muted)] mt-1 flex flex-wrap items-center gap-2">
-                      <span>
-                        وصول:{' '}
-                        <strong className="num-ltr">{formatTimeWithSeconds(t.arrival_time)}</strong>
+
+                    <div className="text-xs text-ink-muted flex flex-wrap items-center gap-1.5">
+                      <span className="num-ltr">
+                        {formatTimeArabic(t.arrival_time)} – {formatTimeArabic(t.departure_time)}
                       </span>
-                      <span>
-                        • انصراف:{' '}
-                        <strong className="num-ltr">
-                          {formatTimeWithSeconds(t.departure_time)}
-                        </strong>
-                      </span>
-                      <span>• {t.duration_minutes} د</span>
-                      <span>• {t.recorded_by}</span>
-                      {t.invoice_number && <span>• فاتورة: {t.invoice_number}</span>}
+                      <span aria-hidden="true">·</span>
+                      <span className="num-ltr">{t.duration_minutes} د</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{t.recorded_by}</span>
+                      {t.invoice_number && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="num-ltr">#{t.invoice_number}</span>
+                        </>
+                      )}
+                      {t.notes && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-ink">{t.notes}</span>
+                        </>
+                      )}
                     </div>
-                    {t.notes && (
-                      <div className="flex items-start gap-1 text-xs mt-1 font-semibold text-[var(--g-text)]">
-                        <span className="ms-icon text-sm text-[var(--g-text-muted)] shrink-0">notes</span>
-                        <span>{t.notes}</span>
-                      </div>
-                    )}
                   </div>
 
-                  <div className="flex items-center gap-2 self-end sm:self-auto">
+                  <div className="flex items-center gap-1 self-end sm:self-auto flex-wrap shrink-0">
                     {t.arrival_proof_url && (
-                      <button
+                      <Button
                         type="button"
-                        onClick={() =>
-                          onPreviewImage?.(t.arrival_proof_url, `وصول - ${t.supplier_name}`)
-                        }
-                        className="px-3 py-1.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] text-xs font-bold flex items-center gap-1"
+                        variant="ghost"
+                        size="sm"
+                        icon="image"
+                        onClick={() => onPreviewImage?.(t.arrival_proof_url, t.supplier_name)}
                       >
-                        <span className="ms-icon text-base text-[var(--g-primary)]">image</span>
-                        <span>الوصول</span>
-                      </button>
+                        الوصول
+                      </Button>
                     )}
                     {t.completion_proof_url && (
-                      <button
+                      <Button
                         type="button"
+                        variant="ghost"
+                        size="sm"
+                        icon="receipt_long"
                         onClick={() =>
-                          onPreviewImage?.(
-                            t.completion_proof_url,
-                            `فاتورة/استلام - ${t.supplier_name}`
-                          )
+                          onPreviewImage?.(t.completion_proof_url, t.supplier_name)
                         }
-                        className="px-3 py-1.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] text-xs font-bold flex items-center gap-1"
                       >
-                        <span className="ms-icon text-base text-[var(--g-green)]">
-                          receipt_long
-                        </span>
-                        <span>الفاتورة</span>
-                      </button>
+                        الفاتورة
+                      </Button>
                     )}
                     {canManageRecords && (
                       <>
                         <button
                           type="button"
                           onClick={() => setEditingTruckLog({ ...t })}
-                          className="w-9 h-9 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] flex items-center justify-center text-[var(--g-primary)]"
-                          title="تعديل سجل الطلبية"
+                          aria-label={`تعديل ${t.supplier_name}`}
+                          className="w-11 h-11 rounded-full text-ink-muted hover:text-primary hover:bg-surface-2 flex items-center justify-center cursor-pointer"
                         >
-                          <span className="ms-icon text-base">edit</span>
+                          <Icon name="edit" size={18} />
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleDeleteTruckLog(t)}
-                          className="w-9 h-9 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] flex items-center justify-center"
-                          title="حذف سجل الطلبية"
+                          onClick={() => setDeletingTruck(t)}
+                          aria-label={`حذف ${t.supplier_name}`}
+                          className="w-11 h-11 rounded-full text-danger hover:bg-danger-bg flex items-center justify-center cursor-pointer"
                         >
-                          <span className="ms-icon text-base">delete</span>
+                          <Icon name="delete" size={18} />
                         </button>
                       </>
                     )}
@@ -665,69 +604,70 @@ export default function TrucksView({
                 </div>
               );
             })}
-          </div>
+          </GroupedList>
         )}
       </section>
 
-      {/* Arrival Bottom Sheet / Modal */}
-      {arrivalModalSupplier && (
-        <div
-          onClick={() => !submitting && setArrivalModalSupplier(null)}
-          className="g-modal-overlay"
-        >
-          <form
-            onClick={(e) => e.stopPropagation()}
-            onSubmit={handleSubmitArrival}
-            className="g-dialog-sheet max-w-lg animate-pop space-y-4"
-          >
-            <div className="g-sheet-handle" />
-            <div className="flex items-center justify-between border-b border-[var(--g-border)] pb-3">
-              <div>
-                <h3 className="text-lg font-extrabold m-0">
-                  {arrivalModalSupplier.isCustom
-                    ? 'تسجيل وصول مورد أو طلبية خاصة'
-                    : `وصول عربية: ${arrivalModalSupplier.name}`}
-                </h3>
-                <p className="text-xs text-[var(--g-muted)] m-0 mt-0.5">
-                  سيتم تسجيل وقت الوصول تلقائياً وبدء عداد وقت التنزيل
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setArrivalModalSupplier(null)}
-                className="w-9 h-9 rounded-full bg-[var(--g-surface-variant)] flex items-center justify-center"
-              >
-                <span className="ms-icon">close</span>
-              </button>
-            </div>
-
-            {/* Feature #5: Automatic Supplier Return Warning Popup */}
+      {/* 1. Arrival BottomSheet */}
+      <BottomSheet
+        open={Boolean(arrivalModalSupplier)}
+        onClose={() => {
+          if (!submitting) setArrivalModalSupplier(null);
+        }}
+        title={
+          arrivalModalSupplier?.isCustom
+            ? 'وصول طلبية خاصة'
+            : arrivalModalSupplier?.name || 'وصول عربية'
+        }
+        maxWidth="max-w-lg"
+        footer={
+          arrivalModalSupplier ? (
+            <Button
+              type="submit"
+              form="truck-arrival-form"
+              variant="primary"
+              size="lg"
+              fullWidth
+              loading={submitting}
+            >
+              تأكيد الوصول
+            </Button>
+          ) : null
+        }
+      >
+        {arrivalModalSupplier && (
+          <form id="truck-arrival-form" onSubmit={handleSubmitArrival} className="space-y-4">
             {arrivalModalSupplier.has_pending_return === 1 && (
-              <div className="p-3.5 rounded-2xl g-smart-timer-orange text-[var(--g-orange-text)] text-xs sm:text-sm font-extrabold flex items-start gap-2">
-                <span className="ms-icon filled text-xl shrink-0">warning</span>
-                <span>
-                  تذكير مرتجع مهم:{' '}
-                  {arrivalModalSupplier.pending_return_note ||
-                    'هذا المورد مسجل عليه مرتجع من زيارة سابقة — تأكد من تسويته مع المندوب قبل المغادرة!'}
-                </span>
+              <div className="py-2 border-y border-line">
+                <StatusDot
+                  tone="warning"
+                  tintedText
+                  label={
+                    arrivalModalSupplier.pending_return_note || 'مرتجع معلق مع هذا المورد'
+                  }
+                />
               </div>
             )}
 
             {arrivalModalSupplier.isCustom && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-bold mb-1">اسم المورد / الشركة *</label>
+                  <label className="block text-xs font-medium text-ink-muted mb-1">
+                    المورد
+                  </label>
                   <input
                     type="text"
                     required
                     value={customSupplierName}
                     onChange={(e) => setCustomSupplierName(e.target.value)}
-                    placeholder="مثال: شركة النور للمجمدات"
+                    placeholder="اسم المورد"
                     className="g-input w-full"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold mb-1">التصنيف</label>
+                  <label className="block text-xs font-medium text-ink-muted mb-1">
+                    التصنيف
+                  </label>
                   <select
                     value={customCategory}
                     onChange={(e) => setCustomCategory(e.target.value)}
@@ -748,26 +688,26 @@ export default function TrucksView({
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-bold text-[var(--g-muted)] mb-1">
-                  رقم السيارة أو المندوب (اختياري)
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  السيارة / المندوب
                 </label>
                 <input
                   type="text"
                   value={plateOrDriver}
                   onChange={(e) => setPlateOrDriver(e.target.value)}
-                  placeholder="مثال: أ ب ج 4521 - مندوب محمد"
+                  placeholder="اختياري"
                   className="g-input w-full"
                 />
               </div>
               <div>
-                <label className="block text-xs font-bold text-[var(--g-muted)] mb-1">
-                  رقم الفاتورة / البوليصة (اختياري)
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  رقم الفاتورة
                 </label>
                 <input
                   type="text"
                   value={invoiceNumber}
                   onChange={(e) => setInvoiceNumber(e.target.value)}
-                  placeholder="مثال: 90412"
+                  placeholder="اختياري"
                   className="g-input w-full"
                 />
               </div>
@@ -776,75 +716,86 @@ export default function TrucksView({
             <ProofUploader
               value={proofDataUrl}
               onChange={setProofDataUrl}
-              label="صورة العربية أو البوليصة (فون / سكرين شوت)"
+              label="صورة العربية أو البوليصة"
               compact
             />
-
-            <button
-              type="submit"
-              disabled={submitting}
-              className="w-full py-4 rounded-full bg-[var(--g-primary)] text-white font-extrabold text-base flex items-center justify-center gap-2 shadow-sm"
-            >
-              <span className="ms-icon filled text-2xl">local_shipping</span>
-              <span>تأكيد وصول العربية وبدء التنزيل</span>
-            </button>
           </form>
-        </div>
-      )}
+        )}
+      </BottomSheet>
 
-      {/* Complete Unloading Bottom Sheet / Modal */}
-      {completingTruck && (
-        <div
-          onClick={() => !submitting && setCompletingTruck(null)}
-          className="g-modal-overlay"
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="g-dialog-sheet max-w-lg animate-pop space-y-4"
-          >
-            <div className="g-sheet-handle" />
-            <div className="flex items-center justify-between border-b border-[var(--g-border)] pb-3">
-              <div>
-                <h3 className="text-lg font-extrabold m-0">
-                  إنهاء استلام: {completingTruck.supplier_name}
-                </h3>
-                <p className="text-xs text-[var(--g-muted)] m-0 mt-0.5">
-                  اختر حالة الاستلام بلمسة واحدة أو سجّل ملاحظتك صوتياً
-                </p>
-              </div>
-              <button
+      {/* 2. Complete Unloading BottomSheet */}
+      <BottomSheet
+        open={Boolean(completingTruck)}
+        onClose={() => {
+          if (!submitting) setCompletingTruck(null);
+        }}
+        title={completingTruck?.supplier_name || 'إنهاء الاستلام'}
+        maxWidth="max-w-lg"
+        footer={
+          completingTruck ? (
+            <div className="grid grid-cols-1 gap-2">
+              <Button
                 type="button"
-                onClick={() => setCompletingTruck(null)}
-                className="w-9 h-9 rounded-full bg-[var(--g-surface-variant)] flex items-center justify-center"
+                variant="success"
+                size="lg"
+                fullWidth
+                loading={submitting}
+                onClick={() => handleCompleteTruck('complete')}
               >
-                <span className="ms-icon">close</span>
-              </button>
-            </div>
+                استلام سليم
+              </Button>
 
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  type="button"
+                  variant="warning"
+                  size="md"
+                  fullWidth
+                  loading={submitting}
+                  onClick={() => handleCompleteTruck('shortage')}
+                >
+                  نواقص
+                </Button>
+
+                <Button
+                  type="button"
+                  variant="danger"
+                  size="md"
+                  fullWidth
+                  loading={submitting}
+                  onClick={() => handleCompleteTruck('return_damaged')}
+                >
+                  مرتجع / تالف
+                </Button>
+              </div>
+            </div>
+          ) : null
+        }
+      >
+        {completingTruck && (
+          <div className="space-y-4">
             {matchedSupplierForCompletion?.has_pending_return === 1 && canClearReturn && (
-              <label className="flex items-center gap-2.5 p-3 rounded-2xl g-smart-timer-orange text-[var(--g-orange-text)] text-xs font-extrabold cursor-pointer">
+              <label className="min-h-[44px] flex items-center gap-2.5 py-2 border-y border-line text-xs font-medium text-ink cursor-pointer">
                 <input
                   type="checkbox"
                   checked={clearPrevReturn}
                   onChange={(e) => setClearPrevReturn(e.target.checked)}
-                  className="w-4 h-4 accent-[#146C2E]"
+                  className="w-4 h-4 accent-[var(--g-success-solid)]"
                 />
-                <span>تم تسوية/خصم المرتجع السابق مع مندوب هذا المورد اليوم ✓</span>
+                <span>تمت تسوية المرتجع السابق</span>
               </label>
             )}
 
             <ProofUploader
               value={proofDataUrl}
               onChange={setProofDataUrl}
-              label="صورة الفاتورة المختومة أو البضاعة التالفة"
+              label="صورة الفاتورة"
               compact
             />
 
-            <div>
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <span className="text-xs font-bold text-[var(--g-muted)]">
-                  ملاحظة الاستلام أو إملاء صوتي (اختياري):
-                </span>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-ink-muted">ملاحظة</span>
                 <VoiceMicButton
                   small
                   onToast={onToast}
@@ -853,16 +804,16 @@ export default function TrucksView({
                   }
                 />
               </div>
-              <div className="flex flex-wrap gap-1.5 mb-2">
+              <div className="flex flex-wrap gap-1.5">
                 {QUICK_TRUCK_NOTES.map((chip) => (
                   <button
                     key={chip}
                     type="button"
                     onClick={() => setTruckNote(truckNote === chip ? '' : chip)}
-                    className={`text-xs px-3 py-1.5 rounded-full border transition-all ${
+                    className={`min-h-[40px] text-xs px-3 py-1 rounded-full border cursor-pointer ${
                       truckNote === chip
-                        ? 'g-pill-active border-transparent'
-                        : 'bg-[var(--g-surface-variant)] border-[var(--g-border)] font-medium'
+                        ? 'bg-primary-solid text-on-primary border-primary font-semibold'
+                        : 'bg-surface-2 border-line text-ink font-medium'
                     }`}
                   >
                     {chip}
@@ -873,70 +824,44 @@ export default function TrucksView({
                 type="text"
                 value={truckNote}
                 onChange={(e) => setTruckNote(e.target.value)}
-                placeholder="تفاصيل إضافية (مثل: نقص 2 كرتونة عصير)..."
+                placeholder="ملاحظة..."
                 className="g-input w-full"
               />
             </div>
-
-            <div className="grid grid-cols-1 gap-2.5 pt-1">
-              <button
-                type="button"
-                disabled={submitting}
-                onClick={() => handleCompleteTruck('complete')}
-                className="py-3.5 px-4 rounded-full bg-[#146C2E] hover:bg-[#0F5223] text-white font-extrabold text-base flex items-center justify-center gap-2 shadow-xs"
-              >
-                <span className="ms-icon filled text-2xl">verified</span>
-                <span>استلام كامل وسليم — انصراف العربية ✓</span>
-              </button>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => handleCompleteTruck('shortage')}
-                  className="py-3.5 px-4 rounded-full bg-[#C25E00] hover:bg-[#9A4A00] text-white font-extrabold text-sm flex items-center justify-center gap-1.5"
-                >
-                  <span className="ms-icon filled">report_problem</span>
-                  <span>يوجد نواقص</span>
-                </button>
-
-                <button
-                  type="button"
-                  disabled={submitting}
-                  onClick={() => handleCompleteTruck('return_damaged')}
-                  className="py-3.5 px-4 rounded-full bg-[#B3261E] hover:bg-[#8C1D18] text-white font-extrabold text-sm flex items-center justify-center gap-1.5"
-                >
-                  <span className="ms-icon filled">assignment_return</span>
-                  <span>مرتجع / تالف</span>
-                </button>
-              </div>
-            </div>
           </div>
-        </div>
-      )}
+        )}
+      </BottomSheet>
 
-      {/* Admin Edit Truck Log Modal */}
-      {editingTruckLog && canManageRecords && (
-        <div onClick={() => setEditingTruckLog(null)} className="g-modal-overlay">
-          <form
-            onClick={(e) => e.stopPropagation()}
-            onSubmit={handleSaveEditedTruck}
-            className="g-dialog-sheet max-w-md space-y-4 animate-pop"
-          >
-            <div className="g-sheet-handle" />
-            <div className="flex items-center justify-between border-b border-[var(--g-border)] pb-3">
-              <h3 className="text-base font-extrabold m-0">تعديل سجل عربية المورد</h3>
-              <button
-                type="button"
-                onClick={() => setEditingTruckLog(null)}
-                className="w-9 h-9 rounded-full bg-[var(--g-surface-variant)] flex items-center justify-center"
-              >
-                <span className="ms-icon">close</span>
-              </button>
-            </div>
-
+      {/* 3. Edit Truck Log BottomSheet */}
+      <BottomSheet
+        open={Boolean(editingTruckLog && canManageRecords)}
+        onClose={() => {
+          if (!busyId) setEditingTruckLog(null);
+        }}
+        title="تعديل السجل"
+        subtitle={editingTruckLog?.supplier_name || ''}
+        maxWidth="max-w-md"
+        footer={
+          editingTruckLog ? (
+            <Button
+              type="submit"
+              form="edit-truck-form"
+              variant="primary"
+              size="lg"
+              fullWidth
+              loading={busyId === editingTruckLog.id}
+            >
+              حفظ
+            </Button>
+          ) : null
+        }
+      >
+        {editingTruckLog && (
+          <form id="edit-truck-form" onSubmit={handleSaveEditedTruck} className="space-y-4">
             <div>
-              <label className="block text-xs font-bold mb-1">اسم المورد</label>
+              <label className="block text-xs font-medium text-ink-muted mb-1">
+                المورد
+              </label>
               <input
                 type="text"
                 required
@@ -944,26 +869,30 @@ export default function TrucksView({
                 onChange={(e) =>
                   setEditingTruckLog((x) => ({ ...x, supplier_name: e.target.value }))
                 }
-                className="g-input font-bold"
+                className="g-input"
               />
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-bold mb-1">حالة العربية</label>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  الحالة
+                </label>
                 <select
                   value={editingTruckLog.status}
                   onChange={(e) =>
                     setEditingTruckLog((x) => ({ ...x, status: e.target.value }))
                   }
-                  className="g-input font-bold"
+                  className="g-input"
                 >
-                  <option value="unloading">جاري التنزيل</option>
-                  <option value="completed">تم الاستلام</option>
+                  <option value="unloading">قيد التنزيل</option>
+                  <option value="completed">مستلمة</option>
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-bold mb-1">نتيجة الفحص</label>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  النتيجة
+                </label>
                 <select
                   value={editingTruckLog.delivery_condition}
                   onChange={(e) =>
@@ -972,11 +901,11 @@ export default function TrucksView({
                       delivery_condition: e.target.value,
                     }))
                   }
-                  className="g-input font-bold"
+                  className="g-input"
                 >
                   <option value="pending">قيد التنزيل</option>
-                  <option value="complete">سليمة وكاملة ✓</option>
-                  <option value="shortage">يوجد نواقص</option>
+                  <option value="complete">سليمة</option>
+                  <option value="shortage">نواقص</option>
                   <option value="return_damaged">مرتجع / تالف</option>
                 </select>
               </div>
@@ -984,7 +913,9 @@ export default function TrucksView({
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-bold mb-1">السيارة / المندوب</label>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  السيارة / المندوب
+                </label>
                 <input
                   type="text"
                   value={editingTruckLog.plate_or_driver || ''}
@@ -995,7 +926,9 @@ export default function TrucksView({
                 />
               </div>
               <div>
-                <label className="block text-xs font-bold mb-1">رقم الفاتورة</label>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  الفاتورة
+                </label>
                 <input
                   type="text"
                   value={editingTruckLog.invoice_number || ''}
@@ -1008,7 +941,9 @@ export default function TrucksView({
             </div>
 
             <div>
-              <label className="block text-xs font-bold mb-1">ملاحظات</label>
+              <label className="block text-xs font-medium text-ink-muted mb-1">
+                ملاحظات
+              </label>
               <input
                 type="text"
                 value={editingTruckLog.notes || ''}
@@ -1018,16 +953,22 @@ export default function TrucksView({
                 className="g-input"
               />
             </div>
-
-            <button
-              type="submit"
-              className="w-full py-3.5 rounded-full bg-[var(--g-primary)] text-white font-extrabold text-sm"
-            >
-              حفظ تعديل العربية ✓
-            </button>
           </form>
-        </div>
-      )}
+        )}
+      </BottomSheet>
+
+      <ConfirmSheet
+        open={Boolean(deletingTruck)}
+        onClose={() => {
+          if (!busyId) setDeletingTruck(null);
+        }}
+        onConfirm={executeDeleteTruckLog}
+        title="حذف السجل"
+        description={deletingTruck ? `حذف سجل ${deletingTruck.supplier_name}؟` : ''}
+        confirmLabel="حذف"
+        tone="danger"
+        loading={Boolean(busyId)}
+      />
     </div>
   );
 }

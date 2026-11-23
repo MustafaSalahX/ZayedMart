@@ -1,0 +1,491 @@
+/*
+ * ZayedMart V2 — Base Elements, Adaptive Theme Surfaces, Architectural Chrome,
+ * Hairline Minimalism De-Boxing, Grouped Lists, Dialog Sheets & Print.
+ */
+
+@layer base {
+  html {
+    overflow-x: hidden;
+    max-width: 100vw;
+    -webkit-text-size-adjust: 100%;
+    scrollbar-color: var(--g-border-strong) transparent;
+    scrollbar-width: thin;
+  }
+
+  html.scale-normal {
+    font-size: 16px;
+  }
+  html.scale-large {
+    font-size: 17.5px;
+  }
+  html.scale-xlarge {
+    font-size: 19px;
+  }
+
+  * {
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  ::selection {
+    background-color: var(--g-primary-container);
+    color: var(--g-on-primary-container);
+  }
+
+  body {
+    margin: 0;
+    overflow-x: hidden;
+    max-width: 100vw;
+    background-color: var(--g-bg);
+    color: var(--g-text);
+    font-family: var(--g-font);
+    line-height: 1.55;
+    caret-color: var(--g-primary);
+    transition: background-color var(--g-motion-base) ease, color var(--g-motion-base) ease;
+  }
+
+  [data-mode='dark'] body {
+    line-height: 1.6;
+  }
+
+  button {
+    cursor: pointer;
+    font-family: inherit;
+    touch-action: manipulation;
+  }
+
+  :where(button, a, input, select, textarea, [tabindex]):focus-visible {
+    outline: 2px solid var(--g-ring-focus);
+    outline-offset: 2px;
+  }
+
+  input[type='date']::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    opacity: 0.78;
+  }
+
+  [data-mode='dark'] input[type='date']::-webkit-calendar-picker-indicator {
+    filter: invert(0.85);
+  }
+}
+
+@layer components {
+  /* Theme-adaptive top accent hairline (Classic only; 0px in all other themes) */
+  .google-brand-bar {
+    height: var(--g-brand-bar-height);
+    width: 100%;
+    background: var(--g-brand-bar-bg);
+  }
+
+  /* Standard Sticky Header Chrome */
+  .g-header {
+    background-color: var(--g-surface-glass);
+    border-bottom: var(--g-border-width) solid var(--g-border);
+    padding-top: var(--safe-top);
+    -webkit-backdrop-filter: blur(var(--g-blur-md)) saturate(var(--g-glass-saturate));
+    backdrop-filter: blur(var(--g-blur-md)) saturate(var(--g-glass-saturate));
+  }
+
+  /* Minimalism Ultra-Slim Flat Header (zero blur, pure canvas, 1px hairline) */
+  [data-theme='minimal'] .g-header {
+    background-color: var(--g-bg);
+    border-bottom: 1px solid var(--g-border);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  /* Elegant Editorial 1px Champagne-Gold Bottom Rule */
+  .g-header-editorial-rule {
+    height: 1px;
+    width: 100%;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      var(--g-accent-border) 22%,
+      var(--g-accent) 50%,
+      var(--g-accent-border) 78%,
+      transparent 100%
+    );
+    opacity: 0.78;
+  }
+
+  /* Standard Fixed BottomNav Chrome */
+  .g-bottom-nav {
+    background-color: var(--g-surface-glass-strong);
+    border-top: var(--g-border-width) solid var(--g-border);
+    padding-bottom: var(--safe-bottom);
+    -webkit-backdrop-filter: blur(var(--g-blur-md)) saturate(var(--g-glass-saturate));
+    backdrop-filter: blur(var(--g-blur-md)) saturate(var(--g-glass-saturate));
+  }
+
+  [data-theme='minimal'] .g-bottom-nav {
+    background-color: var(--g-bg);
+    border-top: 1px solid var(--g-border);
+    box-shadow: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  /* Theme-Adaptive Operational Card */
+  .g-card {
+    background-color: var(--g-surface);
+    border: var(--g-border-width) solid var(--g-border);
+    border-radius: var(--g-radius-card);
+    box-shadow: var(--g-shadow-sm);
+    max-width: 100%;
+    transition:
+      transform var(--g-motion-fast) var(--g-ease-out),
+      box-shadow var(--g-motion-fast) var(--g-ease-out),
+      border-color var(--g-motion-fast) ease,
+      background-color var(--g-motion-fast) ease;
+  }
+
+  /* Minimalism: Pure flat architectural surface + global automatic de-boxing! */
+  [data-theme='minimal'] .g-card {
+    background-color: var(--g-surface);
+    border: 1px solid var(--g-border);
+    border-radius: var(--g-radius-card);
+    box-shadow: none;
+  }
+
+  [data-theme='minimal'] .g-card.g-card-flush {
+    background-color: transparent;
+    border: none;
+    border-bottom: 1px solid var(--g-border);
+    border-radius: 0;
+  }
+
+  /* Zero Boxes-Inside-Boxes in Minimalism: nested cards flatten to hairline sections */
+  [data-theme='minimal'] .g-card .g-card {
+    background-color: transparent;
+    border: none;
+    border-top: 1px solid var(--g-border-subtle);
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  /* Elegant Editorial Hairline Card */
+  [data-theme='elegant'] .g-card {
+    box-shadow: none;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    .g-card-interactive:hover {
+      box-shadow: var(--g-shadow);
+      border-color: var(--g-border-strong);
+    }
+
+    [data-theme='minimal'] .g-card-interactive:hover {
+      box-shadow: none;
+      border-color: var(--g-border-strong);
+    }
+
+    [data-theme='elegant'] .g-card-interactive:hover {
+      box-shadow: var(--g-shadow);
+      border-color: var(--g-accent-border);
+    }
+  }
+
+  .g-card-interactive:active {
+    transform: scale(0.985);
+  }
+
+  /* Apple / Linear Grouped List Surface */
+  .g-grouped-list {
+    background-color: var(--g-surface);
+    border: 1px solid var(--g-border);
+    border-radius: var(--g-radius-card);
+    overflow: hidden;
+  }
+
+  [data-theme='minimal'] .g-grouped-list {
+    background-color: transparent;
+    border-left: none;
+    border-right: none;
+    border-radius: 0;
+  }
+
+  [data-theme='liquid-glass'] .g-grouped-list {
+    position: relative;
+    background-color: var(--g-surface-glass);
+    border: 1px solid var(--g-glass-border);
+    box-shadow: var(--g-shadow);
+    -webkit-backdrop-filter: blur(var(--g-blur-md)) saturate(var(--g-glass-saturate));
+    backdrop-filter: blur(var(--g-blur-md)) saturate(var(--g-glass-saturate));
+  }
+
+  /* Smart Timer Automatic Orange Alert Card */
+  .g-smart-timer-orange {
+    background-color: var(--g-orange-bg) !important;
+    border: 1.5px solid var(--g-orange-border) !important;
+    box-shadow: 0 0 0 2px rgba(227, 116, 0, 0.14);
+  }
+
+  .g-pill-active {
+    background-color: var(--g-secondary-container);
+    color: var(--g-on-secondary-container);
+    font-weight: 700;
+  }
+
+  /* Search Bar */
+  .g-search-bar {
+    background-color: var(--g-surface-inset);
+    border: 1px solid var(--g-border);
+    border-radius: var(--g-radius-btn);
+    min-width: 0;
+    transition:
+      background-color var(--g-motion-fast) ease,
+      box-shadow var(--g-motion-fast) ease,
+      border-color var(--g-motion-fast) ease;
+  }
+
+  [data-theme='liquid-glass'] .g-search-bar {
+    border-radius: 9999px;
+    background-color: var(--g-glass-control);
+    border-color: var(--g-glass-border);
+  }
+
+  .g-search-bar:focus-within {
+    background-color: var(--g-surface);
+    border-color: var(--g-primary);
+    box-shadow: var(--g-shadow-sm);
+  }
+
+  /* Inputs >= 16px on mobile so iOS Safari / Android WebView never auto-zoom */
+  .g-input {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    min-height: 44px;
+    background-color: var(--g-surface-inset);
+    color: var(--g-text);
+    border: 1px solid var(--g-border);
+    border-radius: var(--g-radius-md);
+    padding: 0.65rem 0.9rem;
+    font-size: 1rem;
+    outline: none;
+    transition: border-color var(--g-motion-fast) ease, background-color var(--g-motion-fast) ease;
+  }
+
+  [data-theme='minimal'] .g-input {
+    background-color: var(--g-bg);
+    border-color: var(--g-border);
+  }
+
+  .g-input::placeholder {
+    color: var(--g-muted);
+    opacity: 0.82;
+  }
+
+  .g-input:focus {
+    border-color: var(--g-primary);
+    background-color: var(--g-surface);
+  }
+
+  /* Legacy alias for PwaInstallBanner & Button hooks */
+  .g-btn-primary {
+    background-color: var(--g-primary-solid);
+    color: var(--g-on-primary);
+    border-radius: var(--g-radius-btn);
+    font-weight: 700;
+  }
+
+  /* Mobile Bottom Sheet / Desktop Centered Dialog with Sticky Header & Footer over Android IME */
+  .g-modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background-color: var(--g-overlay-scrim);
+    -webkit-backdrop-filter: blur(4px);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: 0;
+  }
+
+  /* Auto-hide floating radio capsule & FAB whenever any dialog/sheet is open */
+  .g-floating-chrome {
+    transition:
+      opacity var(--g-motion-fast) var(--g-ease-out),
+      transform var(--g-motion-base) var(--g-ease-out);
+  }
+
+  html[data-modal-open='true'] .g-floating-chrome {
+    opacity: 0 !important;
+    pointer-events: none !important;
+    transform: translateY(10px) scale(0.94);
+  }
+
+  [data-theme='minimal'] .g-modal-overlay {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .g-dialog-sheet {
+    background-color: var(--g-surface-elevated);
+    color: var(--g-text);
+    width: 100%;
+    max-width: 100vw;
+    max-height: 90dvh;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    border-top-left-radius: var(--g-radius-sheet);
+    border-top-right-radius: var(--g-radius-sheet);
+    padding: 0.875rem 1rem calc(1rem + var(--safe-bottom));
+    box-shadow: var(--g-shadow-elevated);
+    border: var(--g-border-width) solid var(--g-border);
+  }
+
+  /* Detached floating glass sheet on Liquid Glass mobile */
+  [data-theme='liquid-glass'] .g-dialog-sheet {
+    margin: 0 0.5rem calc(0.5rem + var(--safe-bottom));
+    width: calc(100% - 1rem);
+    border-radius: var(--g-radius-sheet);
+    padding: 0.875rem 1rem 1rem;
+  }
+
+  /* Pinned header + footer over Android IME (used by BottomSheet.jsx with .g-dialog-body) */
+  .g-dialog-sheet.g-dialog-sheet-sticky {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .g-dialog-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  @media (min-width: 640px) {
+    .g-modal-overlay {
+      align-items: center;
+      padding: 1.25rem;
+    }
+    .g-dialog-sheet,
+    [data-theme='liquid-glass'] .g-dialog-sheet {
+      margin: 0;
+      width: 100%;
+      border-radius: var(--g-radius-sheet);
+      padding: 1.25rem 1.5rem;
+      max-height: 90dvh;
+    }
+  }
+
+  .g-sheet-handle {
+    width: 2.25rem;
+    height: 0.25rem;
+    border-radius: 9999px;
+    background-color: var(--g-border-strong);
+    opacity: 0.45;
+    margin: 0 auto 0.6rem;
+    flex-shrink: 0;
+  }
+
+  @media (min-width: 640px) {
+    .g-sheet-handle {
+      display: none;
+    }
+  }
+}
+
+/* Hide scrollbars cleanly on horizontal chip strips */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Emil Kowalski entry physics: natural scale(0.96) + translateY, never scale(0) */
+@keyframes sheetUp {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-pop {
+  animation: sheetUp var(--g-motion-base) var(--g-ease-out) forwards;
+}
+
+@keyframes walkiePulseRing {
+  0% {
+    transform: scale(1);
+    opacity: 0.65;
+  }
+  100% {
+    transform: scale(1.28);
+    opacity: 0;
+  }
+}
+
+.walkie-pulse-ring {
+  animation: walkiePulseRing 1.35s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* Print Layout strictly for QR Employee Cards (unconstrained multi-page A4, always crisp B&W) */
+@media print {
+  html,
+  body {
+    height: auto !important;
+    overflow: visible !important;
+    background: #FFFFFF !important;
+    color: #000000 !important;
+  }
+  .g-ambient-backdrop {
+    display: none !important;
+  }
+  body * {
+    visibility: hidden;
+  }
+  .g-modal-overlay,
+  .g-dialog-sheet,
+  .g-dialog-body {
+    position: static !important;
+    max-height: none !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+    background: #FFFFFF !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  #qr-print-area,
+  #qr-print-area * {
+    visibility: visible;
+  }
+  #qr-print-area {
+    position: absolute !important;
+    top: 0 !important;
+    right: 0 !important;
+    left: 0 !important;
+    width: 100% !important;
+    max-height: none !important;
+    height: auto !important;
+    overflow: visible !important;
+    background: #FFFFFF !important;
+    color: #000000 !important;
+    padding: 8mm !important;
+    display: grid !important;
+    grid-template-columns: repeat(2, 1fr) !important;
+    gap: 6mm !important;
+  }
+  .qr-badge-card {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+    border: 1.5px solid #1E293B !important;
+    background: #FFFFFF !important;
+    color: #000000 !important;
+  }
+}

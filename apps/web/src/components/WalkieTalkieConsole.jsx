@@ -1,58 +1,28 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { formatTimeArabic } from '../lib/exportUtils.js';
-
-const ROLE_ARABIC_SHORT = {
-  owner: 'الأدمن',
-  manager: 'المدير',
-  supervisor: 'المشرف',
-  security: 'الأمن',
-  cctv: 'مراقب الكاميرات',
-  warehouse: 'المخزن',
-  cashier: 'الكاشير',
-  hall: 'الصالة',
-  delivery: 'الدليفري',
-};
+import { ROLE_ARABIC_SHORT } from '../lib/navigation.js';
+import { popModalLayer, pushModalLayer } from './ui/BottomSheet.jsx';
+import {
+  Button,
+  ConfirmSheet,
+  EmptyState,
+  GroupedList,
+  Icon,
+  SegmentedControl,
+  StatusDot,
+} from './ui/index.js';
 
 const MIC_MODES = [
-  {
-    id: 'vad',
-    label: 'تلقائي بالصوت',
-    sub: 'تكلم مباشرةً في أي وقت',
-    icon: 'record_voice_over',
-  },
-  {
-    id: 'open',
-    label: 'مفتوح دائماً',
-    sub: 'بث صوتي مستمر للقناة',
-    icon: 'mic',
-  },
-  {
-    id: 'muted',
-    label: 'اضغط للتحدث',
-    sub: 'استماع حي + ضغط مطول',
-    icon: 'touch_app',
-  },
+  { id: 'vad', labelAr: 'تلقائي' },
+  { id: 'open', labelAr: 'مفتوح' },
+  { id: 'muted', labelAr: 'اضغط للتحدث' },
 ];
 
 const RECEIVE_MODES = [
-  {
-    id: 'all',
-    label: 'الكل تلقائياً (كالشرطة)',
-    sub: 'تسمع أي زميل فوراً طالما فاتح نت',
-    icon: 'volume_up',
-  },
-  {
-    id: 'emergency_only',
-    label: 'الطوارئ فقط 🚨',
-    sub: 'يسمع نداءات الطوارئ فقط بصوت عالٍ',
-    icon: 'e911_emergency',
-  },
-  {
-    id: 'muted',
-    label: 'كتم العادي',
-    sub: 'إشعار مرئي + اختراق للطوارئ',
-    icon: 'notifications_paused',
-  },
+  { id: 'all', labelAr: 'الكل' },
+  { id: 'emergency_only', labelAr: 'طوارئ' },
+  { id: 'muted', labelAr: 'كتم' },
 ];
 
 export default function WalkieTalkieConsole({
@@ -63,17 +33,17 @@ export default function WalkieTalkieConsole({
   canManageRecords = false,
 }) {
   const activePointerIdRef = useRef(null);
+  const didHoldTransmitRef = useRef(false);
 
   const {
     peerId,
     canAllChannels = false,
-    allowedChannels,
+    allowedChannels = [],
     activeChannel,
-    currentChannelMeta,
+    currentChannelMeta = {},
     selectChannel,
     liveOn,
     connectingLive,
-    globalCloudConnected = false,
     toggleLivePower,
     turnLiveOn,
     receiveMode = 'all',
@@ -84,14 +54,11 @@ export default function WalkieTalkieConsole({
     setMicMode,
     localSpeaking,
     pttOverride,
-    txElapsedSec,
-    liveLevels,
-    activeUnits,
+    txElapsedSec = 0,
+    liveLevels = [],
+    activeUnits = [],
     channelActivitySummary = {},
     liveSpeakingUnits = [],
-    meshConnectedCount = 0,
-    bgKeepAliveActive = false,
-    wakeLockActive = false,
     micWarning = '',
     serverRouteMissing = false,
     recentCalls = [],
@@ -102,28 +69,65 @@ export default function WalkieTalkieConsole({
     sendAlertPing,
     replayCall,
     removeCall,
-  } = walkie;
+  } = walkie || {};
+
+  const hasMultiChannels = allowedChannels.length > 1;
+  const [activeTab, setActiveTab] = useState(hasMultiChannels ? 'channels' : 'modes');
+  const [pingCooldownSec, setPingCooldownSec] = useState(0);
+  const [deletingCall, setDeletingCall] = useState(null);
+  const [layerZ, setLayerZ] = useState(62);
 
   const isReceiving = liveSpeakingUnits.length > 0 || Boolean(activePlaybackCall);
 
-  // Desktop Spacebar Push-To-Talk override for CCTV & Supervisors
+  useEffect(() => {
+    if (!open) return undefined;
+    const z = pushModalLayer();
+    setLayerZ(z);
+    return () => {
+      popModalLayer();
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!hasMultiChannels && activeTab === 'channels') {
+      setActiveTab('modes');
+    }
+  }, [hasMultiChannels, activeTab]);
+
+  useEffect(() => {
+    if (pingCooldownSec <= 0) return undefined;
+    const t = setTimeout(() => {
+      setPingCooldownSec((prev) => Math.max(0, prev - 1));
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [pingCooldownSec]);
+
   useEffect(() => {
     if (!open || typeof window === 'undefined') return undefined;
 
     const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        if (deletingCall) return;
+        if (pttOverride) {
+          cancelTransmit?.();
+        }
+        onClose?.();
+        return;
+      }
+
       if (e.code !== 'Space' || e.repeat) return;
       const tag = document.activeElement?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'button') return;
       e.preventDefault();
-      startTransmit();
+      startTransmit?.();
     };
 
     const handleKeyUp = (e) => {
       if (e.code !== 'Space') return;
       const tag = document.activeElement?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'button') return;
       e.preventDefault();
-      stopTransmit();
+      stopTransmit?.();
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -132,26 +136,31 @@ export default function WalkieTalkieConsole({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [open, startTransmit, stopTransmit]);
+  }, [open, pttOverride, deletingCall, onClose, startTransmit, stopTransmit, cancelTransmit]);
 
   if (!open) return null;
 
   function handleCenterButtonClick() {
+    if (didHoldTransmitRef.current) {
+      didHoldTransmitRef.current = false;
+      return;
+    }
     if (!liveOn) {
-      turnLiveOn();
+      turnLiveOn?.();
     }
   }
 
   function handlePttPointerDown(e) {
     if (e.button !== undefined && e.button !== 0) return;
     e.preventDefault();
+    didHoldTransmitRef.current = true;
     try {
       e.currentTarget.setPointerCapture?.(e.pointerId);
       activePointerIdRef.current = e.pointerId;
     } catch {
       // ignore
     }
-    startTransmit();
+    startTransmit?.();
   }
 
   function handlePttPointerUp(e) {
@@ -165,404 +174,340 @@ export default function WalkieTalkieConsole({
       }
       activePointerIdRef.current = null;
     }
-    stopTransmit();
+    stopTransmit?.();
+  }
+
+  function handleAlertPingClick() {
+    if (pingCooldownSec > 0) return;
+    sendAlertPing?.();
+    setPingCooldownSec(3);
   }
 
   const speakingNamesBanner = activePlaybackCall
-    ? `${activePlaybackCall.sender_name}${
-        ROLE_ARABIC_SHORT[activePlaybackCall.sender_role]
-          ? ` (${ROLE_ARABIC_SHORT[activePlaybackCall.sender_role]})`
-          : ''
-      }`
+    ? activePlaybackCall.sender_name
     : liveSpeakingUnits
-        .map((u) => {
-          const r = ROLE_ARABIC_SHORT[u.role];
-          return r ? `${u.display_name} (${r})` : u.display_name;
-        })
-        .join(' + ');
+        .map((u) => u.display_name)
+        .filter(Boolean)
+        .join(' · ');
 
   const speakingPeerIds = new Set(liveSpeakingUnits.map((u) => u.peer_id));
 
-  return (
+  const consoleTabOptions = [
+    ...(hasMultiChannels
+      ? [{ id: 'channels', labelAr: `القنوات (${allowedChannels.length})` }]
+      : []),
+    {
+      id: 'modes',
+      labelAr: recentCalls.length > 0 ? `الأوضاع (${recentCalls.length})` : 'الأوضاع',
+    },
+  ];
+
+  const consoleNode = (
     <div
       onClick={() => {
-        if (!pttOverride) onClose?.();
+        if (!pttOverride && !deletingCall) onClose?.();
       }}
+      style={{ zIndex: layerZ }}
       className="g-modal-overlay"
       role="dialog"
       aria-modal="true"
-      aria-label="جهاز اللاسلكي الحي المباشر"
+      aria-label="اللاسلكي"
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="g-dialog-sheet max-w-lg animate-pop space-y-4"
+        className="g-dialog-sheet max-w-lg animate-pop space-y-3.5"
       >
         <div className="g-sheet-handle" />
 
-        {/* Header Bar */}
+        {/* 1. Concise Header */}
         <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-11 h-11 rounded-2xl bg-[#0D1117] text-[#00E676] border border-[#232A35] flex items-center justify-center shrink-0 shadow-sm">
-              <span className="ms-icon filled text-2xl">podcasts</span>
-            </div>
-            <div className="min-w-0">
-              <h2 className="text-base sm:text-lg font-black m-0 truncate">
-                لاسلكي زايد مارت التكتيكي (Police Radio PTT)
-              </h2>
-              <p className="text-xs text-[var(--g-muted)] m-0 truncate">
-                استقبال تلقائي فوري كالشرطة بالخلفية + إشعار للكل عند فتح الخط أو الطوارئ
-              </p>
-            </div>
-          </div>
+          <h2 className="text-base sm:text-lg font-semibold text-ink m-0 truncate">
+            اللاسلكي
+          </h2>
 
           <button
             type="button"
             onClick={() => {
-              if (pttOverride) cancelTransmit();
+              if (pttOverride) cancelTransmit?.();
               onClose?.();
             }}
-            aria-label="إغلاق نافذة اللاسلكي"
-            className="w-11 h-11 rounded-full bg-[var(--g-surface-variant)] hover:bg-[var(--g-border)] flex items-center justify-center transition-colors duration-200 cursor-pointer shrink-0 focus-visible:outline-2 focus-visible:outline-[var(--g-primary)]"
+            aria-label="إغلاق"
+            className="w-11 h-11 rounded-full bg-surface-2 hover:border-line-strong border border-line text-ink flex items-center justify-center transition-colors duration-150 cursor-pointer shrink-0"
           >
-            <span className="ms-icon">close</span>
+            <Icon name="close" size={20} />
           </button>
         </div>
 
-        {/* Server Stale Route Notice */}
         {serverRouteMissing && (
-          <div className="p-3 rounded-2xl bg-[var(--g-amber-bg)] border border-[var(--g-amber)]/40 text-[var(--g-amber)] text-xs font-extrabold flex items-center gap-2">
-            <span className="ms-icon filled text-lg shrink-0">warning</span>
-            <span>
-              تنبيه: الخادم المفتوح حالياً يعمل بنسخة قديمة قبل التحديث — أعد تشغيل الخادم لتفعيل البث الحي الكامل.
-            </span>
-          </div>
+          <StatusDot tone="warning" tintedText label="يرجى تحديث الخادم للبث الحي" />
         )}
 
-        {/* Microphone Guidance Notice */}
         {micWarning && liveOn && (
-          <div className="p-3 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-[var(--g-text)] text-xs font-bold flex items-center gap-2">
-            <span className="ms-icon text-lg text-[#00C853] shrink-0">info</span>
-            <span>{micWarning}</span>
-          </div>
+          <StatusDot tone="neutral" label={micWarning} />
         )}
 
-        {/* MASTER LIVE CHANNEL POWER SWITCH (ON / OFF) */}
+        {/* 2. OLED Radio Console + PTT Circle */}
         <div
-          className={`rounded-3xl p-4 border-2 flex flex-wrap items-center justify-between gap-3 transition-colors duration-200 ${
+          className={`rounded-3xl border p-4 space-y-3.5 transition-colors duration-200 text-[var(--g-radio-text)] ${
             emergencyMode && liveOn
-              ? 'bg-[#3B0A0D] border-[#FF453A] text-white shadow-[0_8px_24px_rgba(255,69,58,0.28)]'
+              ? 'bg-[var(--g-radio-emergency-bg)] border-[var(--g-radio-emergency-bright)]'
               : liveOn
-              ? 'bg-[#07291A] border-[#00E676] text-white shadow-[0_8px_24px_rgba(0,230,118,0.18)]'
-              : 'bg-[#0D1117] border-[#262E3B] text-[#E6EDF3]'
+              ? 'bg-[var(--g-radio-bg)] border-[var(--g-radio-signal-bright)]'
+              : 'bg-[var(--g-radio-bg)] border-[var(--g-radio-border)]'
           }`}
         >
-          <div className="space-y-1 min-w-0 flex-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span
-                className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                  liveOn || receiveMode === 'all'
-                    ? 'bg-[#00E676] animate-pulse'
-                    : 'bg-[#FBBF24]'
-                }`}
-              />
-              <span className="text-sm sm:text-base font-black">
-                {liveOn
-                  ? emergencyMode
-                    ? '🚨 جلسة بث طوارئ حية مفتوحة للكل (EMERGENCY ON)'
-                    : 'جلسة التحدث الحية مفتوحة للقناة (LIVE ON)'
-                  : 'وضع الاستقبال التلقائي كالشرطة نشط (Auto-Listen)'}
-              </span>
-            </div>
-            <p className="text-[11px] text-[#B8C4D0] m-0 leading-relaxed">
-              {liveOn
-                ? 'تم إرسال إشعار فتح الخط للزملاء — صوتك يُسمع فوراً لديهم حتى لو لم يفتحوا نافذة اللاسلكي.'
-                : 'تسمع أي زميل يفتح الخط أو يتحدث تلقائياً طالما هاتفك متصل بالإنترنت — اضغط (فتح جلسة تحدث ON) للتكلم.'}
-            </p>
-            <div className="flex items-center gap-2 flex-wrap pt-1 text-[10px] font-extrabold">
-              <span className="px-2 py-0.5 rounded-full bg-[#00E676]/20 text-[#69F0AE] border border-[#00E676]/40 inline-flex items-center gap-1">
-                <span className="ms-icon text-xs">screen_lock_portrait</span>
-                <span>
-                  {bgKeepAliveActive || wakeLockActive
-                    ? 'يعمل في الخلفية وشاشة القفل تلقائياً'
-                    : 'استماع فوري تلقائي كالشرطة'}
-                </span>
-              </span>
-              <span className="px-2 py-0.5 rounded-full bg-[#38BDF8]/20 text-[#7DD3FC] border border-[#38BDF8]/40 inline-flex items-center gap-1">
-                <span className="ms-icon text-xs">public</span>
-                <span>
-                  {globalCloudConnected
-                    ? 'ربط عالمي عبر كل الشبكات (4G / Wi-Fi)'
-                    : 'ربط شبكة محلية'}
-                </span>
-              </span>
-              {meshConnectedCount > 0 && (
-                <span className="px-2 py-0.5 rounded-full bg-white/10 text-white border border-white/15 inline-flex items-center gap-1 num-ltr">
-                  <span className="ms-icon text-xs text-[#00E676]">hub</span>
-                  <span>P2P Direct: {meshConnectedCount}</span>
-                </span>
-              )}
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={toggleLivePower}
-            disabled={connectingLive}
-            className={`min-h-[50px] px-5 py-2.5 rounded-2xl font-black text-xs sm:text-sm flex items-center justify-center gap-2 shrink-0 transition-all duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-white ${
-              liveOn
-                ? 'bg-[#FF3B30] hover:bg-[#D93025] text-white shadow-md'
-                : 'bg-[#00E676] hover:bg-[#00C853] text-[#041E0F] shadow-[0_6px_20px_rgba(0,230,118,0.35)]'
-            }`}
-          >
-            <span className="ms-icon filled text-xl">power_settings_new</span>
-            <span>
-              {connectingLive
-                ? 'جاري فتح الخط...'
-                : liveOn
-                ? 'إنهاء الجلسة (OFF)'
-                : 'فتح جلسة تحدث (ON)'}
-            </span>
-          </button>
-        </div>
-
-        {/* Police Radio Auto-Receive Mode Selector (يسمع على طول طالما فاتح نت حسب طوارئ ولا لأ) */}
-        <div className="g-card p-3.5 bg-[var(--g-surface-variant)]/60 space-y-2">
-          <div className="flex items-center justify-between gap-2 px-1">
-            <span className="text-xs font-extrabold text-[var(--g-text)] flex items-center gap-1.5">
-              <span className="ms-icon text-base text-[#00C853]">hearing</span>
-              <span>وضع الاستماع التلقائي عند اتصال الإنترنت (بدون فتح النافذة):</span>
-            </span>
-          </div>
-          <div className="grid grid-cols-3 gap-2">
-            {RECEIVE_MODES.map((rm) => {
-              const active = receiveMode === rm.id;
-              return (
-                <button
-                  key={rm.id}
-                  type="button"
-                  onClick={() => setReceiveMode?.(rm.id)}
-                  className={`min-h-[52px] px-2 py-2 rounded-2xl border text-center flex flex-col items-center justify-center gap-0.5 transition-colors duration-150 cursor-pointer ${
-                    active
-                      ? rm.id === 'emergency_only'
-                        ? 'bg-[#3B0A0D] text-[#FF8A80] border-[#FF453A]'
-                        : rm.id === 'muted'
-                        ? 'bg-[#1E293B] text-white border-[#64748B]'
-                        : 'bg-[#0D1117] text-[#00E676] border-[#00E676]'
-                      : 'bg-[var(--g-surface)] text-[var(--g-text)] border-[var(--g-border)] hover:border-[var(--g-primary)]'
-                  }`}
-                >
-                  <div className="flex items-center gap-1 text-[11px] sm:text-xs font-black">
-                    <span className={`ms-icon text-base ${active ? 'filled' : ''}`}>
-                      {rm.icon}
-                    </span>
-                    <span>{rm.label}</span>
-                  </div>
-                  <span className="text-[10px] opacity-80 font-bold hidden sm:inline">
-                    {rm.sub}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Tactical OLED Digital Frequency & Simultaneous Speakers Display */}
-        <div className="rounded-3xl bg-[#0D1117] text-[#E6EDF3] border border-[#262E3B] p-4 space-y-3 shadow-md">
-          <div className="flex items-start justify-between gap-2">
-            <div className="space-y-1 min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span
-                  style={{ color: currentChannelMeta.accent }}
-                  className="num-ltr text-xs font-black tracking-wider px-2 py-0.5 rounded-md bg-white/8 border border-white/10"
-                >
-                  {currentChannelMeta.code} • {currentChannelMeta.freq}
+          {/* Channel & Status Row */}
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="num-ltr text-xs font-bold text-[var(--g-radio-signal-bright)]">
+                  {currentChannelMeta.code || 'CH-01'} · {currentChannelMeta.freq || '462.5625 MHz'}
                 </span>
                 {emergencyMode && (
-                  <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-[#FF453A] text-white animate-pulse">
-                    🚨 وضع اختراق الطوارئ مفعل
+                  <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-[var(--g-radio-emergency-bright)] text-[var(--g-radio-text)]">
+                    طوارئ
                   </span>
                 )}
               </div>
-              <div className="text-base sm:text-lg font-black text-white flex items-center gap-1.5">
-                <span
-                  style={{ color: currentChannelMeta.accent }}
-                  className="ms-icon filled text-xl"
-                >
-                  {currentChannelMeta.icon}
-                </span>
-                <span className="truncate">{currentChannelMeta.label}</span>
+              <div className="text-sm sm:text-base font-bold text-[var(--g-radio-text)] truncate mt-0.5">
+                {currentChannelMeta.shortLabel || currentChannelMeta.label || 'القناة النشطة'}
               </div>
-              <p className="text-[11px] text-[#9BA5B4] m-0 leading-snug">
-                {currentChannelMeta.description}
-              </p>
             </div>
 
-            {/* Live TX / RX LED Indicator */}
-            <div className="shrink-0">
+            <div className="text-xs font-semibold shrink-0">
               {localSpeaking ? (
-                <div className="px-3 py-1.5 rounded-full bg-[#FF3B30]/20 border border-[#FF3B30] text-[#FF6961] text-xs font-black flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-[#FF3B30] animate-ping" />
-                  <span className="num-ltr">LIVE {txElapsedSec.toFixed(1)}s</span>
-                </div>
+                <span className="num-ltr text-[var(--g-radio-emergency-text)]">
+                  مباشر · {Number(txElapsedSec).toFixed(1)}s
+                </span>
               ) : isReceiving ? (
-                <div className="px-3 py-1.5 rounded-full bg-[#00E676]/20 border border-[#00E676] text-[#00E676] text-xs font-black flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-[#00E676] animate-pulse" />
-                  <span>بث حي وارد ({liveSpeakingUnits.length || 1})</span>
-                </div>
+                <span className="text-[var(--g-radio-signal-bright)]">
+                  استقبال ({liveSpeakingUnits.length || 1})
+                </span>
               ) : liveOn ? (
-                <div className="px-3 py-1.5 rounded-full bg-[#00E676]/15 border border-[#00E676]/50 text-[#00E676] text-xs font-extrabold flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-[#00E676]" />
-                  <span>جلسة نشطة</span>
-                </div>
+                <span className="text-[var(--g-radio-signal-bright)]">نشط</span>
               ) : (
-                <div className="px-3 py-1.5 rounded-full bg-[#00E676]/10 border border-[#00E676]/30 text-[#69F0AE] text-xs font-bold">
-                  استقبال تلقائي نشط
-                </div>
+                <span className="text-[var(--g-radio-muted)]">استقبال</span>
               )}
             </div>
           </div>
 
-          {/* Simultaneous Live Speaker Banner + 12-Bar GPU Audio Visualizer */}
-          <div className="rounded-2xl bg-[#161B22] border border-[#262E3B] px-3.5 py-2.5 flex items-center justify-between gap-3 h-14">
-            <div className="min-w-0 flex-1">
+          {/* Speaker Strip + 12-Bar Visualizer */}
+          <div className="rounded-2xl bg-[var(--g-radio-surface)] border border-[var(--g-radio-border)] px-3 py-2 flex items-center justify-between gap-2.5 min-h-[44px]">
+            <div className="min-w-0 flex-1 text-xs font-medium truncate">
               {localSpeaking && speakingNamesBanner ? (
-                <div className="text-xs sm:text-sm font-extrabold text-[#FBBF24] truncate flex items-center gap-1.5">
-                  <span className="ms-icon filled text-base">graphic_eq</span>
-                  <span>أنت + {speakingNamesBanner} تتحدثون معاً حياً...</span>
-                </div>
+                <span className="text-[var(--g-yellow-border)]">
+                  أنت · {speakingNamesBanner}
+                </span>
               ) : localSpeaking ? (
-                <div className="text-xs sm:text-sm font-extrabold text-[#FF6961] truncate flex items-center gap-1.5">
-                  <span className="ms-icon filled text-base">mic</span>
-                  <span>
-                    {emergencyMode
-                      ? '🚨 صوتك يُبث كطوارئ لكل القنوات الآن...'
-                      : 'صوتك يُبث حياً الآن ويُسمع تلقائياً لدى الزملاء...'}
-                  </span>
-                </div>
+                <span className="text-[var(--g-radio-emergency-text)]">مباشر</span>
               ) : speakingNamesBanner ? (
-                <div className="text-xs sm:text-sm font-extrabold text-[#00E676] truncate flex items-center gap-1.5">
-                  <span className="ms-icon filled text-base">graphic_eq</span>
-                  <span>{speakingNamesBanner} يتحدث الآن حياً...</span>
-                </div>
-              ) : liveOn ? (
-                <div className="text-xs font-bold text-[#A7F3D0] truncate flex items-center gap-1.5">
-                  <span className="ms-icon text-base text-[#00E676]">sensors</span>
-                  <span>
-                    {micMode === 'muted'
-                      ? 'تستمع للقناة حياً — اضغط الزر للتحدث'
-                      : 'الخط صافي ومفتوح — تكلم مباشرةً بدون لمس أي زر'}
-                  </span>
-                </div>
+                <span className="text-[var(--g-radio-signal-bright)]">
+                  {speakingNamesBanner}
+                </span>
               ) : (
-                <div className="text-xs font-bold text-[#A7F3D0] truncate flex items-center gap-1.5">
-                  <span className="ms-icon text-base text-[#00E676]">hearing</span>
-                  <span>الراديو جاهز للاستقبال التلقائي — اضغط الدائرة للتحدث الفوري</span>
-                </div>
+                <span className="text-[var(--g-radio-muted)]">
+                  {liveOn ? 'الخط مفتوح' : 'جاهز'}
+                </span>
               )}
             </div>
 
-            {/* 12 GPU-Transformed Visualizer Bars */}
-            <div
-              aria-hidden="true"
-              className="flex items-center gap-1 h-8 shrink-0 px-1"
-            >
+            <div aria-hidden="true" className="flex items-center gap-1 h-7 shrink-0 px-0.5">
               {liveLevels.map((lvl, idx) => (
                 <span
                   key={idx}
                   style={{
                     transform: `scaleY(${Math.max(0.14, Math.min(1, lvl))})`,
                     backgroundColor: localSpeaking
-                      ? '#FF453A'
+                      ? 'var(--g-radio-emergency-bright)'
                       : isReceiving
-                      ? '#00E676'
+                      ? 'var(--g-radio-signal-bright)'
                       : liveOn
-                      ? '#10B981'
-                      : '#334155',
+                      ? 'var(--g-radio-signal)'
+                      : 'var(--g-radio-border)',
                   }}
-                  className="w-1.5 h-7 rounded-full origin-center transition-transform duration-75 will-change-transform"
+                  className="w-1.5 h-6 rounded-full origin-center transition-transform duration-75 will-change-transform"
                 />
               ))}
             </div>
           </div>
 
-          {/* Connected Units Strip */}
-          <div className="flex items-center justify-between gap-2 pt-0.5 text-[11px]">
-            <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-              <span className="text-[#8B949E] font-bold shrink-0">المتصلون بالاستقبال:</span>
-              {activeUnits.length === 0 ? (
-                <span className="text-[#94A3B8] font-bold">
-                  جهازك متصل بالاستقبال السحابي
-                </span>
-              ) : (
-                activeUnits.slice(0, 6).map((u) => {
-                  const uKey = u.peer_id || u.user_id;
-                  const isMe = u.peer_id ? u.peer_id === peerId : u.user_id === authUser?.id;
-                  const isUnitTalking =
-                    (isMe && localSpeaking) ||
-                    u.status === 'talking' ||
-                    speakingPeerIds.has(uKey);
-                  return (
-                    <span
-                      key={uKey}
-                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-extrabold border ${
-                        isUnitTalking
-                          ? 'bg-[#FF3B30]/20 border-[#FF3B30] text-[#FF8A80]'
-                          : 'bg-white/6 border-white/10 text-[#E2E8F0]'
-                      }`}
-                    >
-                      <span
-                        className={`w-1.5 h-1.5 rounded-full ${
-                          isUnitTalking ? 'bg-[#FF3B30] animate-ping' : 'bg-[#00E676]'
-                        }`}
-                      />
-                      <span className="truncate max-w-[105px]">
-                        {isMe ? 'أنت' : u.display_name}
-                      </span>
-                    </span>
-                  );
-                })
+          {/* Central PTT Circle */}
+          <div className="flex flex-col items-center justify-center gap-3 py-1">
+            <div className="relative flex items-center justify-center">
+              {localSpeaking && (
+                <>
+                  <span className="absolute inset-0 rounded-full bg-[var(--g-radio-emergency-bright)] opacity-35 walkie-pulse-ring pointer-events-none" />
+                  <span
+                    style={{ animationDelay: '0.45s' }}
+                    className="absolute inset-0 rounded-full bg-[var(--g-radio-emergency)] opacity-25 walkie-pulse-ring pointer-events-none"
+                  />
+                </>
               )}
-              {activeUnits.length > 6 && (
-                <span className="num-ltr text-[#94A3B8] font-extrabold">
-                  +{activeUnits.length - 6}
+
+              <button
+                type="button"
+                onContextMenu={(e) => e.preventDefault()}
+                onClick={handleCenterButtonClick}
+                onPointerDown={handlePttPointerDown}
+                onPointerUp={handlePttPointerUp}
+                onPointerCancel={handlePttPointerUp}
+                aria-label="اضغط للتحدث"
+                className={`relative z-10 w-36 h-36 sm:w-40 sm:h-40 rounded-full select-none touch-none flex flex-col items-center justify-center gap-1.5 border-4 transition-[transform,background-color,border-color] duration-150 cursor-pointer ${
+                  localSpeaking
+                    ? 'bg-[var(--g-radio-emergency)] border-[var(--g-radio-emergency-text)] text-[var(--g-radio-text)] scale-96'
+                    : emergencyMode
+                    ? 'bg-[var(--g-radio-emergency-bg)] border-[var(--g-radio-emergency-bright)] text-[var(--g-radio-text)]'
+                    : !liveOn
+                    ? 'bg-[var(--g-radio-surface)] hover:bg-[var(--g-radio-surface-2)] border-[var(--g-radio-signal-bright)] text-[var(--g-radio-signal-bright)]'
+                    : micMode === 'muted'
+                    ? 'bg-[var(--g-radio-surface-2)] border-[var(--g-radio-muted)] text-[var(--g-radio-text)]'
+                    : 'bg-[var(--g-radio-signal-bg)] border-[var(--g-radio-signal-bright)] text-[var(--g-radio-text)]'
+                }`}
+              >
+                <Icon
+                  name={
+                    localSpeaking
+                      ? 'mic'
+                      : emergencyMode
+                      ? 'e911_emergency'
+                      : !liveOn || micMode === 'muted'
+                      ? 'touch_app'
+                      : 'graphic_eq'
+                  }
+                  size={36}
+                  filled
+                />
+                <span className="text-xs sm:text-sm font-bold text-center px-2">
+                  {localSpeaking
+                    ? 'مباشر الآن'
+                    : !liveOn || micMode === 'muted'
+                    ? 'اضغط للتحدث'
+                    : 'مباشر'}
                 </span>
-              )}
+                {localSpeaking && (
+                  <span className="text-[11px] font-semibold opacity-85 num-ltr">
+                    {Number(txElapsedSec).toFixed(1)}s
+                  </span>
+                )}
+              </button>
             </div>
+
+            {/* Power, Emergency & Ping Controls */}
+            <div className="grid grid-cols-2 gap-2 w-full">
+              <button
+                type="button"
+                onClick={toggleLivePower}
+                disabled={connectingLive}
+                className={`min-h-[44px] px-3 py-2 rounded-[var(--g-radius-md)] font-bold text-xs sm:text-sm flex items-center justify-center gap-1.5 cursor-pointer ${
+                  liveOn
+                    ? 'bg-[var(--g-radio-emergency)] text-[var(--g-radio-text)]'
+                    : 'bg-[var(--g-radio-signal-bright)] text-[var(--g-radio-on-signal)]'
+                }`}
+              >
+                <Icon name="power_settings_new" size={18} filled />
+                <span>
+                  {connectingLive
+                    ? 'جاري الفتح...'
+                    : liveOn
+                    ? 'إنهاء الجلسة'
+                    : 'فتح الجلسة'}
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setEmergencyMode?.((prev) => !prev)}
+                className={`min-h-[44px] px-3 py-2 rounded-[var(--g-radius-md)] border text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer ${
+                  emergencyMode
+                    ? 'bg-[var(--g-radio-emergency-bright)] text-[var(--g-radio-text)] border-[var(--g-radio-text)]'
+                    : 'bg-[var(--g-radio-surface)] text-[var(--g-radio-text)] border-[var(--g-radio-border)]'
+                }`}
+              >
+                <Icon name="e911_emergency" size={16} filled />
+                <span>طوارئ</span>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleAlertPingClick}
+              disabled={pingCooldownSec > 0}
+              className="w-full min-h-[44px] px-3 py-2 rounded-[var(--g-radius-md)] bg-[var(--g-radio-emergency-bg)] text-[var(--g-radio-emergency-text)] border border-[var(--g-radio-emergency-bright)] text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-55 disabled:cursor-not-allowed"
+            >
+              <Icon name="notifications_active" size={16} filled />
+              <span>
+                {pingCooldownSec > 0 ? `انتظر (${pingCooldownSec}ث)` : 'صافرة طوارئ'}
+              </span>
+            </button>
+          </div>
+
+          {/* 1 Quiet Status Dot + Connected Count + Units */}
+          <div className="pt-2 border-t border-[var(--g-radio-border)] flex items-center gap-2 flex-wrap text-xs">
+            <span className="inline-flex items-center gap-1.5 text-[var(--g-radio-signal-bright)] font-semibold shrink-0">
+              <span
+                className="w-2 h-2 rounded-full bg-[var(--g-radio-signal-bright)]"
+                aria-hidden="true"
+              />
+              <span className="num-ltr">متصل ({activeUnits.length})</span>
+            </span>
+
+            {activeUnits.slice(0, 6).map((u) => {
+              const uKey = u.peer_id || u.user_id;
+              const isMe = u.peer_id ? u.peer_id === peerId : u.user_id === authUser?.id;
+              const isUnitTalking =
+                (isMe && localSpeaking) ||
+                u.status === 'talking' ||
+                speakingPeerIds.has(uKey);
+              return (
+                <span
+                  key={uKey}
+                  className={`text-[11px] font-medium truncate max-w-[100px] ${
+                    isUnitTalking
+                      ? 'text-[var(--g-radio-emergency-text)] font-bold'
+                      : 'text-[var(--g-radio-muted)]'
+                  }`}
+                >
+                  {isMe ? 'أنت' : u.display_name}
+                </span>
+              );
+            })}
+            {activeUnits.length > 6 && (
+              <span className="num-ltr text-[11px] text-[var(--g-radio-muted)]">
+                +{activeUnits.length - 6}
+              </span>
+            )}
           </div>
         </div>
 
-        {/* Channel Switcher & Multi-Role Radar */}
-        {allowedChannels.length > 1 && (
-          <div className="g-card p-3.5 bg-[var(--g-surface-variant)]/50 space-y-2.5">
-            <div className="flex items-center justify-between gap-2 flex-wrap px-1">
-              <div className="flex items-center gap-1.5 text-xs font-black text-[var(--g-text)]">
-                <span className="ms-icon filled text-base text-[#00C853]">radar</span>
-                <span>
-                  {canAllChannels
-                    ? `رادار القنوات الشامل (${allowedChannels.length} قنوات — الأمن / الآدمن / الكاميرات)`
-                    : 'قنوات اللاسلكي المخصصة لك + خط الأمن والطوارئ:'}
-                </span>
-              </div>
+        {/* 3. Segmented Tab Switcher */}
+        {consoleTabOptions.length > 1 && (
+          <SegmentedControl
+            options={consoleTabOptions}
+            value={activeTab}
+            onChange={setActiveTab}
+            ariaLabel="أقسام اللاسلكي"
+            fullWidth
+          />
+        )}
 
-              {!canAllChannels &&
-                activeChannel !== 'security' &&
-                allowedChannels.some((c) => c.id === 'security') && (
-                  <button
+        {/* TAB A: Channels */}
+        {activeTab === 'channels' && hasMultiChannels && (
+          <div className="space-y-2.5">
+            {!canAllChannels &&
+              activeChannel !== 'security' &&
+              allowedChannels.some((c) => c.id === 'security') && (
+                <div className="flex justify-end">
+                  <Button
                     type="button"
-                    onClick={() => selectChannel('security')}
-                    className="px-2.5 py-1 rounded-full bg-[#146C2E] text-white text-[11px] font-black flex items-center gap-1 shadow-2xs hover:opacity-95 cursor-pointer"
+                    variant="secondary"
+                    size="sm"
+                    icon="shield_person"
+                    onClick={() => selectChannel?.('security')}
                   >
-                    <span className="ms-icon filled text-sm">shield_person</span>
-                    <span>نداء مباشر للأمن (CH-01)</span>
-                  </button>
-                )}
-            </div>
-
-            {canAllChannels && (
-              <p className="text-[11px] text-[var(--g-muted)] m-0 px-1 font-bold">
-                يمكنك الدخول على قناة أي رول (الكاشير، الصالة، المخزن، الدليفري، المشرفين، الأمن) لرؤية المتصلين والاستماع أو التحدث معهم مباشرةً.
-              </p>
-            )}
+                    الأمن CH-01
+                  </Button>
+                </div>
+              )}
 
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
               {allowedChannels.map((ch) => {
@@ -577,61 +522,32 @@ export default function WalkieTalkieConsole({
                   <button
                     key={ch.id}
                     type="button"
-                    onClick={() => selectChannel(ch.id)}
-                    className={`min-h-[54px] px-3 py-2 rounded-2xl border text-right flex flex-col justify-between gap-1 transition-all duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--g-primary)] ${
+                    onClick={() => selectChannel?.(ch.id)}
+                    className={`min-h-[54px] px-3 py-2 rounded-[var(--g-radius-md)] border text-start flex flex-col justify-between gap-1 cursor-pointer ${
                       selected
                         ? ch.id === 'emergency'
-                          ? 'bg-[#3B0A0D] text-white border-[#FF453A] shadow-sm'
-                          : 'bg-[#0D1117] text-white border-[#00E676] shadow-sm'
+                          ? 'bg-[var(--g-radio-emergency-bg)] text-[var(--g-radio-text)] border-[var(--g-radio-emergency-bright)]'
+                          : 'bg-[var(--g-radio-bg)] text-[var(--g-radio-text)] border-[var(--g-radio-signal-bright)]'
                         : isChTalking
-                        ? 'bg-[#07291A] text-white border-[#00E676] animate-pulse'
-                        : 'bg-[var(--g-surface)] text-[var(--g-text)] border-[var(--g-border)] hover:border-[var(--g-primary)]'
+                        ? 'bg-[var(--g-radio-bg)] text-[var(--g-radio-text)] border-[var(--g-radio-signal-bright)]'
+                        : 'bg-surface text-ink border-line hover:border-line-strong'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-1.5 w-full">
-                      <div className="flex items-center gap-1.5 min-w-0">
-                        <span
-                          style={{ color: selected || isChTalking ? ch.accent : undefined }}
-                          className={`ms-icon text-base shrink-0 ${selected || isChTalking ? 'filled' : ''}`}
-                        >
-                          {ch.icon}
-                        </span>
-                        <span className="text-xs font-black truncate">{ch.shortLabel}</span>
-                      </div>
+                      <span className="text-xs font-semibold truncate">
+                        {ch.shortLabel}
+                      </span>
                       {chSummary.count > 0 && (
-                        <span
-                          className={`text-[10px] font-black px-1.5 py-0.5 rounded-full shrink-0 num-ltr ${
-                            isChTalking
-                              ? 'bg-[#FF3B30] text-white'
-                              : selected
-                              ? 'bg-[#00E676]/20 text-[#69F0AE]'
-                              : 'bg-[var(--g-green-bg)] text-[var(--g-green)]'
-                          }`}
-                        >
-                          {chSummary.count} متصل
+                        <span className="text-[11px] font-semibold num-ltr opacity-85">
+                          {chSummary.count}
                         </span>
                       )}
                     </div>
 
-                    <div className="flex items-center justify-between gap-1 text-[10px] w-full">
-                      {isChTalking ? (
-                        <span className="text-[#69F0AE] font-extrabold truncate">
-                          🎙️ يتحدث: {chSummary.talkingNames?.[0] || 'الآن'}
-                        </span>
-                      ) : (
-                        <span
-                          className={`truncate font-bold ${
-                            selected ? 'text-[#9BA5B4]' : 'text-[var(--g-muted)]'
-                          }`}
-                        >
-                          {ch.roleBadge || ch.freq}
-                        </span>
-                      )}
-                      {selected && (
-                        <span className="text-[9px] font-black text-[#00E676] shrink-0">
-                          النشطة ✓
-                        </span>
-                      )}
+                    <div className="text-[11px] truncate opacity-75">
+                      {isChTalking
+                        ? chSummary.talkingNames?.[0] || 'يتحدث'
+                        : ch.code || ch.freq}
                     </div>
                   </button>
                 );
@@ -640,246 +556,130 @@ export default function WalkieTalkieConsole({
           </div>
         )}
 
-        {/* 3-Way Live Microphone Mode Selector + Tactile Hardware Deck */}
-        <div className="g-card p-4 sm:p-5 bg-[var(--g-surface-variant)]/55 space-y-4">
-          <div className="space-y-1.5">
-            <div className="text-xs font-extrabold text-[var(--g-muted)] px-1 flex items-center justify-between">
-              <span>وضع المايكروفون أثناء التحدث:</span>
-              <span className="text-[11px] font-bold text-[var(--g-primary)]">
-                {micMode === 'vad'
-                  ? 'حساسية صوتية ذكية (أولوية استماع آلية)'
-                  : micMode === 'open'
-                  ? 'مايك مفتوح ١٠٠٪'
-                  : 'اضغط مطولاً للتحدث (PTT)'}
-              </span>
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              {MIC_MODES.map((m) => {
-                const active = micMode === m.id;
-                return (
-                  <button
-                    key={m.id}
-                    type="button"
-                    onClick={() => setMicMode(m.id)}
-                    className={`min-h-[54px] px-2 py-2 rounded-2xl border text-center flex flex-col items-center justify-center gap-0.5 transition-colors duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--g-primary)] ${
-                      active
-                        ? m.id === 'muted'
-                          ? 'bg-[#1E293B] text-white border-[#64748B]'
-                          : 'bg-[#0D1117] text-[#00E676] border-[#00E676]'
-                        : 'bg-[var(--g-surface)] text-[var(--g-text)] border-[var(--g-border)] hover:border-[var(--g-primary)]'
-                    }`}
-                  >
-                    <div className="flex items-center gap-1 text-xs font-black">
-                      <span className={`ms-icon text-base ${active ? 'filled' : ''}`}>
-                        {m.icon}
-                      </span>
-                      <span>{m.label}</span>
-                    </div>
-                    <span className="text-[10px] opacity-80 font-bold hidden sm:inline">
-                      {m.sub}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Central Tactile Live Indicator / Instant PTT Override Circle */}
-          <div className="flex flex-col items-center justify-center gap-3 pt-1">
-            <div className="relative flex items-center justify-center">
-              {localSpeaking && (
-                <>
-                  <span className="absolute inset-0 rounded-full bg-[#FF3B30]/35 walkie-pulse-ring pointer-events-none" />
-                  <span
-                    style={{ animationDelay: '0.45s' }}
-                    className="absolute inset-0 rounded-full bg-[#FF3B30]/25 walkie-pulse-ring pointer-events-none"
-                  />
-                </>
-              )}
-
-              <button
-                type="button"
-                onContextMenu={(e) => e.preventDefault()}
-                onClick={handleCenterButtonClick}
-                onPointerDown={handlePttPointerDown}
-                onPointerUp={handlePttPointerUp}
-                onPointerCancel={handlePttPointerUp}
-                aria-label="اضغط مطولاً للتحدث الفوري المباشر"
-                className={`relative z-10 w-38 h-38 sm:w-42 sm:h-42 rounded-full select-none touch-none flex flex-col items-center justify-center gap-1.5 border-4 transition-all duration-150 cursor-pointer shadow-lg focus-visible:outline-4 focus-visible:outline-[var(--g-primary)] ${
-                  localSpeaking
-                    ? 'bg-[#D93025] border-[#FF8A80] text-white scale-96 shadow-[0_0_32px_rgba(217,48,37,0.55)]'
-                    : emergencyMode
-                    ? 'bg-[#3B0A0D] hover:bg-[#4E0E12] border-[#FF453A] text-white shadow-[0_0_24px_rgba(255,69,58,0.35)]'
-                    : !liveOn
-                    ? 'bg-[#0D1117] hover:bg-[#16202E] border-[#00E676] text-[#00E676]'
-                    : micMode === 'muted'
-                    ? 'bg-[#1E293B] hover:bg-[#273549] border-[#94A3B8] text-white'
-                    : 'bg-[#07291A] hover:bg-[#0A3823] border-[#00E676] text-white shadow-[0_0_24px_rgba(0,230,118,0.25)]'
-                }`}
-              >
-                <span className="ms-icon filled text-5xl">
-                  {localSpeaking
-                    ? 'mic'
-                    : emergencyMode
-                    ? 'e911_emergency'
-                    : !liveOn
-                    ? 'touch_app'
-                    : micMode === 'muted'
-                    ? 'touch_app'
-                    : 'graphic_eq'}
-                </span>
-                <span className="text-sm font-black tracking-tight text-center px-2">
-                  {localSpeaking
-                    ? 'صوتك مباشر الآن للكل'
-                    : emergencyMode && !liveOn
-                    ? 'اضغط لبث طوارئ للكل 🚨'
-                    : !liveOn
-                    ? 'اضغط مطولاً للتحدث فوراً'
-                    : micMode === 'muted'
-                    ? 'اضغط مطولاً للتحدث'
-                    : 'الخط مفتوح • تكلم فوراً'}
-                </span>
-                <span className="text-[11px] font-bold opacity-85 num-ltr">
-                  {localSpeaking
-                    ? `ON AIR • ${txElapsedSec.toFixed(1)}s`
-                    : !liveOn
-                    ? 'HOLD PTT OR TAP ON'
-                    : micMode === 'muted'
-                    ? 'HOLD TO TALK'
-                    : 'LIVE AUTO-TALK'}
-                </span>
-              </button>
+        {/* TAB B: Receive / Mic Modes & Recent Calls */}
+        {activeTab === 'modes' && (
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <div className="text-xs font-medium text-ink-muted">الاستقبال</div>
+              <SegmentedControl
+                options={RECEIVE_MODES}
+                value={receiveMode}
+                onChange={(v) => setReceiveMode?.(v)}
+                ariaLabel="وضع الاستقبال"
+                fullWidth
+              />
             </div>
 
-            {/* Emergency Mode Toggle + Urgent Pager Alert Row */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full">
-              <button
-                type="button"
-                onClick={() => setEmergencyMode?.((prev) => !prev)}
-                className={`min-h-[48px] px-3 py-2 rounded-2xl border text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors duration-200 cursor-pointer ${
-                  emergencyMode
-                    ? 'bg-[#FF453A] text-white border-white shadow-md'
-                    : 'bg-[var(--g-surface)] text-[var(--g-text)] border-[var(--g-border)] hover:border-[#FF453A]'
-                }`}
-              >
-                <span className="ms-icon filled text-base">e911_emergency</span>
-                <span>
-                  {emergencyMode
-                    ? '🚨 وضع اختراق الطوارئ مفعل (يصل للكل)'
-                    : 'تفعيل وضع الطوارئ عند التحدث 🚨'}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={sendAlertPing}
-                className="min-h-[48px] px-3 py-2 rounded-2xl bg-[var(--g-red-bg)] text-[var(--g-red)] border border-[var(--g-red-border)]/40 hover:border-[var(--g-red)] text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors duration-200 cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--g-red)]"
-              >
-                <span className="ms-icon filled text-base">notifications_active</span>
-                <span>إرسال صافرة وبوش طوارئ للكل</span>
-              </button>
+            <div className="space-y-1.5">
+              <div className="text-xs font-medium text-ink-muted">المايك</div>
+              <SegmentedControl
+                options={MIC_MODES}
+                value={micMode}
+                onChange={(v) => setMicMode?.(v)}
+                ariaLabel="وضع المايك"
+                fullWidth
+              />
             </div>
 
-            <p className="text-[11px] text-[var(--g-muted)] text-center m-0">
-              النظام يعمل مثل <strong className="text-[var(--g-text)]">لاسلكي الشرطة</strong>: بمجرد فتح الخط أو التحدث من عندك يصل إشعار وصوت مباشر تلقائياً لكل زميل متصل بالإنترنت بدون أن يضطر لفتح النافذة
-            </p>
-          </div>
-        </div>
+            {recentCalls.length === 0 ? (
+              <EmptyState compact title="لا توجد نداءات" />
+            ) : (
+              <GroupedList label="السجل" count={recentCalls.length}>
+                {recentCalls.map((call) => {
+                  const isPlayingThis = activePlaybackCall?.id === call.id;
+                  const isMine = call.sender_id === authUser?.id;
+                  const roleText = ROLE_ARABIC_SHORT[call.sender_role] || call.sender_role;
 
-        {/* Recent Alerts & Recorded Clips Log */}
-        {recentCalls.length > 0 && (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between px-1">
-              <h3 className="text-xs sm:text-sm font-extrabold m-0 flex items-center gap-1.5">
-                <span className="ms-icon text-base text-[var(--g-primary)]">history</span>
-                <span>آخر التنبيهات والنداءات المحفوظة تلقائياً ({recentCalls.length})</span>
-              </h3>
-            </div>
+                  return (
+                    <div
+                      key={call.id}
+                      className="px-3 py-2.5 flex items-center justify-between gap-2.5"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <button
+                          type="button"
+                          onClick={() => replayCall?.(call)}
+                          aria-label={`تشغيل ${call.sender_name}`}
+                          className={`w-11 h-11 rounded-full flex items-center justify-center shrink-0 cursor-pointer ${
+                            isPlayingThis
+                              ? 'bg-success-solid text-on-success'
+                              : call.kind === 'ping' || call.is_emergency
+                              ? 'bg-danger-solid text-on-danger'
+                              : 'bg-primary-solid text-on-primary'
+                          }`}
+                        >
+                          <Icon
+                            name={
+                              isPlayingThis
+                                ? 'graphic_eq'
+                                : call.kind === 'ping'
+                                ? 'notifications_active'
+                                : 'play_arrow'
+                            }
+                            size={18}
+                            filled
+                          />
+                        </button>
 
-            <div className="space-y-2 max-h-44 overflow-y-auto pr-0.5">
-              {recentCalls.map((call) => {
-                const isPlayingThis = activePlaybackCall?.id === call.id;
-                const isMine = call.sender_id === authUser?.id;
-                const roleText = ROLE_ARABIC_SHORT[call.sender_role] || call.sender_role;
-
-                return (
-                  <div
-                    key={call.id}
-                    className={`p-2.5 rounded-2xl border flex items-center justify-between gap-2.5 transition-colors duration-150 ${
-                      isPlayingThis
-                        ? 'bg-[var(--g-green-bg)] border-[var(--g-green-border)]'
-                        : call.is_emergency
-                        ? 'bg-[var(--g-red-bg)]/60 border-[var(--g-red-border)]/40'
-                        : 'bg-[var(--g-surface-variant)] border-[var(--g-border)]'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <button
-                        type="button"
-                        onClick={() => replayCall(call)}
-                        aria-label={`إعادة تشغيل نداء ${call.sender_name}`}
-                        className={`w-11 h-11 rounded-full flex items-center justify-center shrink-0 transition-colors duration-150 cursor-pointer focus-visible:outline-2 focus-visible:outline-[var(--g-primary)] ${
-                          isPlayingThis
-                            ? 'bg-[#137333] text-white'
-                            : call.kind === 'ping' || call.is_emergency
-                            ? 'bg-[var(--g-red)] text-white'
-                            : 'bg-[var(--g-primary)] text-white'
-                        }`}
-                      >
-                        <span className="ms-icon filled text-xl">
-                          {isPlayingThis
-                            ? 'graphic_eq'
-                            : call.kind === 'ping'
-                            ? 'notifications_active'
-                            : 'play_arrow'}
-                        </span>
-                      </button>
-
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-xs font-black text-[var(--g-text)] truncate">
-                            {call.sender_name}
-                          </span>
-                          {Boolean(call.is_emergency) && (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--g-red)] text-white font-extrabold">
-                              طوارئ 🚨
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-xs sm:text-sm font-semibold text-ink truncate">
+                              {call.sender_name}
                             </span>
-                          )}
-                          {roleText && (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--g-surface)] text-[var(--g-muted)] font-extrabold">
-                              {roleText}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-[11px] text-[var(--g-muted)] font-bold flex items-center gap-2 mt-0.5">
-                          <span>
+                            {roleText && (
+                              <span className="text-xs text-ink-muted">{roleText}</span>
+                            )}
+                            {Boolean(call.is_emergency) && (
+                              <StatusDot tone="danger" tintedText label="طوارئ" />
+                            )}
+                          </div>
+                          <div className="text-xs text-ink-muted num-ltr">
                             {call.kind === 'ping'
-                              ? 'صافرة انتباه وطوارئ عاجلة'
-                              : `نداء صوتي (${Number(call.duration_sec || 1).toFixed(1)} ث)`}
-                          </span>
-                          <span>•</span>
-                          <span className="num-ltr">{formatTimeArabic(call.timestamp)}</span>
+                              ? 'صافرة'
+                              : `${Number(call.duration_sec || 1).toFixed(1)}ث`}
+                            {' · '}
+                            {formatTimeArabic(call.timestamp)}
+                          </div>
                         </div>
                       </div>
-                    </div>
 
-                    {(isMine || canManageRecords) && (
-                      <button
-                        type="button"
-                        onClick={() => removeCall(call.id)}
-                        aria-label="حذف النداء"
-                        className="w-11 h-11 rounded-full hover:bg-[var(--g-red-bg)] text-[var(--g-muted)] hover:text-[var(--g-red)] flex items-center justify-center shrink-0 transition-colors duration-150 cursor-pointer"
-                      >
-                        <span className="ms-icon text-lg">delete</span>
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+                      {(isMine || canManageRecords) && (
+                        <button
+                          type="button"
+                          onClick={() => setDeletingCall(call)}
+                          aria-label="حذف"
+                          className="w-11 h-11 rounded-full text-danger hover:bg-danger-bg flex items-center justify-center shrink-0 cursor-pointer"
+                        >
+                          <Icon name="delete" size={18} />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </GroupedList>
+            )}
           </div>
         )}
       </div>
+
+      <ConfirmSheet
+        open={Boolean(deletingCall)}
+        onClose={() => setDeletingCall(null)}
+        onConfirm={() => {
+          if (deletingCall) {
+            removeCall?.(deletingCall.id);
+            setDeletingCall(null);
+          }
+        }}
+        title="حذف النداء"
+        description={deletingCall ? `حذف نداء ${deletingCall.sender_name}؟` : ''}
+        confirmLabel="حذف"
+        tone="danger"
+      />
     </div>
   );
+
+  return typeof document !== 'undefined'
+    ? createPortal(consoleNode, document.body)
+    : consoleNode;
 }

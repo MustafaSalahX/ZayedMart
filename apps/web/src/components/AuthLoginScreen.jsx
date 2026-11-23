@@ -1,60 +1,153 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  fetchLoginProfiles,
   fetchStorePublicInfo,
+  getCachedLoginProfiles,
   getConfiguredApiBaseUrl,
   loginWithPassword,
   normalizeDigitsClient,
   setConfiguredApiBaseUrl,
 } from '../lib/api.js';
 import { playSuccessChime } from '../lib/audio.js';
+import { useTheme } from '../lib/themeContext.jsx';
 import PwaInstallBanner from './PwaInstallBanner.jsx';
+import {
+  BottomSheet,
+  BrandLogo,
+  Button,
+  Icon,
+  RoleAvatar,
+  SegmentedControl,
+} from './ui/index.js';
+
+const LOGIN_MODES = [
+  { id: 'pin', labelAr: 'الرمز السري' },
+  { id: 'credentials', labelAr: 'اسم المستخدم' },
+];
 
 export default function AuthLoginScreen({
-  darkMode,
+  darkMode: propDarkMode,
   onToggleDarkMode,
-  liteMode = false,
-  onToggleLiteMode,
   onLoginSuccess,
+  onToast,
 }) {
-  const [storeInfo, setStoreInfo] = useState({
-    store_name: 'زايد مارت',
-    branch_name: 'الفرع الرئيسي',
+  const themeCtx = useTheme();
+  const arch = themeCtx.architecture;
+  const darkMode = propDarkMode !== undefined ? propDarkMode : themeCtx.darkMode;
+
+  const isMinimal = arch.id === 'minimal';
+  const isGlass = arch.id === 'liquid-glass';
+  const hasBackdrop = arch.backdrop.variant !== 'none' && !themeCtx.liteMode && themeCtx.glassMode !== 'off';
+
+  const [storeInfo, setStoreInfo] = useState(() => {
+    const cached = getCachedLoginProfiles();
+    return {
+      store_name: cached?.store_name || 'زايد مارت',
+      branch_name: cached?.branch_name || 'الفرع الرئيسي',
+      login_show_role_cards: cached ? cached.login_show_role_cards !== false : true,
+    };
   });
+  const [profiles, setProfiles] = useState(() => getCachedLoginProfiles()?.profiles || []);
+  const [selectedProfile, setSelectedProfile] = useState(null);
+  const [loginMode, setLoginMode] = useState('pin');
+  const [useMobileKeyboard, setUseMobileKeyboard] = useState(false);
+
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [loginError, setLoginError] = useState('');
+
   const [showServerConfig, setShowServerConfig] = useState(false);
   const [serverUrlInput, setServerUrlInput] = useState(() => getConfiguredApiBaseUrl());
   const [serverSavedMsg, setServerSavedMsg] = useState('');
-  const inputRef = useRef(null);
+
+  const passwordInputRef = useRef(null);
+  const usernameInputRef = useRef(null);
 
   useEffect(() => {
-    fetchStorePublicInfo()
-      .then((info) => {
-        if (info?.store_name) setStoreInfo(info);
-      })
-      .catch(() => {});
+    let cancelled = false;
 
-    // Auto-focus only on desktop so mobile OS keyboard doesn't cover the touch keypad immediately
+    fetchLoginProfiles()
+      .then((res) => {
+        if (cancelled || !res) return;
+        setStoreInfo({
+          store_name: res.store_name || 'زايد مارت',
+          branch_name: res.branch_name || 'الفرع الرئيسي',
+          login_show_role_cards: res.login_show_role_cards !== false,
+        });
+        if (Array.isArray(res.profiles)) {
+          setProfiles(res.profiles);
+        }
+      })
+      .catch(() => {
+        fetchStorePublicInfo()
+          .then((info) => {
+            if (!cancelled && info?.store_name) {
+              setStoreInfo((prev) => ({
+                ...prev,
+                store_name: info.store_name,
+                branch_name: info.branch_name || prev.branch_name,
+              }));
+            }
+          })
+          .catch(() => {});
+      });
+
     if (typeof window !== 'undefined' && window.innerWidth >= 768) {
-      inputRef.current?.focus();
+      passwordInputRef.current?.focus();
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  function handleToggleDark() {
+    if (onToggleDarkMode) {
+      onToggleDarkMode();
+    } else {
+      themeCtx.toggleDarkMode();
+    }
+  }
+
+  function handleSelectProfileCard(prof) {
+    setLoginError('');
+    if (selectedProfile?.id === prof.id) {
+      setSelectedProfile(null);
+      return;
+    }
+    setSelectedProfile(prof);
+    if (typeof window !== 'undefined' && window.innerWidth >= 768) {
+      passwordInputRef.current?.focus();
+    }
+  }
 
   async function handleSubmit(e) {
     e?.preventDefault();
-    const clean = password.trim();
-    if (!clean || submitting) return;
+    const cleanPass = password.trim();
+    const cleanUser = username.trim().toLowerCase();
+    if (!cleanPass || submitting) return;
+    if (loginMode === 'credentials' && !cleanUser && !selectedProfile) {
+      setLoginError('أدخل اسم المستخدم أو اختر حساباً');
+      return;
+    }
+
     setSubmitting(true);
     setLoginError('');
     try {
-      const session = await loginWithPassword(clean);
+      const payload = { password: cleanPass };
+      if (loginMode === 'credentials' && cleanUser) {
+        payload.username = cleanUser;
+      } else if (selectedProfile?.id) {
+        payload.user_id = selectedProfile.id;
+      }
+      const session = await loginWithPassword(payload);
       playSuccessChime('in');
       onLoginSuccess?.(session);
     } catch (err) {
       playSuccessChime('alert');
-      setLoginError(err.message || 'كلمة المرور غير صحيحة');
+      setLoginError(err.message || 'بيانات الدخول غير صحيحة');
       setPassword('');
     } finally {
       setSubmitting(false);
@@ -64,7 +157,7 @@ export default function AuthLoginScreen({
   function handleKeypadDigit(digit) {
     if (submitting) return;
     setLoginError('');
-    setPassword((prev) => (prev + digit).slice(0, 24));
+    setPassword((prev) => (prev + digit).slice(0, 32));
   }
 
   function handleBackspace() {
@@ -72,226 +165,352 @@ export default function AuthLoginScreen({
     setPassword((prev) => prev.slice(0, -1));
   }
 
+  const showRoleCards =
+    storeInfo.login_show_role_cards !== false && Array.isArray(profiles) && profiles.length > 0;
+
+  const formSurfaceCls = isMinimal
+    ? 'w-full py-2 space-y-5'
+    : isGlass
+    ? 'w-full g-glass-pane rounded-[26px] p-5 sm:p-6 space-y-4 animate-pop'
+    : 'w-full g-card p-5 sm:p-6 space-y-4 animate-pop';
+
+  const keyBtnCls = isMinimal
+    ? 'h-13 rounded-[var(--g-radius-btn)] bg-canvas hover:bg-surface-2 border border-line text-ink active:scale-[0.97] text-xl font-semibold flex items-center justify-center transition-[transform,background-color] duration-150 cursor-pointer'
+    : isGlass
+    ? 'h-13 rounded-2xl bg-glass-control hover:bg-glass-pill border border-[var(--g-glass-border)] text-ink active:scale-[0.96] text-xl font-semibold flex items-center justify-center transition-[transform,background-color] duration-150 cursor-pointer'
+    : 'h-13 rounded-[var(--g-radius-md)] bg-surface-2 hover:bg-secondary-container text-ink active:scale-[0.97] text-xl font-semibold flex items-center justify-center transition-[transform,background-color] duration-150 cursor-pointer';
+
   return (
-    <div className="min-h-[100dvh] w-full flex flex-col bg-[var(--g-bg)] text-[var(--g-text)] overflow-x-hidden">
-      <div className="google-brand-bar shrink-0" />
+    <div
+      className={`relative z-[1] min-h-[100dvh] w-full flex flex-col text-ink overflow-x-hidden pt-[var(--safe-top)] pb-[var(--safe-bottom)] ${
+        hasBackdrop ? 'bg-transparent' : 'bg-canvas'
+      }`}
+    >
+      {arch.shell.showBrandBar && <div className="google-brand-bar shrink-0" />}
 
-      {/* Top Minimal Google Bar */}
-      <div className="max-w-4xl w-full mx-auto px-3 sm:px-6 pt-3 sm:pt-4 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 text-[11px] sm:text-xs font-bold text-[var(--g-muted)] min-w-0">
-          <span className="ms-icon filled text-base text-[var(--g-primary)]">shield_lock</span>
-          <span className="truncate">دخول لمرة واحدة — تحديد الدور تلقائياً</span>
-        </div>
-
-        <div className="flex items-center gap-1.5 shrink-0">
-          {onToggleLiteMode && (
-            <button
-              type="button"
-              onClick={onToggleLiteMode}
-              title={
-                liteMode
-                  ? 'وضع الهواتف الاقتصادية مفعّل (سريع وخفيف على الرام والبطارية)'
-                  : 'تفعيل الوضع الخفيف للهواتف الاقتصادية الضعيفة'
-              }
-              className={`h-9 sm:h-10 px-3 rounded-full border text-xs font-extrabold flex items-center justify-center gap-1 shrink-0 ${
-                liteMode
-                  ? 'bg-[var(--g-green-bg)] text-[var(--g-green)] border-[var(--g-green)]/40'
-                  : 'bg-[var(--g-surface)] text-[var(--g-text)] border-[var(--g-border)]'
-              }`}
-            >
-              <span className="ms-icon filled text-base">bolt</span>
-              <span>{liteMode ? 'أداء خفيف ⚡' : 'وضع خفيف'}</span>
-            </button>
-          )}
-
-          <button
-            type="button"
-            onClick={onToggleDarkMode}
-            title={darkMode ? 'الوضع النهاري' : 'الوضع الليلي المريح'}
-            className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] flex items-center justify-center shrink-0 hover:border-[var(--g-primary)]"
-          >
-            <span className="ms-icon filled text-lg">
-              {darkMode ? 'light_mode' : 'dark_mode'}
-            </span>
-          </button>
-        </div>
+      {/* Minimal Top Bar — Single Dark/Light Toggle */}
+      <div className="max-w-4xl w-full mx-auto px-4 pt-3 sm:pt-4 flex items-center justify-end">
+        <button
+          type="button"
+          onClick={handleToggleDark}
+          aria-label={darkMode ? 'الوضع النهاري' : 'الوضع الليلي'}
+          className={`w-11 h-11 rounded-full flex items-center justify-center transition-[transform,background-color,border-color] duration-150 active:scale-95 cursor-pointer ${
+            isGlass
+              ? 'bg-glass-control border border-[var(--g-glass-border)] text-ink'
+              : 'bg-surface border border-line hover:border-line-strong text-ink'
+          }`}
+        >
+          <Icon name={darkMode ? 'light_mode' : 'dark_mode'} size={18} />
+        </button>
       </div>
 
-      <div className="flex-1 flex flex-col items-center justify-center px-3 sm:px-6 py-3 sm:py-6">
-        <PwaInstallBanner />
-        <form
-          onSubmit={handleSubmit}
-          className="w-full max-w-md g-card p-4 sm:p-7 shadow-sm space-y-3.5 sm:space-y-5 animate-pop"
-        >
-          {/* Brand Identity */}
-          <div className="text-center space-y-1">
-            <img
-              src="/Logo.png"
-              onError={(e) => {
-                if (e.currentTarget.src.endsWith('/Logo.png')) {
-                  e.currentTarget.src = '/logo.jpeg';
+      {/* Centered Calm Login Surface */}
+      <div className="flex-1 flex flex-col items-center justify-center px-4 py-4 sm:py-6">
+        <div className="w-full max-w-sm space-y-3">
+          <PwaInstallBanner onToast={onToast} />
+
+          <form onSubmit={handleSubmit} className={formSurfaceCls}>
+            {/* Identity */}
+            <div className="text-center space-y-1.5">
+              <div className="flex justify-center">
+                <BrandLogo alt={storeInfo.store_name || 'زايد مارت'} size="lg" />
+              </div>
+              <h1
+                className={`text-lg sm:text-xl ${arch.surfaces.headingWeight} tracking-tight text-ink m-0`}
+              >
+                {storeInfo.store_name || 'زايد مارت'}
+              </h1>
+              {storeInfo.branch_name && (
+                <p className="text-xs font-normal text-ink-muted m-0">
+                  {storeInfo.branch_name}
+                </p>
+              )}
+            </div>
+
+            {/* Compact Horizontal Role Avatar Strip */}
+            {showRoleCards && (
+              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-1 snap-x">
+                {profiles.map((prof) => {
+                  const isSelected = selectedProfile?.id === prof.id;
+                  return (
+                    <button
+                      key={prof.id}
+                      type="button"
+                      onClick={() => handleSelectProfileCard(prof)}
+                      aria-pressed={isSelected}
+                      className={`snap-start min-w-[74px] max-w-[84px] p-2 rounded-[var(--g-radius-md)] flex flex-col items-center text-center gap-1 shrink-0 transition-[transform,background-color,border-color] duration-150 active:scale-[0.96] cursor-pointer border ${
+                        isSelected
+                          ? 'border-primary bg-primary-container/40'
+                          : isMinimal
+                          ? 'border-transparent hover:border-line bg-transparent'
+                          : isGlass
+                          ? 'border-[var(--g-glass-border)] bg-glass-control hover:bg-glass-pill'
+                          : 'border-line bg-surface-2/60 hover:border-line-strong'
+                      }`}
+                    >
+                      <RoleAvatar
+                        src={prof.avatar_url}
+                        name={prof.display_name}
+                        role={prof.role}
+                        color={prof.avatar_color}
+                        preset={prof.avatar_preset || 'role_default'}
+                        size="sm"
+                      />
+                      <span
+                        className={`text-[11px] truncate w-full ${
+                          isSelected ? 'font-semibold text-ink' : 'font-medium text-ink-muted'
+                        }`}
+                      >
+                        {prof.display_name}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Mode Switcher */}
+            <SegmentedControl
+              options={LOGIN_MODES}
+              value={loginMode}
+              onChange={(mode) => {
+                setLoginMode(mode);
+                setLoginError('');
+                if (mode === 'credentials') {
+                  setTimeout(() => usernameInputRef.current?.focus(), 50);
                 }
               }}
-              alt={storeInfo.store_name || 'زايد مارت'}
-              className="w-16 h-16 sm:w-20 sm:h-20 mx-auto rounded-2xl sm:rounded-3xl object-cover border-2 border-[var(--g-border)] shadow-sm bg-white"
+              ariaLabel="طريقة الدخول"
+              fullWidth
             />
-            <h1 className="text-lg sm:text-2xl font-extrabold m-0">
-              {storeInfo.store_name || 'زايد مارت'}
-            </h1>
-            <p className="text-xs sm:text-sm text-[var(--g-muted)] m-0">
-              أدخل كلمة المرور الخاصة بك لفتح النظام على هذا الجهاز
-            </p>
-          </div>
 
-          {/* Password Input with Show/Hide Toggle */}
-          <div className="relative w-full">
-            <input
-              ref={inputRef}
-              type={showPassword ? 'text' : 'password'}
-              value={password}
-              onChange={(e) => {
-                setLoginError('');
-                setPassword(normalizeDigitsClient(e.target.value));
-              }}
-              placeholder="اكتب الرقم السري هنا..."
-              className="g-input w-full text-center text-2xl sm:text-3xl tracking-widest font-black num-ltr min-h-[58px] py-3.5 px-12"
-            />
-            <button
-              type="button"
-              onClick={() => setShowPassword((s) => !s)}
-              title={showPassword ? 'إخفاء' : 'إظهار'}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full flex items-center justify-center text-[var(--g-muted)] hover:bg-[var(--g-surface-variant)]"
-            >
-              <span className="ms-icon text-xl">
-                {showPassword ? 'visibility_off' : 'visibility'}
-              </span>
-            </button>
-          </div>
-
-          {loginError && (
-            <div className="p-3 rounded-2xl bg-[var(--g-red-bg)] text-[var(--g-red)] text-xs sm:text-sm font-extrabold text-center flex items-center justify-center gap-1.5">
-              <span className="ms-icon filled text-lg">gpp_bad</span>
-              <span>{loginError}</span>
-            </div>
-          )}
-
-          {/* True 3-Column Giant Touch Keypad (Explicit dir="ltr" so grid is never broken!) */}
-          <div dir="ltr" className="grid grid-cols-3 gap-2.5 sm:gap-3 w-full select-none">
-            {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((digit) => (
-              <button
-                key={digit}
-                type="button"
-                disabled={submitting}
-                onClick={() => handleKeypadDigit(digit)}
-                className="h-14 sm:h-15 rounded-2xl bg-[var(--g-surface-variant)] hover:bg-[var(--g-secondary-container)] active:scale-95 text-2xl font-black flex items-center justify-center transition-all"
-              >
-                {digit}
-              </button>
-            ))}
-            <button
-              type="button"
-              disabled={submitting}
-              onClick={handleBackspace}
-              title="مسح رقم"
-              className="h-14 sm:h-15 rounded-2xl bg-[var(--g-surface-variant)] text-[var(--g-muted)] font-extrabold flex items-center justify-center active:scale-95 transition-all"
-            >
-              <span className="ms-icon text-2xl">backspace</span>
-            </button>
-            <button
-              type="button"
-              disabled={submitting}
-              onClick={() => handleKeypadDigit('0')}
-              className="h-14 sm:h-15 rounded-2xl bg-[var(--g-surface-variant)] hover:bg-[var(--g-secondary-container)] active:scale-95 text-2xl font-black flex items-center justify-center transition-all"
-            >
-              0
-            </button>
-            <button
-              type="submit"
-              disabled={submitting || !password.trim()}
-              className="h-14 sm:h-15 rounded-2xl bg-[#1E8E3E] text-white text-base font-black flex items-center justify-center gap-1.5 disabled:opacity-45 active:scale-95 transition-all shadow-sm"
-            >
-              <span>{submitting ? '...' : 'دخول'}</span>
-              <span className="ms-icon text-lg">login</span>
-            </button>
-          </div>
-
-          <div className="pt-2 border-t border-[var(--g-border)] space-y-2">
-            <div className="text-center text-[11px] text-[var(--g-muted)] flex items-center justify-center gap-1.5 leading-snug">
-              <span className="ms-icon text-sm text-[var(--g-green)]">verified_user</span>
-              <span>يبقى الجهاز مسجلاً تلقائياً ولا يطلب كلمة المرور مرة أخرى إلا عند تسجيل الخروج</span>
-            </div>
-
-            <div className="flex items-center justify-center">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowServerConfig((v) => !v);
-                  setServerSavedMsg('');
-                }}
-                className="text-[11px] font-bold text-[var(--g-primary)] hover:underline flex items-center gap-1"
-              >
-                <span className="ms-icon text-sm">settings_ethernet</span>
-                <span>
-                  {serverUrlInput
-                    ? `متصل بسيرفر مخصص (${serverUrlInput})`
-                    : 'إعدادات اتصال السيرفر / الشبكة (تلقائي سحابي)'}
-                </span>
-              </button>
-            </div>
-
-            {showServerConfig && (
-              <div className="p-3 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] space-y-2 text-xs">
-                <div className="font-extrabold text-[var(--g-text)]">
-                  عنوان سيرفر الفرع (اتركه فارغاً للاتصال السحابي التلقائي):
+            {/* Username Input (Credentials Mode — physical left @ alignment for RTL+LTR) */}
+            {loginMode === 'credentials' && (
+              <div>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  اسم المستخدم
+                </label>
+                <div className="relative">
+                  <input
+                    ref={usernameInputRef}
+                    type="text"
+                    dir="ltr"
+                    autoComplete="username"
+                    value={username}
+                    onChange={(e) => {
+                      setLoginError('');
+                      setUsername(e.target.value.replace(/\s+/g, '_').toLowerCase());
+                    }}
+                    placeholder="اسم المستخدم"
+                    className="g-input num-ltr pl-9 pr-3.5 placeholder:text-right"
+                  />
+                  <span
+                    aria-hidden="true"
+                    className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-muted font-semibold num-ltr pointer-events-none"
+                  >
+                    @
+                  </span>
                 </div>
+              </div>
+            )}
+
+            {/* Password Input (physical left eye toggle for RTL+LTR safety) */}
+            <div className="space-y-1.5">
+              <div className="relative w-full">
                 <input
-                  type="text"
+                  ref={passwordInputRef}
+                  type={showPassword ? 'text' : 'password'}
                   dir="ltr"
-                  value={serverUrlInput}
-                  onChange={(e) => setServerUrlInput(e.target.value)}
-                  placeholder="مثال: http://192.168.1.100:3001 أو https://zayedmart.vercel.app"
-                  className="g-input text-xs num-ltr py-2 px-3"
+                  autoComplete="current-password"
+                  inputMode={
+                    loginMode === 'pin' && !useMobileKeyboard ? 'none' : 'text'
+                  }
+                  value={password}
+                  onChange={(e) => {
+                    setLoginError('');
+                    setPassword(normalizeDigitsClient(e.target.value));
+                  }}
+                  placeholder={
+                    loginMode === 'credentials' ? 'كلمة المرور' : 'الرمز السري'
+                  }
+                  className={`g-input w-full num-ltr min-h-[52px] py-2.5 pl-12 pr-3.5 placeholder:text-right ${
+                    loginMode === 'pin'
+                      ? 'text-center text-2xl font-semibold tracking-widest'
+                      : 'text-base font-medium'
+                  }`}
                 />
-                <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((s) => !s)}
+                  aria-label={showPassword ? 'إخفاء' : 'إظهار'}
+                  className="absolute left-1.5 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full flex items-center justify-center text-ink-muted hover:text-ink hover:bg-surface-2 cursor-pointer"
+                >
+                  <Icon
+                    name={showPassword ? 'visibility_off' : 'visibility'}
+                    size={18}
+                  />
+                </button>
+              </div>
+
+              {loginMode === 'pin' && (
+                <div className="flex items-center justify-end md:hidden">
                   <button
                     type="button"
                     onClick={() => {
-                      const saved = setConfiguredApiBaseUrl(serverUrlInput);
-                      setServerUrlInput(saved);
-                      setServerSavedMsg(
-                        saved
-                          ? 'تم حفظ عنوان السيرفر بنجاح ✓'
-                          : 'تم الضبط على الاتصال السحابي التلقائي ✓'
-                      );
+                      setUseMobileKeyboard((v) => {
+                        const next = !v;
+                        if (next) {
+                          setTimeout(() => passwordInputRef.current?.focus(), 40);
+                        }
+                        return next;
+                      });
                     }}
-                    className="flex-1 py-2 px-3 rounded-xl bg-[var(--g-primary)] text-white font-extrabold"
+                    className="min-h-[36px] px-2 text-xs font-medium text-ink-muted hover:text-ink inline-flex items-center gap-1 cursor-pointer"
                   >
-                    حفظ الاتصال
+                    <Icon name="keyboard" size={14} />
+                    <span>{useMobileKeyboard ? 'الأرقام' : 'كيبورد'}</span>
                   </button>
-                  {serverUrlInput && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setConfiguredApiBaseUrl('');
-                        setServerUrlInput('');
-                        setServerSavedMsg('تمت استعادة الاتصال السحابي التلقائي ✓');
-                      }}
-                      className="py-2 px-3 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)] font-extrabold"
-                    >
-                      تلقائي سحابي
-                    </button>
-                  )}
                 </div>
-                {serverSavedMsg && (
-                  <div className="text-[11px] font-extrabold text-[var(--g-green)] text-center">
-                    {serverSavedMsg}
-                  </div>
-                )}
+              )}
+            </div>
+
+            {loginError && (
+              <div
+                role="alert"
+                className="p-2.5 rounded-[var(--g-radius-md)] bg-danger-bg text-danger text-xs font-medium text-center"
+              >
+                {loginError}
               </div>
             )}
+
+            {/* Tactile PIN Keypad or Credentials Submit */}
+            {loginMode === 'pin' ? (
+              <div dir="ltr" className="grid grid-cols-3 gap-2 w-full select-none">
+                {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((digit) => (
+                  <button
+                    key={digit}
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => handleKeypadDigit(digit)}
+                    className={keyBtnCls}
+                  >
+                    {digit}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={handleBackspace}
+                  aria-label="مسح"
+                  className={keyBtnCls}
+                >
+                  <Icon name="backspace" size={20} className="text-ink-muted" />
+                </button>
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => handleKeypadDigit('0')}
+                  className={keyBtnCls}
+                >
+                  0
+                </button>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  loading={submitting}
+                  disabled={submitting || !password.trim()}
+                  className="h-13 text-sm"
+                >
+                  دخول
+                </Button>
+              </div>
+            ) : (
+              <Button
+                type="submit"
+                variant="primary"
+                size="lg"
+                fullWidth
+                loading={submitting}
+                disabled={submitting || !password.trim()}
+              >
+                دخول
+              </Button>
+            )}
+          </form>
+
+          {/* Quiet Server Config Link */}
+          <div className="flex items-center justify-center pt-1">
+            <button
+              type="button"
+              onClick={() => {
+                setShowServerConfig(true);
+                setServerSavedMsg('');
+              }}
+              className="min-h-[40px] px-3 text-xs font-medium text-ink-muted hover:text-ink inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <Icon name="dns" size={16} />
+              <span className="truncate max-w-[240px]">
+                {serverUrlInput ? serverUrlInput : 'السيرفر'}
+              </span>
+            </button>
           </div>
-        </form>
+        </div>
       </div>
+
+      {/* Server Config BottomSheet */}
+      <BottomSheet
+        open={showServerConfig}
+        onClose={() => setShowServerConfig(false)}
+        title="السيرفر"
+        maxWidth="max-w-md"
+        footer={
+          <div className="flex items-center gap-2">
+            <Button
+              variant="primary"
+              fullWidth
+              onClick={() => {
+                const saved = setConfiguredApiBaseUrl(serverUrlInput);
+                setServerUrlInput(saved);
+                setServerSavedMsg(saved ? 'تم حفظ العنوان' : 'تم الضبط على التلقائي');
+              }}
+            >
+              حفظ
+            </Button>
+            {serverUrlInput && (
+              <Button
+                variant="secondary"
+                fullWidth
+                onClick={() => {
+                  setConfiguredApiBaseUrl('');
+                  setServerUrlInput('');
+                  setServerSavedMsg('تم الضبط على التلقائي');
+                }}
+              >
+                تلقائي
+              </Button>
+            )}
+          </div>
+        }
+      >
+        <div className="space-y-3 py-1">
+          <label className="block text-xs font-medium text-ink-muted">
+            عنوان السيرفر
+          </label>
+          <input
+            type="url"
+            dir="ltr"
+            value={serverUrlInput}
+            onChange={(e) => setServerUrlInput(e.target.value)}
+            placeholder="https://zayedmart.vercel.app"
+            className="g-input text-xs sm:text-sm num-ltr"
+          />
+          {serverSavedMsg && (
+            <div className="p-2.5 rounded-[var(--g-radius-md)] bg-success-bg text-success text-xs font-medium text-center">
+              {serverSavedMsg}
+            </div>
+          )}
+        </div>
+      </BottomSheet>
     </div>
   );
 }

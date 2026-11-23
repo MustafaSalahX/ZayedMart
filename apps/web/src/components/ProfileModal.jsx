@@ -1,55 +1,120 @@
 import React, { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
-import { fetchMyProfile, fetchPersonLog } from '../lib/api.js';
+import {
+  computeShiftDurationHoursClient,
+  fetchMyProfile,
+  fetchPersonLog,
+  formatShiftDurationArabicClient,
+} from '../lib/api.js';
 import {
   ACTION_LABELS,
   buildPersonLogWhatsAppText,
   exportPersonLogCsv,
   exportPersonLogWord,
+  formatCctvStatusArabic,
   formatTimeArabic,
+  getCctvStatusType,
   openWhatsAppShare,
 } from '../lib/exportUtils.js';
+import {
+  BottomSheet,
+  Button,
+  CockpitMetricStrip,
+  EmptyState,
+  GroupedList,
+  Icon,
+  RoleAvatar,
+  SkeletonKpiStrip,
+  SkeletonList,
+  StatusDot,
+} from './ui/index.js';
 
-export default function ProfileModal({ open, onClose, authUser, onToast }) {
+async function copyTextSafe(text) {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fallback below
+    }
+  }
+  if (typeof document === 'undefined') return false;
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return Boolean(ok);
+  } catch {
+    return false;
+  }
+}
+
+export default function ProfileModal({
+  open,
+  onClose,
+  authUser,
+  onOpenSettings,
+  onToast,
+}) {
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
   const [profile, setProfile] = useState(null);
   const [personLog, setPersonLog] = useState(null);
   const [showPassword, setShowPassword] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState('');
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) return undefined;
     let cancelled = false;
     setShowPassword(false);
+    setError('');
 
     async function load() {
       setLoading(true);
       try {
         const res = await fetchMyProfile();
         if (cancelled) return;
-        setProfile(res.profile);
+        const prof = res?.profile || res || {};
+        setProfile(prof);
 
-        const empId = res.profile?.employee?.id || res.profile?.id || authUser?.id;
+        const empId =
+          prof?.employee?.id ||
+          prof?.employee_id ||
+          prof?.id ||
+          authUser?.employee_id ||
+          authUser?.id;
+
         if (empId) {
           try {
             const qrUrl = await QRCode.toDataURL(`ZMART:EMP:${empId}`, {
               width: 240,
               margin: 1,
-              color: { dark: '#0F172A', light: '#FFFFFF' },
             });
             if (!cancelled) setQrDataUrl(qrUrl);
           } catch {
-            // ignore
+            // ignore QR generation error
           }
           try {
             const logRes = await fetchPersonLog(empId);
             if (!cancelled) setPersonLog(logRes);
           } catch {
-            // ignore
+            // optional
           }
         }
       } catch (err) {
-        if (!cancelled) onToast?.(err.message || 'تعذر تحميل بيانات البروفايل', 'error');
+        if (!cancelled) {
+          const msg = err.message || 'تعذر تحميل البيانات';
+          setError(msg);
+          onToast?.(msg, 'error');
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -59,228 +124,286 @@ export default function ProfileModal({ open, onClose, authUser, onToast }) {
     return () => {
       cancelled = true;
     };
-  }, [open, authUser?.id]);
-
-  if (!open) return null;
+  }, [open, authUser?.id, authUser?.employee_id, reloadTick, onToast]);
 
   const p = profile || authUser || {};
   const emp = p.employee || {};
-  const myPassword = p.my_password || emp.emp_code || '—';
-  const shiftStart = emp.shift_start || '08:00';
-  const shiftEnd = emp.shift_end || '20:00';
+  const displayName = p.display_name || emp.name || authUser?.display_name || 'المستخدم';
+  const roleLabel = p.role_label || p.role || authUser?.role_label || authUser?.role || '';
+  const department = emp.department || p.department || '';
+  const roleTitle = emp.role_title || p.role_title || '';
+  const phone = emp.phone || p.phone || '';
+  const myPassword = p.my_password || emp.emp_code || p.emp_code || '—';
+  const shiftStart = emp.shift_start || p.shift_start || '08:00';
+  const shiftEnd = emp.shift_end || p.shift_end || '20:00';
+  const shiftDurLabel = formatShiftDurationArabicClient(
+    computeShiftDurationHoursClient(shiftStart, shiftEnd)
+  );
 
-  function handleCopyPassword() {
+  const plAtt = personLog?.attendanceLogs || [];
+  const plStats = {
+    totalCheckIns:
+      personLog?.stats?.totalCheckIns ??
+      (plAtt.length > 0
+        ? plAtt.filter((a) => a.action_type === 'check_in').length
+        : personLog?.summary?.daysPresent || 0),
+    totalBreaks:
+      personLog?.stats?.totalBreaks ??
+      personLog?.summary?.totalBreakCount ??
+      plAtt.filter((a) => a.action_type === 'break_start').length,
+    totalBreakMinutes:
+      personLog?.stats?.totalBreakMinutes ??
+      personLog?.summary?.totalBreakMinutes ??
+      plAtt
+        .filter((a) => a.action_type === 'break_end')
+        .reduce((acc, a) => acc + (Number(a.break_duration_minutes) || 0), 0),
+    shortagesReported:
+      personLog?.stats?.shortagesReported ??
+      personLog?.summary?.shortagesCount ??
+      (personLog?.shortages || []).length,
+    notesRecorded:
+      personLog?.stats?.notesRecorded ??
+      personLog?.summary?.notesCount ??
+      (personLog?.notes || []).length,
+  };
+
+  async function handleCopyPassword() {
     if (!myPassword || myPassword === '—') return;
-    navigator.clipboard?.writeText(String(myPassword));
-    onToast?.('تم نسخ كلمة المرور الخاصة بك ✓');
+    const ok = await copyTextSafe(String(myPassword));
+    if (ok) {
+      onToast?.('تم نسخ الرمز');
+    } else {
+      onToast?.('تعذر النسخ التلقائي', 'error');
+    }
   }
 
   return (
-    <div onClick={onClose} className="g-modal-overlay">
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="g-dialog-sheet max-w-2xl animate-pop space-y-4"
-      >
-        <div className="g-sheet-handle" />
-
-        {/* Header */}
-        <div className="flex items-center justify-between gap-2 pb-3 border-b border-[var(--g-border)]">
-          <div className="flex items-center gap-3">
-            <div
-              className="w-12 h-12 rounded-2xl text-white font-black text-lg flex items-center justify-center shrink-0"
-              style={{ backgroundColor: p.avatar_color || '#0B57D0' }}
-            >
-              {(p.display_name || 'م').slice(0, 1)}
-            </div>
-            <div>
-              <h3 className="text-base sm:text-lg font-extrabold m-0">
-                بروفايلي الشخصي — {p.display_name}
-              </h3>
-              <p className="text-xs text-[var(--g-muted)] m-0">
-                {p.role_label || p.role} {emp.department ? `• قسم ${emp.department}` : ''}
-              </p>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={onClose}
-            className="w-9 h-9 rounded-full bg-[var(--g-surface-variant)] flex items-center justify-center"
+    <BottomSheet
+      open={Boolean(open)}
+      onClose={onClose}
+      title={displayName}
+      subtitle={`${roleLabel}${department ? ` · ${department}` : ''}`}
+      maxWidth="max-w-2xl"
+      footer={
+        onOpenSettings ? (
+          <Button
+            variant="secondary"
+            fullWidth
+            icon="settings"
+            onClick={() => {
+              onClose?.();
+              onOpenSettings('profile');
+            }}
           >
-            <span className="ms-icon">close</span>
-          </button>
-        </div>
-
+            الإعدادات
+          </Button>
+        ) : null
+      }
+    >
+      <div className="space-y-5">
         {loading ? (
-          <div className="p-8 text-center text-xs font-bold text-[var(--g-muted)]">
-            جاري تحميل بروفايلك الشخصي...
+          <div className="space-y-3">
+            <SkeletonKpiStrip count={4} />
+            <SkeletonList rows={3} />
           </div>
+        ) : error && !profile ? (
+          <EmptyState
+            icon="cloud_off"
+            title="تعذر تحميل البيانات"
+            actionLabel="إعادة المحاولة"
+            onAction={() => setReloadTick((t) => t + 1)}
+            compact
+          />
         ) : (
-          <div className="space-y-4">
-            {/* Personal Credentials & QR Card */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {/* Left: Private Password & Info */}
-              <div className="p-4 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-extrabold text-[var(--g-muted)]">
-                    🔐 الباسورد / الكود السري الخاص بك فقط
-                  </span>
-                  <span className="px-2 py-0.5 rounded-full bg-[var(--g-green-bg)] text-[var(--g-green)] text-[10px] font-extrabold">
-                    خاص بك وحدك
-                  </span>
+          <div className="space-y-5">
+            {/* Compact Identity + Credentials + QR */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
+              <div className="space-y-3">
+                <div className="flex items-center gap-3">
+                  <RoleAvatar
+                    src={p.effective_avatar_url || p.avatar_url || authUser?.avatar_url}
+                    name={displayName}
+                    role={p.role || authUser?.role}
+                    color={p.avatar_color || authUser?.avatar_color}
+                    preset={p.avatar_preset || authUser?.avatar_preset}
+                    size="md"
+                  />
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-ink truncate">
+                      {emp.name || displayName}
+                    </div>
+                    <div className="text-xs text-ink-muted truncate">
+                      {department || roleLabel}
+                      {roleTitle ? ` · ${roleTitle}` : ''}
+                    </div>
+                  </div>
                 </div>
 
-                <div className="p-3 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)] flex items-center justify-between gap-2">
-                  <div className="font-black text-xl num-ltr tracking-widest text-[var(--g-primary)]">
-                    {showPassword ? myPassword : '••••••'}
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword((v) => !v)}
-                      className="px-2.5 py-1.5 rounded-lg bg-[var(--g-surface-variant)] text-xs font-bold flex items-center gap-1"
-                    >
-                      <span className="ms-icon text-sm">
-                        {showPassword ? 'visibility_off' : 'visibility'}
+                <GroupedList>
+                  <div className="px-3 py-2 flex items-center justify-between gap-2">
+                    <span className="text-xs text-ink-muted">الرمز</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-semibold text-sm num-ltr tracking-wider text-ink">
+                        {showPassword ? myPassword : '••••••'}
                       </span>
-                      <span>{showPassword ? 'إخفاء' : 'إظهار'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleCopyPassword}
-                      className="px-2.5 py-1.5 rounded-lg bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-bold flex items-center gap-1"
-                    >
-                      <span className="ms-icon text-sm">content_copy</span>
-                      <span>نسخ</span>
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword((v) => !v)}
+                        aria-label={showPassword ? 'إخفاء' : 'إظهار'}
+                        className="w-11 h-11 sm:w-9 sm:h-9 rounded-full hover:bg-surface-2 text-ink-muted hover:text-ink flex items-center justify-center cursor-pointer"
+                      >
+                        <Icon
+                          name={showPassword ? 'visibility_off' : 'visibility'}
+                          size={16}
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCopyPassword}
+                        aria-label="نسخ"
+                        className="w-11 h-11 sm:w-9 sm:h-9 rounded-full hover:bg-surface-2 text-ink-muted hover:text-ink flex items-center justify-center cursor-pointer"
+                      >
+                        <Icon name="content_copy" size={16} />
+                      </button>
+                    </div>
                   </div>
-                </div>
 
-                <div className="space-y-1 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[var(--g-muted)]">الاسم الكامل:</span>
-                    <span className="font-extrabold">{emp.name || p.display_name}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-[var(--g-muted)]">القسم / الدور:</span>
-                    <span className="font-extrabold">
-                      {emp.department || p.role_label} {emp.role_title ? `(${emp.role_title})` : ''}
+                  <div className="px-3 py-2 flex items-center justify-between gap-2 text-xs">
+                    <span className="text-ink-muted">الشفت ({shiftDurLabel})</span>
+                    <span className="font-medium num-ltr text-ink">
+                      {shiftStart} – {shiftEnd}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-[var(--g-muted)]">مواعيد الشفت (12 ساعة):</span>
-                    <span className="font-extrabold num-ltr">
-                      {shiftStart} → {shiftEnd}
-                    </span>
-                  </div>
-                  {emp.phone && (
-                    <div className="flex items-center justify-between">
-                      <span className="text-[var(--g-muted)]">رقم الهاتف:</span>
-                      <span className="font-extrabold num-ltr">{emp.phone}</span>
+
+                  {phone && (
+                    <div className="px-3 py-2 flex items-center justify-between gap-2 text-xs">
+                      <span className="text-ink-muted">الهاتف</span>
+                      <span className="font-medium num-ltr text-ink">{phone}</span>
                     </div>
                   )}
-                </div>
+                </GroupedList>
               </div>
 
-              {/* Right: Personal QR Code for Instant Scan */}
-              <div className="p-4 rounded-2xl bg-white text-[#0F172A] border-2 border-[var(--g-border)] flex flex-col items-center justify-center text-center space-y-2">
-                <div className="text-xs font-extrabold text-[#0B57D0]">
-                  بطاقة الـ QR الشخصية للحضور والانصراف
-                </div>
+              {/* QR Quiet Zone (White background strictly on QR code wrapper) */}
+              <div className="flex flex-col items-center justify-center gap-2 py-2">
                 {qrDataUrl ? (
-                  <img
-                    src={qrDataUrl}
-                    alt="My QR"
-                    className="w-32 h-32 rounded-xl border border-slate-200"
-                  />
+                  <div className="p-2 rounded-2xl bg-white border border-line">
+                    <img
+                      src={qrDataUrl}
+                      alt="بطاقة QR"
+                      className="w-36 h-36 block rounded-lg"
+                    />
+                  </div>
                 ) : (
-                  <div className="w-32 h-32 rounded-xl bg-slate-100 flex items-center justify-center text-xs text-slate-400">
+                  <div className="w-36 h-36 rounded-2xl bg-surface-2 border border-line flex items-center justify-center text-xs text-ink-muted">
                     QR
                   </div>
                 )}
-                <div className="text-[11px] text-slate-600 font-bold">
-                  امسح هذا الـ QR مباشرة على السيستم لتسجيل الحضور أو الاستراحة أو الانصراف بدون كتابة الباسورد
-                </div>
               </div>
             </div>
 
-            {/* Personal Activity & Attendance Summary */}
+            {/* Personal Activity & Metrics */}
             {personLog && (
-              <div className="space-y-2.5">
+              <div className="space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h4 className="text-xs sm:text-sm font-extrabold m-0">
-                    📋 سجلي الشخصي (الحضور، الاستراحات، النواقص والملاحظات)
-                  </h4>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => exportPersonLogCsv(personLog)}
-                      className="px-2.5 py-1 rounded-full bg-[var(--g-green-bg)] text-[var(--g-green)] text-[11px] font-extrabold"
+                  <span className="text-xs font-semibold text-ink-muted">السجل الشخصي</span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      loading={exportingExcel}
+                      onClick={async () => {
+                        if (exportingExcel) return;
+                        setExportingExcel(true);
+                        try {
+                          await exportPersonLogCsv(personLog);
+                          onToast?.('تم التصدير إلى Excel');
+                        } catch (err) {
+                          onToast?.(err.message || 'تعذر التصدير', 'error');
+                        } finally {
+                          setExportingExcel(false);
+                        }
+                      }}
                     >
-                      تصدير Excel
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => exportPersonLogWord(personLog)}
-                      className="px-2.5 py-1 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-[11px] font-extrabold"
+                      Excel
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        exportPersonLogWord(personLog);
+                        onToast?.('تم التصدير إلى Word');
+                      }}
                     >
-                      تصدير Word
-                    </button>
-                    <button
-                      type="button"
+                      Word
+                    </Button>
+                    <Button
+                      variant="whatsapp"
+                      size="sm"
                       onClick={() => openWhatsAppShare(buildPersonLogWhatsAppText(personLog))}
-                      className="px-2.5 py-1 rounded-full bg-[#25D366]/15 text-[#128C7E] dark:text-[#4ADE80] text-[11px] font-extrabold"
                     >
                       واتساب
-                    </button>
+                    </Button>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
-                  <div className="p-2.5 rounded-xl bg-[var(--g-surface-variant)]">
-                    <div className="text-[11px] text-[var(--g-muted)]">مرات الحضور</div>
-                    <div className="text-sm font-black">{personLog.stats?.totalCheckIns || 0}</div>
-                  </div>
-                  <div className="p-2.5 rounded-xl bg-[var(--g-surface-variant)]">
-                    <div className="text-[11px] text-[var(--g-muted)]">الاستراحات</div>
-                    <div className="text-sm font-black">
-                      {personLog.stats?.totalBreaks || 0} ({personLog.stats?.totalBreakMinutes || 0} د)
-                    </div>
-                  </div>
-                  <div className="p-2.5 rounded-xl bg-[var(--g-surface-variant)]">
-                    <div className="text-[11px] text-[var(--g-muted)]">نواقص ومقترحات</div>
-                    <div className="text-sm font-black">{personLog.stats?.shortagesReported || 0}</div>
-                  </div>
-                  <div className="p-2.5 rounded-xl bg-[var(--g-surface-variant)]">
-                    <div className="text-[11px] text-[var(--g-muted)]">الملاحظات</div>
-                    <div className="text-sm font-black">{personLog.stats?.notesRecorded || 0}</div>
-                  </div>
-                </div>
+                <CockpitMetricStrip
+                  columns={4}
+                  items={[
+                    { id: 'ci', label: 'الحضور', value: plStats.totalCheckIns },
+                    {
+                      id: 'br',
+                      label: 'البريك',
+                      value: plStats.totalBreaks,
+                      secondary: `${plStats.totalBreakMinutes} د`,
+                    },
+                    { id: 'sh', label: 'النواقص', value: plStats.shortagesReported },
+                    { id: 'nt', label: 'الملاحظات', value: plStats.notesRecorded },
+                  ]}
+                />
 
-                <div className="max-h-44 overflow-y-auto space-y-1.5">
-                  {(personLog.attendanceLogs || []).slice(0, 10).map((a) => (
-                    <div
-                      key={a.id}
-                      className="px-3 py-2 rounded-xl bg-[var(--g-surface-variant)] flex items-center justify-between text-xs"
-                    >
-                      <div className="font-bold">
-                        {ACTION_LABELS[a.action_type] || a.action_type}
-                        {a.break_duration_minutes > 0 ? ` (${a.break_duration_minutes} د)` : ''}
-                        {a.shift_date_key && a.shift_date_key !== a.date_key
-                          ? ` [شفت ${a.shift_date_key}]`
-                          : ''}
-                      </div>
-                      <div className="text-[var(--g-muted)] num-ltr">
-                        {a.date_key} • {formatTimeArabic(a.timestamp)}
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                {plAtt.length === 0 ? (
+                  <EmptyState title="لا توجد حركات مسجلة" compact />
+                ) : (
+                  <GroupedList>
+                    {plAtt.slice(0, 10).map((a) => {
+                      const cctvType = getCctvStatusType(a);
+                      const cctvTone =
+                        cctvType === 'confirmed'
+                          ? 'success'
+                          : cctvType === 'mismatch'
+                          ? 'danger'
+                          : 'warning';
+                      return (
+                        <div
+                          key={a.id}
+                          className="px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <StatusDot tone={cctvTone} />
+                            <span className="font-medium text-ink truncate">
+                              {ACTION_LABELS[a.action_type] || a.action_type}
+                              {a.break_duration_minutes > 0
+                                ? ` · ${a.break_duration_minutes} د`
+                                : ''}
+                            </span>
+                            <span className="text-ink-muted hidden sm:inline truncate">
+                              · {formatCctvStatusArabic(a, { includeMeta: false })}
+                            </span>
+                          </div>
+                          <span className="text-ink-muted num-ltr shrink-0">
+                            {a.date_key} · {formatTimeArabic(a.timestamp)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </GroupedList>
+                )}
               </div>
             )}
           </div>
         )}
       </div>
-    </div>
+    </BottomSheet>
   );
 }

@@ -1,11 +1,22 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { postActionWithOfflineSupport } from '../lib/api.js';
 import { playSuccessChime, speakArabicConfirmation } from '../lib/audio.js';
+import {
+  BottomSheet,
+  BrandLogo,
+  Button,
+  ConfirmSheet,
+  EmptyState,
+  FilterChipRail,
+  Icon,
+  RoleAvatar,
+  SearchFilterBar,
+  StatusDot,
+} from './ui/index.js';
 
 /**
- * شاشة كشك العمال المبسطة (Kiosk Mode)
- * الميزة #7: تظل دائماً بالوضع النهاري الأبيض الساطع حتى لو كانت غرفة الكاميرات بالوضع الليلي
- * الميزة #4: تدعم بضغطة واحدة كروت الـ QR والرمز السريع بدون لمس القوائم
+ * Bright-Daylight Worker Kiosk Attendance Terminal (`KioskLockView`):
+ * Locked to `data-theme="classic" data-mode="light" data-kiosk="true"` for wall-tablet glare resistance.
  */
 export default function KioskLockView({
   storeName = 'زايد مارت',
@@ -18,12 +29,33 @@ export default function KioskLockView({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedEmp, setSelectedEmp] = useState(null);
   const [successBanner, setSuccessBanner] = useState(null);
+  const [errorBanner, setErrorBanner] = useState('');
+  const [confirmExitOpen, setConfirmExitOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const successTimerRef = useRef(null);
+  const errorTimerRef = useRef(null);
 
-  const departments = useMemo(() => {
-    const s = new Set(['الكل']);
-    employees.forEach((e) => s.add(e.department));
-    return Array.from(s);
+  useEffect(() => {
+    return () => {
+      if (successTimerRef.current) clearTimeout(successTimerRef.current);
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+    };
+  }, []);
+
+  const deptChipItems = useMemo(() => {
+    const counts = new Map();
+    employees.forEach((e) => {
+      const d = e.department || 'عام';
+      counts.set(d, (counts.get(d) || 0) + 1);
+    });
+    return [
+      { id: 'الكل', label: 'الكل', count: employees.length },
+      ...Array.from(counts.entries()).map(([dept, count]) => ({
+        id: dept,
+        label: dept,
+        count,
+      })),
+    ];
   }, [employees]);
 
   const list = useMemo(() => {
@@ -34,6 +66,12 @@ export default function KioskLockView({
       return true;
     });
   }, [employees, selectedDept, searchQuery]);
+
+  function showKioskError(msg) {
+    setErrorBanner(msg);
+    if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+    errorTimerRef.current = setTimeout(() => setErrorBanner(''), 3800);
+  }
 
   async function recordKioskAction(emp, actionType) {
     if (submitting) return;
@@ -61,293 +99,344 @@ export default function KioskLockView({
       setSuccessBanner({
         name: emp.name,
         label,
-        tone: actionType === 'check_out' ? 'bg-[#B3261E]' : 'bg-[#146C2E]',
+        tone:
+          actionType === 'check_out'
+            ? 'bg-danger-solid text-on-danger'
+            : 'bg-success-solid text-on-success',
       });
-      setTimeout(() => setSuccessBanner(null), 2600);
+      if (successTimerRef.current) clearTimeout(successTimerRef.current);
+      successTimerRef.current = setTimeout(() => setSuccessBanner(null), 2600);
       onRefresh?.();
     } catch (err) {
-      speakArabicConfirmation(err?.message || 'عفواً، لا يمكن تنفيذ هذه الحركة حالياً', true);
-      alert(err?.message || 'عفواً، لا يمكن تنفيذ هذه الحركة حالياً');
+      const msg = err?.message || 'تعذر تنفيذ الحركة حالياً';
+      speakArabicConfirmation(msg, true);
+      showKioskError(msg);
     } finally {
       setSubmitting(false);
     }
   }
 
   return (
-    <div className="min-h-screen bg-[#F8FAFD] text-[#1F1F1F] flex flex-col">
+    <div
+      data-theme="classic"
+      data-mode="light"
+      data-kiosk="true"
+      className="min-h-[100dvh] bg-canvas text-ink flex flex-col pt-[var(--safe-top)] pb-[var(--safe-bottom)]"
+    >
       <div className="google-brand-bar" />
 
       <div className="p-3 sm:p-6 flex flex-col gap-4 max-w-7xl w-full mx-auto">
-        {/* Top Kiosk Header */}
-        <div className="bg-white border border-[#DEE3EB] rounded-3xl p-4 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
-          <div className="flex items-center gap-3">
-            <img
-              src="/Logo.png"
-              onError={(e) => {
-                if (e.currentTarget.src.endsWith('/Logo.png')) {
-                  e.currentTarget.src = '/logo.jpeg';
-                }
-              }}
-              alt={storeName || 'زايد مارت'}
-              className="w-12 h-12 rounded-2xl object-cover border border-[#DEE3EB] shrink-0 bg-white"
-            />
-            <div>
-              <h1 className="text-lg sm:text-2xl font-extrabold m-0">
-                بوابة حضور موظفي {storeName}
-              </h1>
-              <p className="text-xs sm:text-sm text-[#5F6368] m-0">
-                اضغط على اسمك أو ارفع كرت الـ QR للتسجيل في ثانية واحدة
-              </p>
-            </div>
+        {/* Top Kiosk Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-line">
+          <div className="flex items-center gap-3 min-w-0">
+            <BrandLogo alt={storeName || 'زايد مارت'} size="md" />
+            <h1 className="text-lg sm:text-xl font-bold text-ink m-0 truncate">
+              حضور {storeName}
+            </h1>
           </div>
 
           <div className="flex items-center gap-2 w-full sm:w-auto">
-            <button
-              type="button"
+            <Button
+              variant="primary"
+              size="lg"
+              icon="qr_code_scanner"
+              iconFilled
               onClick={() => onOpenQrModal?.('scan')}
-              className="flex-1 sm:flex-none px-4 py-2.5 rounded-full bg-[#0B57D0] text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 shadow-xs"
+              className="flex-1 sm:flex-none"
             >
-              <span className="ms-icon filled text-lg">qr_code_scanner</span>
-              <span>مسح كرت QR / رمز سريع</span>
-            </button>
+              QR / رمز سريع
+            </Button>
 
-            <button
-              type="button"
-              onClick={onExitKiosk}
-              className="px-3.5 py-2.5 rounded-full bg-[#EDF2FA] text-[#5F6368] text-xs font-bold flex items-center gap-1"
+            <Button
+              variant="secondary"
+              size="lg"
+              icon="lock_open"
+              onClick={() => setConfirmExitOpen(true)}
             >
-              <span className="ms-icon text-base">lock_open</span>
-              <span>خروج</span>
-            </button>
+              خروج
+            </Button>
           </div>
         </div>
 
-        {/* Department Big Touch Pills + Optional Quick Name/Code Search */}
-        {employees.length > 6 && (
-          <div className="bg-white border border-[#DEE3EB] rounded-2xl px-4 py-2.5 flex items-center gap-2">
-            <span className="ms-icon text-[#5F6368]">search</span>
-            <input
-              type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="ابحث باسمك أو اكتب الكود السريع (مثل 101)..."
-              className="bg-transparent border-none outline-none w-full text-base font-bold text-[#1F1F1F]"
-            />
+        {/* Non-blocking Kiosk Error Banner */}
+        {errorBanner && (
+          <div
+            role="alert"
+            onClick={() => setErrorBanner('')}
+            className="p-3 rounded-[var(--g-radius-md)] bg-danger-bg border border-[var(--g-red-border)] text-danger flex items-center justify-between gap-2.5 animate-pop cursor-pointer"
+          >
+            <div className="flex items-center gap-2 text-xs sm:text-sm font-semibold">
+              <StatusDot tone="danger" />
+              <span>{errorBanner}</span>
+            </div>
+            <Icon name="close" size={16} className="shrink-0" />
           </div>
         )}
 
-        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
-          {departments.map((dept) => (
-            <button
-              key={dept}
-              type="button"
-              onClick={() => setSelectedDept(dept)}
-              className={`px-5 py-2.5 rounded-full text-sm sm:text-base font-extrabold whitespace-nowrap border transition-all ${
-                selectedDept === dept
-                  ? 'bg-[#C2E7FF] text-[#001D35] border-transparent'
-                  : 'bg-white border-[#DEE3EB] text-[#1F1F1F]'
-              }`}
-            >
-              {dept}
-            </button>
-          ))}
-        </div>
+        {employees.length > 6 && (
+          <SearchFilterBar
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="بحث بالاسم أو الكود..."
+          />
+        )}
 
-        {/* Giant Touch Cards (Responsive 2 cols on mobile, 3-4 on tablet/desktop) */}
+        {deptChipItems.length > 2 && (
+          <FilterChipRail
+            items={deptChipItems}
+            activeId={selectedDept}
+            onSelect={setSelectedDept}
+          />
+        )}
+
+        {/* Employee Touch Grid */}
         {employees.length === 0 ? (
-          <div className="bg-white border border-[#DEE3EB] rounded-3xl p-8 text-center space-y-2 shadow-2xs">
-            <span className="ms-icon text-4xl text-[#0B57D0]">group_add</span>
-            <h2 className="text-lg font-extrabold m-0">لم تتم إضافة موظفين بعد</h2>
-            <p className="text-xs sm:text-sm text-[#5F6368] m-0">
-              يرجى الدخول بكلمة مرور الإدارة لإضافة موظفي الماركت الحقيقيين أولاً.
-            </p>
-          </div>
+          <EmptyState icon="group_add" title="لا يوجد موظفون بعد" />
+        ) : list.length === 0 ? (
+          <EmptyState
+            icon="person_search"
+            title="لا توجد نتائج مطابقة"
+            actionLabel="عرض الكل"
+            actionIcon="refresh"
+            onAction={() => {
+              setSelectedDept('الكل');
+              setSearchQuery('');
+            }}
+          />
         ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-          {list.map((emp) => (
-            <button
-              key={emp.id}
-              type="button"
-              onClick={() => setSelectedEmp(emp)}
-              className="bg-white border border-[#DEE3EB] hover:border-[#0B57D0] active:scale-98 rounded-3xl p-4 sm:p-5 flex flex-col items-center text-center gap-2.5 shadow-2xs transition-all"
-            >
-              <div
-                style={{ backgroundColor: emp.avatar_color || '#0B57D0' }}
-                className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl text-white font-extrabold text-xl sm:text-2xl flex items-center justify-center shadow-xs"
-              >
-                {emp.name[0]}
-              </div>
-              <div>
-                <div className="font-extrabold text-sm sm:text-lg leading-snug">{emp.name}</div>
-                <div className="text-[11px] sm:text-xs text-[#5F6368] mt-0.5">
-                  {emp.department} • <span className="num-ltr">#{emp.emp_code}</span>
-                </div>
-              </div>
-              <span
-                className={`px-3 py-1 rounded-full text-xs font-extrabold ${
-                  emp.currentStatus === 'present'
-                    ? 'bg-[#E6F4EA] text-[#146C2E]'
-                    : emp.currentStatus === 'on_break'
-                    ? 'bg-[#FEF7E0] text-[#B06000]'
-                    : emp.currentStatus === 'checked_out'
-                    ? 'bg-[#FCE8E6] text-[#B3261E]'
-                    : 'bg-[#EDF2FA] text-[#5F6368]'
-                }`}
-              >
-                {emp.currentStatus === 'present'
-                  ? 'حاضر الآن ✓'
+          <div className="grid grid-cols-1 min-[360px]:grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
+            {list.map((emp) => {
+              const statusTone =
+                emp.currentStatus === 'present'
+                  ? 'success'
                   : emp.currentStatus === 'on_break'
-                  ? 'في بريك ☕'
+                  ? 'warning'
                   : emp.currentStatus === 'checked_out'
-                  ? emp.nextCheckInAvailability?.allowed
-                    ? 'جاهز للشفت الجديد'
-                    : `منصرف ✓ (يفتح ${emp.nextCheckInAvailability?.nextWindowStartHHMM || emp.shift_start || '08:00'})`
-                  : 'اضغط للحضور'}
-              </span>
-            </button>
-          ))}
-        </div>
+                  ? 'danger'
+                  : 'neutral';
+
+              const statusText =
+                emp.currentStatus === 'present'
+                  ? 'حاضر'
+                  : emp.currentStatus === 'on_break'
+                  ? 'في بريك'
+                  : emp.currentStatus === 'checked_out'
+                  ? emp.nextCheckInAvailability?.canCheckIn
+                    ? 'شفت جديد'
+                    : `منصرف · يفتح ${emp.nextCheckInAvailability?.windowOpenTimeStr || emp.shift_start || '08:00'}`
+                  : 'تسجيل حضور';
+
+              return (
+                <button
+                  key={emp.id}
+                  type="button"
+                  onClick={() => setSelectedEmp(emp)}
+                  className="g-card g-card-interactive p-4 sm:p-5 flex flex-col items-center text-center gap-2.5"
+                >
+                  <RoleAvatar
+                    src={emp.avatar_url}
+                    name={emp.name}
+                    role={emp.system_role}
+                    color={emp.avatar_color}
+                    preset={emp.avatar_preset || 'initials_gradient'}
+                    size="lg"
+                    shape="squircle"
+                    online={emp.currentStatus === 'present'}
+                  />
+                  <div className="min-w-0 w-full">
+                    <div className="font-semibold text-sm sm:text-base text-ink leading-snug truncate">
+                      {emp.name}
+                    </div>
+                    <div className="text-xs text-ink-muted mt-0.5 truncate">
+                      {emp.department} · <span className="num-ltr">#{emp.emp_code}</span>
+                    </div>
+                  </div>
+                  <StatusDot tone={statusTone} label={statusText} tintedText />
+                </button>
+              );
+            })}
+          </div>
         )}
       </div>
 
-      {/* Giant Kiosk Confirmation Sheet */}
-      {selectedEmp && (
-        <div onClick={() => setSelectedEmp(null)} className="g-modal-overlay">
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="bg-white text-[#1F1F1F] w-full max-w-md rounded-t-3xl sm:rounded-3xl p-6 text-center space-y-5 animate-pop"
+      {/* Employee Kiosk Action Sheet */}
+      <BottomSheet
+        open={Boolean(selectedEmp)}
+        onClose={submitting ? undefined : () => setSelectedEmp(null)}
+        title={selectedEmp?.name || ''}
+        subtitle={
+          selectedEmp ? `${selectedEmp.department} · #${selectedEmp.emp_code}` : ''
+        }
+        maxWidth="max-w-md"
+        footer={
+          <Button
+            variant="secondary"
+            size="lg"
+            fullWidth
+            disabled={submitting}
+            onClick={() => setSelectedEmp(null)}
           >
-            <div
-              style={{ backgroundColor: selectedEmp.avatar_color || '#0B57D0' }}
-              className="w-18 h-18 mx-auto rounded-3xl text-white font-extrabold text-3xl flex items-center justify-center"
-            >
-              {selectedEmp.name[0]}
-            </div>
-            <div>
-              <h2 className="text-xl sm:text-2xl font-extrabold m-0">{selectedEmp.name}</h2>
-              <p className="text-sm text-[#5F6368] m-0 mt-1">
-                {selectedEmp.department} • كود <span className="num-ltr">#{selectedEmp.emp_code}</span>
-              </p>
+            رجوع
+          </Button>
+        }
+      >
+        {selectedEmp && (
+          <div className="space-y-4 py-1 text-center">
+            <div className="flex justify-center">
+              <RoleAvatar
+                src={selectedEmp.avatar_url}
+                name={selectedEmp.name}
+                role={selectedEmp.system_role}
+                color={selectedEmp.avatar_color}
+                preset={selectedEmp.avatar_preset || 'initials_gradient'}
+                size="xl"
+                shape="squircle"
+                online={selectedEmp.currentStatus === 'present'}
+              />
             </div>
 
             <div className="grid grid-cols-1 gap-3">
               {(!selectedEmp.currentStatus || selectedEmp.currentStatus === 'absent') && (
-                <button
-                  type="button"
-                  disabled={submitting}
+                <Button
+                  variant="success"
+                  size="lg"
+                  fullWidth
+                  icon="how_to_reg"
+                  iconFilled
+                  loading={submitting}
                   onClick={() => recordKioskAction(selectedEmp, 'check_in')}
-                  className="py-5 rounded-full bg-[#146C2E] text-white text-xl font-extrabold flex items-center justify-center gap-3 shadow-md"
+                  className="min-h-[60px] text-lg"
                 >
-                  <span className="ms-icon filled text-3xl">waving_hand</span>
-                  <span>تسجيل حضور 👋</span>
-                </button>
+                  تسجيل حضور
+                </Button>
               )}
 
               {selectedEmp.currentStatus === 'present' && (
                 <>
-                  <div className="py-2.5 px-4 rounded-2xl bg-[#E6F4EA] text-[#146C2E] font-extrabold text-sm flex items-center justify-center gap-1.5">
-                    <span className="ms-icon filled text-lg">check_circle</span>
-                    <span>حاضر الآن في الشفت ✓</span>
+                  <div className="py-2 flex items-center justify-center">
+                    <StatusDot tone="success" label="حاضر الآن" tintedText />
                   </div>
-                  <button
-                    type="button"
-                    disabled={submitting}
+                  <Button
+                    variant="warning"
+                    size="lg"
+                    fullWidth
+                    icon="free_breakfast"
+                    iconFilled
+                    loading={submitting}
                     onClick={() => recordKioskAction(selectedEmp, 'break_start')}
-                    className="py-4 rounded-full bg-[#C25E00] hover:bg-[#9A4A00] text-white text-lg font-extrabold flex items-center justify-center gap-2"
+                    className="min-h-[56px] text-base"
                   >
-                    <span className="ms-icon filled text-2xl">free_breakfast</span>
-                    <span>بداية بريك ☕</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={submitting}
+                    بداية بريك
+                  </Button>
+                  <Button
+                    variant="danger"
+                    size="lg"
+                    fullWidth
+                    icon="logout"
+                    iconFilled
+                    loading={submitting}
                     onClick={() => recordKioskAction(selectedEmp, 'check_out')}
-                    className="py-5 rounded-full bg-[#B3261E] text-white text-xl font-extrabold flex items-center justify-center gap-2"
+                    className="min-h-[60px] text-lg"
                   >
-                    <span className="ms-icon filled text-3xl">logout</span>
-                    <span>تسجيل انصراف 🏠</span>
-                  </button>
+                    تسجيل انصراف
+                  </Button>
                 </>
               )}
 
               {selectedEmp.currentStatus === 'on_break' && (
                 <>
-                  <div className="py-2.5 px-4 rounded-2xl bg-[#FEF7E0] text-[#B06000] font-extrabold text-sm flex items-center justify-center gap-1.5">
-                    <span className="ms-icon filled text-lg">coffee</span>
-                    <span>في بريك حالياً ☕</span>
+                  <div className="py-2 flex items-center justify-center">
+                    <StatusDot tone="warning" label="في بريك" tintedText />
                   </div>
-                  <button
-                    type="button"
-                    disabled={submitting}
+                  <Button
+                    variant="primary"
+                    size="lg"
+                    fullWidth
+                    icon="play_arrow"
+                    iconFilled
+                    loading={submitting}
                     onClick={() => recordKioskAction(selectedEmp, 'break_end')}
-                    className="py-5 rounded-full bg-[#0B57D0] text-white text-xl font-extrabold flex items-center justify-center gap-2"
+                    className="min-h-[60px] text-lg"
                   >
-                    <span className="ms-icon filled text-3xl">play_arrow</span>
-                    <span>عودة من البريك ▶️</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={submitting}
+                    عودة من البريك
+                  </Button>
+                  <Button
+                    variant="danger"
+                    size="lg"
+                    fullWidth
+                    icon="logout"
+                    iconFilled
+                    loading={submitting}
                     onClick={() => recordKioskAction(selectedEmp, 'check_out')}
-                    className="py-4 rounded-full bg-[#B3261E] text-white text-lg font-extrabold flex items-center justify-center gap-2"
+                    className="min-h-[56px] text-base"
                   >
-                    <span className="ms-icon filled text-2xl">logout</span>
-                    <span>تسجيل انصراف 🏠</span>
-                  </button>
+                    تسجيل انصراف
+                  </Button>
                 </>
               )}
 
               {selectedEmp.currentStatus === 'checked_out' && (
                 <>
-                  {selectedEmp.nextCheckInAvailability?.allowed ? (
-                    <button
-                      type="button"
-                      disabled={submitting}
+                  {selectedEmp.nextCheckInAvailability?.canCheckIn ? (
+                    <Button
+                      variant="success"
+                      size="lg"
+                      fullWidth
+                      icon="how_to_reg"
+                      iconFilled
+                      loading={submitting}
                       onClick={() => recordKioskAction(selectedEmp, 'check_in')}
-                      className="py-5 rounded-full bg-[#146C2E] text-white text-xl font-extrabold flex items-center justify-center gap-3 shadow-md"
+                      className="min-h-[60px] text-lg"
                     >
-                      <span className="ms-icon filled text-3xl">waving_hand</span>
-                      <span>تسجيل حضور الشفت الجديد 👋</span>
-                    </button>
+                      حضور الشفت الجديد
+                    </Button>
                   ) : (
-                    <div className="p-4 rounded-2xl bg-[#FCE8E6] text-[#B3261E] border border-[#B3261E]/25 space-y-1.5">
-                      <div className="font-extrabold text-base flex items-center justify-center gap-1.5">
-                        <span className="ms-icon filled text-xl">lock_clock</span>
-                        <span>تم تسجيل انصرافك من هذا الشفت ✓</span>
-                      </div>
-                      <p className="text-xs font-bold m-0">
-                        {selectedEmp.nextCheckInAvailability?.reasonArabic ||
-                          `يفتح تسجيل الحضور للشفت القادم الساعة ${selectedEmp.nextCheckInAvailability?.nextWindowStartHHMM || selectedEmp.shift_start || '08:00'}`}
+                    <div className="p-4 rounded-[var(--g-radius-md)] bg-danger-bg text-danger border border-[var(--g-red-border)] space-y-1">
+                      <div className="font-semibold text-sm">تم الانصراف من هذا الشفت</div>
+                      <p className="text-xs m-0">
+                        {selectedEmp.nextCheckInAvailability?.lockReasonArabic ||
+                          `يفتح الشفت القادم الساعة ${
+                            selectedEmp.nextCheckInAvailability?.windowOpenTimeStr ||
+                            selectedEmp.shift_start ||
+                            '08:00'
+                          }`}
                       </p>
                     </div>
                   )}
                 </>
               )}
-
-              <button
-                type="button"
-                onClick={() => setSelectedEmp(null)}
-                className="py-3 rounded-full bg-[#EDF2FA] text-sm font-extrabold"
-              >
-                رجوع
-              </button>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </BottomSheet>
 
-      {/* Full-Screen Daylight Confirmation Overlay */}
+      {/* Confirm Exit Kiosk Mode Sheet */}
+      <ConfirmSheet
+        open={confirmExitOpen}
+        onClose={() => setConfirmExitOpen(false)}
+        onConfirm={() => {
+          setConfirmExitOpen(false);
+          onExitKiosk?.();
+        }}
+        tone="warning"
+        title="الخروج من وضع الكشك"
+        description="العودة إلى شاشة تسجيل الدخول؟"
+        confirmLabel="خروج"
+      />
+
+      {/* Full-Screen Confirmation Overlay */}
       {successBanner && (
         <div
-          className={`fixed inset-0 z-50 ${successBanner.tone} text-white flex flex-col items-center justify-center p-6 text-center animate-pop`}
+          role="status"
+          aria-live="polite"
+          onClick={() => setSuccessBanner(null)}
+          className={`fixed inset-0 z-[60] ${successBanner.tone} flex flex-col items-center justify-center p-6 text-center animate-pop cursor-pointer`}
         >
-          <span className="ms-icon filled" style={{ fontSize: '5.5rem' }}>
-            check_circle
-          </span>
-          <h2 className="text-3xl sm:text-4xl font-extrabold mt-4 mb-2">
-            تم تسجيل {successBanner.label} بنجاح!
+          <Icon name="check_circle" size={80} filled />
+          <h2 className="text-3xl sm:text-4xl font-bold mt-4 mb-2">
+            تم تسجيل {successBanner.label}
           </h2>
-          <p className="text-xl sm:text-2xl opacity-95 font-bold">{successBanner.name}</p>
+          <p className="text-xl sm:text-2xl opacity-95 font-medium">{successBanner.name}</p>
         </div>
       )}
     </div>

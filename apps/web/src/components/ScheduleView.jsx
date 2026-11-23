@@ -18,6 +18,7 @@ import {
   respondDayOffSwap,
   revertDayOffSwap,
   updateScheduleSettings,
+  verifyAttendanceLog,
 } from '../lib/api.js';
 import { playSuccessChime } from '../lib/audio.js';
 import {
@@ -26,50 +27,36 @@ import {
   formatWeeklyScheduleWhatsApp,
   openWhatsAppShare,
 } from '../lib/exportUtils.js';
+import { useThemeArchitecture } from '../lib/themeContext.jsx';
+import ScheduleShiftsTab from './ScheduleShiftsTab.jsx';
 import {
-  Badge,
   BottomSheet,
   Button,
   Card,
+  CockpitMetricStrip,
+  ConfirmSheet,
   EmptyState,
   FilterChipRail,
+  GroupedList,
+  GroupedRow,
+  Icon,
+  RoleAvatar,
+  SegmentedControl,
   SkeletonKpiStrip,
   SkeletonList,
-  StatCard,
+  StatusDot,
+  ToggleSwitch,
+  WeekDayStrip,
 } from './ui/index.js';
 
-const GROUP_STYLE_BY_TONE = {
-  primary: {
-    borderTop: 'border-t-4 border-t-[var(--g-primary)]',
-    iconBox: 'bg-[var(--g-primary-container)] text-[var(--g-primary)]',
-    offPill:
-      'bg-[var(--g-primary-container)] text-[var(--g-on-primary-container)] border border-[var(--g-primary)]/35',
-    badgeTone: 'primary',
-  },
-  secondary: {
-    borderTop: 'border-t-4 border-t-[#007B83]',
-    iconBox: 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]',
-    offPill:
-      'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] border border-[#007B83]/35',
-    badgeTone: 'secondary',
-  },
-  purple: {
-    borderTop: 'border-t-4 border-t-[var(--g-purple-border)]',
-    iconBox: 'bg-[var(--g-purple-bg)] text-[var(--g-purple)]',
-    offPill:
-      'bg-[var(--g-purple-bg)] text-[var(--g-purple)] border border-[var(--g-purple-border)]/40',
-    badgeTone: 'purple',
-  },
-};
-
 const SWAP_STATUS_META = {
-  pending_requester: { label: 'بانتظار موافقة المبادر', tone: 'warning', icon: 'hourglass_top' },
-  pending_peer: { label: 'بانتظار موافقة الزميل', tone: 'warning', icon: 'hourglass_top' },
-  pending_manager: { label: 'بانتظار اعتماد الإدارة', tone: 'orange', icon: 'admin_panel_settings' },
-  approved: { label: 'معتمد ومطبق', tone: 'success', icon: 'check_circle' },
-  rejected: { label: 'مرفوض', tone: 'danger', icon: 'cancel' },
-  cancelled: { label: 'ملغي', tone: 'neutral', icon: 'block' },
-  reverted: { label: 'تم التراجع عنه', tone: 'purple', icon: 'undo' },
+  pending_requester: { label: 'بانتظار المبادر', tone: 'warning' },
+  pending_peer: { label: 'بانتظار الزميل', tone: 'warning' },
+  pending_manager: { label: 'بانتظار الإدارة', tone: 'warning' },
+  approved: { label: 'معتمد', tone: 'success' },
+  rejected: { label: 'مرفوض', tone: 'danger' },
+  cancelled: { label: 'ملغي', tone: 'neutral' },
+  reverted: { label: 'تم التراجع', tone: 'purple' },
 };
 
 function formatShortDate(dateKey) {
@@ -79,23 +66,12 @@ function formatShortDate(dateKey) {
   return `${parts[2]}/${parts[1]}`;
 }
 
-function getInitials(name = '') {
-  return String(name || '')
-    .trim()
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((w) => w[0] || '')
-    .join('');
-}
-
 function SwapApprovalStepper({ swap, swapRequiresManagerApproval }) {
   const isSwap = swap.request_type === 'swap';
   const reqDone = Number(swap.requester_approved) === 1;
   const peerDone = Number(swap.target_approved) === 1;
   const mgrDone = Number(swap.manager_approved) === 1;
   const isFinalApproved = swap.status === 'approved';
-  const isStopped =
-    swap.status === 'rejected' || swap.status === 'cancelled' || swap.status === 'reverted';
 
   const needsManagerStep =
     !isSwap ||
@@ -104,77 +80,54 @@ function SwapApprovalStepper({ swap, swapRequiresManagerApproval }) {
     mgrDone;
 
   const steps = [
-    {
-      key: 'requester',
-      label: isSwap ? 'الكاشير الأول' : 'مقدم الطلب',
-      done: reqDone,
-      active: swap.status === 'pending_requester',
-    },
+    { key: 'requester', label: isSwap ? 'المبادر' : 'المتقدم', done: reqDone },
   ];
-
   if (isSwap) {
-    steps.push({
-      key: 'peer',
-      label: 'الكاشير الثاني',
-      done: peerDone,
-      active: swap.status === 'pending_peer',
-    });
+    steps.push({ key: 'peer', label: 'الزميل', done: peerDone });
   }
-
   steps.push({
     key: 'final',
-    label: needsManagerStep ? 'اعتماد الإدارة' : 'التطبيق التلقائي',
+    label: needsManagerStep ? 'الإدارة' : 'تطبيق تلقائي',
     done: isFinalApproved || mgrDone,
-    active: swap.status === 'pending_manager',
   });
 
   return (
-    <div className="flex items-center flex-wrap gap-1.5 text-[11px] font-extrabold">
-      {steps.map((step, idx) => {
-        const toneCls = step.done
-          ? 'bg-[var(--g-green-bg)] text-[var(--g-green)] border border-[var(--g-green-border)]/35'
-          : step.active
-          ? 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] border border-[var(--g-yellow-border)]/45'
-          : isStopped
-          ? 'bg-[var(--g-surface-variant)] text-[var(--g-muted)] border border-[var(--g-border)] opacity-70'
-          : 'bg-[var(--g-surface-variant)] text-[var(--g-muted)] border border-[var(--g-border)]';
-
-        const icon = step.done
-          ? 'check_circle'
-          : step.active
-          ? 'hourglass_top'
-          : 'radio_button_unchecked';
-
-        return (
-          <React.Fragment key={step.key}>
-            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${toneCls}`}>
-              <span className={`ms-icon text-xs ${step.done ? 'filled' : ''}`}>{icon}</span>
-              <span>{step.label}</span>
-            </span>
-            {idx < steps.length - 1 && (
-              <span className="ms-icon text-xs text-[var(--g-muted)]">arrow_back</span>
-            )}
-          </React.Fragment>
-        );
-      })}
+    <div className="flex items-center flex-wrap gap-1.5 text-[11px] font-medium text-ink-muted">
+      {steps.map((step, idx) => (
+        <React.Fragment key={step.key}>
+          <span className={step.done ? 'text-success font-semibold' : ''}>
+            {step.label}
+          </span>
+          {idx < steps.length - 1 && <span aria-hidden="true">←</span>}
+        </React.Fragment>
+      ))}
     </div>
   );
 }
 
+/**
+ * Detoxed Weekly Day-Off Schedule & Live Team Shifts View (`الإجازات`).
+ * Borderless header, `<CockpitMetricStrip />`, hidden Swap Inbox when empty,
+ * flat hairline `<GroupedList>` mobile groups, and clean desktop matrix.
+ */
 export default function ScheduleView({
   bootstrapData = null,
   storeName = 'زايد مارت',
   canManage: propCanManage = false,
   canSwap: propCanSwap = false,
   canExport = false,
+  canVerify: propCanVerify = false,
+  canWriteAttendance: propCanWriteAttendance = false,
   onRefreshBootstrap,
   onToast,
 }) {
+  const arch = useThemeArchitecture();
   const currentCairoWeekStart = useMemo(
     () => getSaturdayWeekStart(getCairoDateKey()),
     []
   );
 
+  const [scheduleTab, setScheduleTab] = useState('dayoffs');
   const [weekStart, setWeekStart] = useState(
     () => bootstrapData?.dayOffSchedule?.weekStartDate || currentCairoWeekStart
   );
@@ -184,31 +137,31 @@ export default function ScheduleView({
   const [busyAction, setBusyAction] = useState(false);
   const [busySwapId, setBusySwapId] = useState('');
 
-  // Admin scope: 'week' vs 'default'
   const [editScope, setEditScope] = useState('week');
 
-  // Mobile layout mode: 'day' (default) vs 'employees'
   const [mobileMode, setMobileMode] = useState('day');
   const [selectedDay, setSelectedDay] = useState(
     () => bootstrapData?.dayOffSchedule?.todayWeekday || 'sat'
   );
   const [mobileGroupFilter, setMobileGroupFilter] = useState('all');
 
-  // BottomSheets & Inline Reject State
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsForm, setSettingsForm] = useState({
     swapRequiresManagerApproval: false,
     minOnDuty: { cashiers: 2, hall: 2, security_cctv: 1 },
   });
   const [confirmBulkAction, setConfirmBulkAction] = useState(null);
+  const [confirmSwapAction, setConfirmSwapAction] = useState(null);
   const [editingEmployee, setEditingEmployee] = useState(null);
   const [swapComposer, setSwapComposer] = useState(null);
   const [rejectingSwapId, setRejectingSwapId] = useState('');
   const [rejectReason, setRejectReason] = useState('');
   const [showPastSwaps, setShowPastSwaps] = useState(false);
   const [pendingOpenComposer, setPendingOpenComposer] = useState(false);
+  const [actionsSheetOpen, setActionsSheetOpen] = useState(false);
 
   const inboxRef = useRef(null);
+  const lastBootstrapServerTimeRef = useRef(bootstrapData?.serverTime || '');
 
   const loadSchedule = useCallback(
     async ({ silent = false } = {}) => {
@@ -228,7 +181,7 @@ export default function ScheduleView({
           });
         }
       } catch (err) {
-        setLoadError(err.message || 'تعذر تحميل جدول الإجازات الأسبوعي');
+        setLoadError(err.message || 'تعذر تحميل الجدول');
         setPendingOpenComposer(false);
       } finally {
         setLoading(false);
@@ -241,14 +194,12 @@ export default function ScheduleView({
     loadSchedule();
   }, [loadSchedule]);
 
-  // Keep selectedDay synced to todayWeekday when jumping to current week
   useEffect(() => {
     if (scheduleData?.todayWeekday && weekStart === currentCairoWeekStart) {
       setSelectedDay(scheduleData.todayWeekday);
     }
   }, [scheduleData?.todayWeekday, weekStart, currentCairoWeekStart]);
 
-  // Listen to realtime schedule update signals dispatched by App.jsx
   useEffect(() => {
     const handleScheduleUpdated = () => {
       loadSchedule({ silent: true });
@@ -257,9 +208,52 @@ export default function ScheduleView({
     return () => window.removeEventListener('zayed:schedule-updated', handleScheduleUpdated);
   }, [loadSchedule]);
 
+  useEffect(() => {
+    const nextTime = bootstrapData?.serverTime || '';
+    if (nextTime && nextTime !== lastBootstrapServerTimeRef.current) {
+      lastBootstrapServerTimeRef.current = nextTime;
+      if (scheduleTab === 'shifts') {
+        loadSchedule({ silent: true });
+      }
+    }
+  }, [bootstrapData?.serverTime, scheduleTab, loadSchedule]);
+
   const effectiveCanManage = Boolean(scheduleData?.canManage ?? propCanManage);
   const effectiveCanSwap = Boolean(scheduleData?.canSwap ?? propCanSwap);
+  const effectiveCanVerify = Boolean(scheduleData?.canVerify ?? propCanVerify);
   const isOfflineReadOnly = Boolean(scheduleData?._offlineCached);
+
+  const presentCount = useMemo(() => {
+    if (Array.isArray(scheduleData?.shiftRoster)) {
+      return scheduleData.shiftRoster.filter((e) => e.currentStatus === 'present').length;
+    }
+    return Number(bootstrapData?.summary?.presentCount || 0);
+  }, [scheduleData?.shiftRoster, bootstrapData?.summary?.presentCount]);
+
+  const handleVerifyShiftLog = useCallback(
+    async (logId, payload = { status: 'confirmed' }) => {
+      if (!logId || isOfflineReadOnly) {
+        if (isOfflineReadOnly) {
+          onToast?.('وضع أوفلاين — تعذر تأكيد الحضور', 'error');
+        }
+        return;
+      }
+      try {
+        await verifyAttendanceLog(logId, payload);
+        playSuccessChime('in');
+        onToast?.(
+          payload?.status === 'mismatch'
+            ? 'تم تسجيل تعارض الكاميرا'
+            : 'تم تأكيد الحضور بالكاميرا'
+        );
+        await Promise.all([loadSchedule({ silent: true }), onRefreshBootstrap?.()]);
+      } catch (err) {
+        onToast?.(err?.message || 'تعذر تأكيد الحضور', 'error');
+        throw err;
+      }
+    },
+    [isOfflineReadOnly, loadSchedule, onRefreshBootstrap, onToast]
+  );
 
   const groups = scheduleData?.groups || [];
   const swaps = scheduleData?.swaps || [];
@@ -301,7 +295,6 @@ export default function ScheduleView({
     [bootstrapData?.pendingDayOffSwaps, resolvedWeekStart]
   );
 
-  // KPI metrics
   const kpiMetrics = useMemo(() => {
     const totalEmployees = allVisibleEmployees.length;
     const assignedOffCount = allVisibleEmployees.filter((e) => Boolean(e.effective_day_of_week)).length;
@@ -337,10 +330,52 @@ export default function ScheduleView({
     otherWeekActionableSwaps.length,
   ]);
 
+  const scheduleMetricItems = useMemo(
+    () => [
+      {
+        id: 'assigned',
+        label: 'الإجازات',
+        value: kpiMetrics.assignedOffCount,
+        secondary: kpiMetrics.totalEmployees > 0 ? `من ${kpiMetrics.totalEmployees}` : '',
+      },
+      {
+        id: 'off_today',
+        label:
+          resolvedWeekStart === currentCairoWeekStart
+            ? 'إجازة اليوم'
+            : `إجازة ${getScheduleWeekdayLabel(selectedDay)}`,
+        value: kpiMetrics.offTodayCount,
+        secondary:
+          resolvedWeekStart === currentCairoWeekStart && todayWeekday
+            ? getScheduleWeekdayLabel(todayWeekday)
+            : formatShortDate(weekDates[selectedDay]),
+      },
+      {
+        id: 'pending',
+        label: 'طلبات معلقة',
+        value: kpiMetrics.pendingForMe,
+        tone: kpiMetrics.pendingForMe > 0 ? 'danger' : 'neutral',
+        dotTone: kpiMetrics.pendingForMe > 0 ? 'danger' : '',
+        onClick:
+          kpiMetrics.pendingForMe > 0
+            ? () => inboxRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            : undefined,
+      },
+      {
+        id: 'coverage',
+        label: 'نقص تغطية',
+        value: kpiMetrics.lowCoverageSlots,
+        tone: kpiMetrics.lowCoverageSlots > 0 ? 'warning' : 'neutral',
+        dotTone: kpiMetrics.lowCoverageSlots > 0 ? 'warning' : '',
+      },
+    ],
+    [kpiMetrics, resolvedWeekStart, currentCairoWeekStart, selectedDay, todayWeekday, weekDates]
+  );
+
   const openSwapComposer = useCallback(
     ({ preselectedTargetId = '', preferredType = 'swap', requesterIdOverride = '' } = {}) => {
       if (isOfflineReadOnly) {
-        onToast?.('أنت في وضع عدم الاتصال — يرجى الاتصال بالشبكة لتقديم طلب تبديل', 'error');
+        onToast?.('وضع أوفلاين — يتطلب اتصالاً لتقديم الطلب', 'error');
         return;
       }
       const reqEmp =
@@ -351,10 +386,7 @@ export default function ScheduleView({
           : null);
 
       if (!reqEmp) {
-        onToast?.(
-          'حسابك غير مرتبط بسجل موظف نشط — تواصل مع الإدارة لربط حسابك أولاً',
-          'error'
-        );
+        onToast?.('الحساب غير مرتبط بسجل موظف نشط', 'error');
         return;
       }
 
@@ -405,7 +437,6 @@ export default function ScheduleView({
     ]
   );
 
-  // Listen for SmartFab zayed:open-composer event (queue if scheduleData is still loading)
   useEffect(() => {
     const handleOpenComposer = (ev) => {
       const detail = ev?.detail || {};
@@ -448,16 +479,12 @@ export default function ScheduleView({
         weekStartDate: resolvedWeekStart,
       });
       playSuccessChime('in');
-      const dayLabel = dayOfWeek ? getScheduleWeekdayLabel(dayOfWeek) : 'بدون يوم محدد';
-      onToast?.(
-        activeScope === 'default'
-          ? `تم تحديث الإجازة الثابتة لـ "${emp.name}" إلى (${dayLabel})`
-          : `تم تحديث إجازة "${emp.name}" لهذا الأسبوع إلى (${dayLabel})`
-      );
+      const dayLabel = dayOfWeek ? getScheduleWeekdayLabel(dayOfWeek) : 'بدون يوم';
+      onToast?.(`تم تحديث إجازة ${emp.name} (${dayLabel})`);
       setEditingEmployee(null);
       await refreshAll();
     } catch (err) {
-      onToast?.(err.message || 'تعذر حفظ تعيين الإجازة', 'error');
+      onToast?.(err.message || 'تعذر الحفظ', 'error');
     } finally {
       setBusyAction(false);
     }
@@ -478,7 +505,6 @@ export default function ScheduleView({
         teamGroup: nextTeamGroup,
         scope: editScope,
       });
-      onToast?.('اختر يوم الإجازة للموظف لحفظ تغيير الفريق');
       return;
     }
     setBusyAction(true);
@@ -491,12 +517,10 @@ export default function ScheduleView({
         weekStartDate: resolvedWeekStart,
       });
       playSuccessChime('in');
-      const grpLabel =
-        SCHEDULE_TEAM_GROUPS.find((g) => g.id === nextTeamGroup)?.label || nextTeamGroup;
-      onToast?.(`تم نقل "${emp.name}" إلى فريق (${grpLabel})`);
+      onToast?.(`تم نقل ${emp.name}`);
       await refreshAll();
     } catch (err) {
-      onToast?.(err.message || 'تعذر تغيير فريق الموظف', 'error');
+      onToast?.(err.message || 'تعذر النقل', 'error');
     } finally {
       setBusyAction(false);
     }
@@ -513,13 +537,13 @@ export default function ScheduleView({
       playSuccessChime('in');
       onToast?.(
         confirmBulkAction === 'copy_previous_week'
-          ? 'تم نسخ جدول الأسبوع السابق إلى هذا الأسبوع بنجاح'
-          : 'تمت إعادة تعيين جدول هذا الأسبوع إلى الجدول الثابت'
+          ? 'تم نسخ الأسبوع السابق'
+          : 'تمت الإعادة للجدول الثابت'
       );
       setConfirmBulkAction(null);
       await refreshAll();
     } catch (err) {
-      onToast?.(err.message || 'تعذر تنفيذ العملية الجماعية', 'error');
+      onToast?.(err.message || 'تعذر التنفيذ', 'error');
     } finally {
       setBusyAction(false);
     }
@@ -539,11 +563,11 @@ export default function ScheduleView({
         },
       });
       playSuccessChime('in');
-      onToast?.('تم حفظ إعدادات جدول الإجازات بنجاح');
+      onToast?.('تم حفظ الإعدادات');
       setSettingsOpen(false);
       await refreshAll();
     } catch (err) {
-      onToast?.(err.message || 'تعذر حفظ الإعدادات', 'error');
+      onToast?.(err.message || 'تعذر الحفظ', 'error');
     } finally {
       setBusyAction(false);
     }
@@ -560,16 +584,12 @@ export default function ScheduleView({
         await respondDayOffSwap(swap.id, payload);
       }
       playSuccessChime(decision === 'approve' ? 'in' : 'out');
-      onToast?.(
-        decision === 'approve'
-          ? 'تم تسجيل الموافقة بنجاح'
-          : 'تم رفض الطلب'
-      );
+      onToast?.(decision === 'approve' ? 'تمت الموافقة' : 'تم الرفض');
       setRejectingSwapId('');
       setRejectReason('');
       await refreshAll();
     } catch (err) {
-      onToast?.(err.message || 'تعذر معالجة الطلب', 'error');
+      onToast?.(err.message || 'تعذر المعالجة', 'error');
       if (err?.status === 409) {
         setRejectingSwapId('');
         setRejectReason('');
@@ -587,9 +607,10 @@ export default function ScheduleView({
       await cancelDayOffSwap(swap.id);
       playSuccessChime('out');
       onToast?.('تم إلغاء الطلب');
+      setConfirmSwapAction(null);
       await refreshAll();
     } catch (err) {
-      onToast?.(err.message || 'تعذر إلغاء الطلب', 'error');
+      onToast?.(err.message || 'تعذر الإلغاء', 'error');
     } finally {
       setBusySwapId('');
     }
@@ -599,19 +620,20 @@ export default function ScheduleView({
     if (!swap?.id || busySwapId || isOfflineReadOnly) return;
     setBusySwapId(swap.id);
     try {
-      await revertDayOffSwap(swap.id, { reason: 'تراجع إداري من جدول الإجازات' });
+      await revertDayOffSwap(swap.id, { reason: 'تراجع إداري' });
       playSuccessChime('out');
-      onToast?.('تم التراجع عن التبديل واستعادة الأيام الأصلية بنجاح');
+      onToast?.('تم التراجع عن التبديل');
+      setConfirmSwapAction(null);
       await refreshAll();
     } catch (err) {
-      onToast?.(err.message || 'تعذر التراجع عن التبديل', 'error');
+      onToast?.(err.message || 'تعذر التراجع', 'error');
     } finally {
       setBusySwapId('');
     }
   }
 
   async function handleSubmitSwapComposer(e) {
-    e.preventDefault();
+    if (e?.preventDefault) e.preventDefault();
     if (!swapComposer || busyAction || isOfflineReadOnly) return;
     setBusyAction(true);
     try {
@@ -627,26 +649,18 @@ export default function ScheduleView({
       } else {
         payload.targetDay = swapComposer.targetDay;
       }
-      const res = await createDayOffSwap(payload);
+      await createDayOffSwap(payload);
       playSuccessChime('in');
-      const nextStatus = res?.swap?.status;
-      onToast?.(
-        nextStatus === 'pending_requester'
-          ? 'تم تسجيل طلب التبديل وإرساله للموظفين للموافقة'
-          : swapComposer.requestType === 'swap'
-          ? 'تم إرسال طلب تبديل الإجازة للزميل للموافقة'
-          : 'تم إرسال طلب ترحيل الإجازة للإدارة للموافقة'
-      );
+      onToast?.('تم إرسال الطلب');
       setSwapComposer(null);
       await refreshAll();
     } catch (err) {
-      onToast?.(err.message || 'تعذر إرسال طلب الإجازة', 'error');
+      onToast?.(err.message || 'تعذر إرسال الطلب', 'error');
     } finally {
       setBusyAction(false);
     }
   }
 
-  // Composer derived state & live coverage preview
   const composerContext = useMemo(() => {
     if (!swapComposer) return null;
     const reqEmp = allVisibleEmployees.find((e) => e.id === swapComposer.requesterId) || null;
@@ -685,7 +699,6 @@ export default function ScheduleView({
           fromOnDutyAfter: covFrom.onDutyCount,
           toOnDutyBefore: covTo.onDutyCount,
           toOnDutyAfter: covTo.onDutyCount,
-          fromLowAfter: covFrom.lowCoverage,
           toLowAfter: covTo.lowCoverage,
           minRequired: covTo.minRequired,
         };
@@ -703,7 +716,6 @@ export default function ScheduleView({
           fromOnDutyAfter: fromAfter,
           toOnDutyBefore: covTo.onDutyCount,
           toOnDutyAfter: toAfter,
-          fromLowAfter: false,
           toLowAfter,
           minRequired: covTo.minRequired,
         };
@@ -742,7 +754,7 @@ export default function ScheduleView({
     return (
       <div className="space-y-4">
         <SkeletonKpiStrip count={4} />
-        <SkeletonList count={4} />
+        <SkeletonList rows={4} />
       </div>
     );
   }
@@ -750,9 +762,7 @@ export default function ScheduleView({
   if (loadError && !scheduleData) {
     return (
       <EmptyState
-        icon="calendar_month"
-        title="تعذر تحميل جدول الإجازات"
-        description={loadError}
+        title="تعذر تحميل الجدول"
         actionLabel="إعادة المحاولة"
         actionIcon="refresh"
         onAction={() => loadSchedule()}
@@ -760,1133 +770,584 @@ export default function ScheduleView({
     );
   }
 
+  const hasSwapsToShow = swaps.length > 0 || otherWeekActionableSwaps.length > 0;
+  const dateRangeLabel = `${formatShortDate(weekDates.sat || resolvedWeekStart)} — ${formatShortDate(
+    weekDates.fri || ''
+  )}`;
+
   return (
-    <div className="space-y-4 sm:space-y-5">
-      {/* Offline Read-Only Banner */}
+    <div className={arch.surfaces.sectionGapClass}>
       {isOfflineReadOnly && (
-        <div className="g-card p-3 border-[var(--g-yellow-border)] bg-[var(--g-yellow-bg)]/50 flex items-center gap-2.5 text-xs sm:text-sm font-extrabold text-[var(--g-yellow)]">
-          <span className="ms-icon filled text-xl shrink-0">cloud_off</span>
-          <span>
-            وضع عدم الاتصال: يتم عرض آخر نسخة محفوظة من جدول الإجازات (للقراءة فقط حتى عودة الإنترنت).
-          </span>
+        <div className="text-xs font-medium text-warning">
+          وضع أوفلاين — للعرض فقط
         </div>
       )}
 
-      {/* 1. Week Header & Admin Toolbar */}
-      <Card padding="md" className="space-y-3.5">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-          {/* Title & Date Range */}
-          <div className="flex items-start gap-3 min-w-0">
-            <span className="w-11 h-11 rounded-2xl bg-[var(--g-primary-container)] text-[var(--g-primary)] flex items-center justify-center shrink-0">
-              <span className="ms-icon filled text-2xl">calendar_month</span>
+      {/* 1. Borderless Typographic Header */}
+      <header className="space-y-2 py-1">
+        <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex items-baseline gap-2.5 flex-wrap min-w-0">
+            <h1
+              className={`text-lg sm:text-xl ${arch.surfaces.headingWeight} tracking-tight text-ink m-0`}
+            >
+              الإجازات
+            </h1>
+            <span className="num-ltr text-xs font-medium text-ink-muted">
+              {dateRangeLabel}
             </span>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-base sm:text-xl font-black text-[var(--g-text)] m-0">
-                  جدول الإجازات الأسبوعي
-                </h2>
-                {resolvedWeekStart === currentCairoWeekStart && (
-                  <Badge tone="primary" icon="today">
-                    الأسبوع الحالي
-                  </Badge>
-                )}
-              </div>
-              <div className="text-xs sm:text-sm font-bold text-[var(--g-muted)] flex items-center gap-1.5 flex-wrap mt-0.5">
-                <span>من السبت</span>
-                <span className="num-ltr font-black text-[var(--g-text)]">
-                  {weekDates.sat || resolvedWeekStart}
-                </span>
-                <span>إلى الجمعة</span>
-                <span className="num-ltr font-black text-[var(--g-text)]">
-                  {weekDates.fri || ''}
-                </span>
-              </div>
-            </div>
+            {loading && Boolean(scheduleData) && (
+              <Icon
+                name="progress_activity"
+                size={14}
+                spin
+                className="text-ink-muted"
+                ariaLabel="جاري التحديث"
+              />
+            )}
           </div>
 
-          {/* Week Switcher Controls */}
-          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              icon="chevron_right"
-              onClick={() => setWeekStart(shiftWeekStart(resolvedWeekStart, -1))}
-            >
-              الأسبوع السابق
-            </Button>
-            <Button
-              variant={resolvedWeekStart === currentCairoWeekStart ? 'tonal' : 'secondary'}
-              size="sm"
-              icon="today"
-              onClick={() => setWeekStart(currentCairoWeekStart)}
-            >
-              الأسبوع الحالي
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              icon="chevron_left"
-              onClick={() => setWeekStart(shiftWeekStart(resolvedWeekStart, 1))}
-            >
-              الأسبوع القادم
-            </Button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <div className="hidden md:inline-flex items-center gap-0.5">
+              <button
+                type="button"
+                onClick={() => setWeekStart(shiftWeekStart(resolvedWeekStart, -1))}
+                aria-label="الأسبوع السابق"
+                className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink inline-flex items-center justify-center cursor-pointer transition-[background-color,color] duration-150"
+              >
+                <Icon name="chevron_right" size={20} />
+              </button>
+              <Button
+                variant={resolvedWeekStart === currentCairoWeekStart ? 'secondary' : 'ghost'}
+                size="sm"
+                onClick={() => setWeekStart(currentCairoWeekStart)}
+              >
+                اليوم
+              </Button>
+              <button
+                type="button"
+                onClick={() => setWeekStart(shiftWeekStart(resolvedWeekStart, 1))}
+                aria-label="الأسبوع القادم"
+                className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink inline-flex items-center justify-center cursor-pointer transition-[background-color,color] duration-150"
+              >
+                <Icon name="chevron_left" size={20} />
+              </button>
+            </div>
 
-            {effectiveCanSwap && (
+            {scheduleTab === 'dayoffs' && effectiveCanSwap && (
               <Button
                 variant="primary"
                 size="sm"
-                icon="swap_horiz"
+                icon="add"
                 disabled={isOfflineReadOnly}
                 onClick={() => openSwapComposer({ preferredType: 'swap' })}
               >
-                طلب تبديل / ترحيل إجازتي
+                تبديل
+              </Button>
+            )}
+
+            {scheduleTab === 'dayoffs' && (effectiveCanManage || canExport) && (
+              <Button
+                variant="secondary"
+                size="sm"
+                icon="tune"
+                onClick={() => setActionsSheetOpen(true)}
+                className="md:hidden"
+              >
+                خيارات
               </Button>
             )}
           </div>
         </div>
 
-        {/* Admin Toolbar: Scope Switcher + Quick Actions + Exports */}
-        {(effectiveCanManage || canExport) && (
-          <div className="pt-3 border-t border-[var(--g-border)] flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+        <div className="flex md:hidden items-center justify-between gap-2 border-y border-line py-1">
+          <button
+            type="button"
+            onClick={() => setWeekStart(shiftWeekStart(resolvedWeekStart, -1))}
+            aria-label="الأسبوع السابق"
+            className="w-11 h-11 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink inline-flex items-center justify-center cursor-pointer transition-[background-color,color] duration-150"
+          >
+            <Icon name="chevron_right" size={20} />
+          </button>
+          <Button
+            variant={resolvedWeekStart === currentCairoWeekStart ? 'secondary' : 'ghost'}
+            size="sm"
+            onClick={() => setWeekStart(currentCairoWeekStart)}
+          >
+            اليوم
+          </Button>
+          <button
+            type="button"
+            onClick={() => setWeekStart(shiftWeekStart(resolvedWeekStart, 1))}
+            aria-label="الأسبوع القادم"
+            className="w-11 h-11 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink inline-flex items-center justify-center cursor-pointer transition-[background-color,color] duration-150"
+          >
+            <Icon name="chevron_left" size={20} />
+          </button>
+        </div>
+      </header>
+
+      {/* 2. Primary Mode Switcher */}
+      <SegmentedControl
+        fullWidth
+        ariaLabel="أقسام الجدول"
+        value={scheduleTab}
+        onChange={setScheduleTab}
+        options={[
+          { id: 'dayoffs', label: 'الإجازات' },
+          {
+            id: 'shifts',
+            label: presentCount > 0 ? `الشفتات (${presentCount})` : 'الشفتات',
+          },
+        ]}
+      />
+
+      {/* 3. Borderless Admin & Export Toolbar (Desktop, Day-offs only) */}
+      {scheduleTab === 'dayoffs' && (effectiveCanManage || canExport) && (
+        <div className="hidden md:flex flex-wrap items-center justify-between gap-2.5">
+          {effectiveCanManage && (
+            <SegmentedControl
+              ariaLabel="نطاق التعديل"
+              value={editScope}
+              onChange={setEditScope}
+              options={[
+                { id: 'week', label: 'هذا الأسبوع' },
+                { id: 'default', label: 'الثابت' },
+              ]}
+            />
+          )}
+
+          <div className="flex flex-wrap items-center gap-1.5">
             {effectiveCanManage && (
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="inline-flex p-1 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] gap-1">
-                  <button
-                    type="button"
-                    onClick={() => setEditScope('week')}
-                    className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-extrabold transition-all ${
-                      editScope === 'week'
-                        ? 'bg-[var(--g-primary-solid)] text-white shadow-2xs'
-                        : 'text-[var(--g-muted)] hover:text-[var(--g-text)]'
-                    }`}
-                  >
-                    تعديل لهذا الأسبوع
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setEditScope('default')}
-                    className={`min-h-[36px] px-3 py-1 rounded-xl text-xs font-extrabold transition-all ${
-                      editScope === 'default'
-                        ? 'bg-[var(--g-purple)] text-white shadow-2xs'
-                        : 'text-[var(--g-muted)] hover:text-[var(--g-text)]'
-                    }`}
-                  >
-                    الجدول الثابت المتكرر
-                  </button>
-                </div>
-                <span className="text-[11px] font-bold text-[var(--g-muted)]">
-                  {editScope === 'default'
-                    ? 'أي تعديل الآن يحفظ كجدول ثابت متكرر لكل الأسابيع'
-                    : 'التعديل يطبق على هذا الأسبوع فقط دون تغيير الثابت'}
-                </span>
-              </div>
+              <>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busyAction || isOfflineReadOnly}
+                  onClick={() => setConfirmBulkAction('copy_previous_week')}
+                >
+                  نسخ السابق
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busyAction || isOfflineReadOnly}
+                  onClick={() => setConfirmBulkAction('reset_to_defaults')}
+                >
+                  إعادة للثابت
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon="tune"
+                  onClick={() => setSettingsOpen(true)}
+                >
+                  إعدادات
+                </Button>
+              </>
             )}
 
-            <div className="flex flex-wrap items-center gap-1.5">
-              {effectiveCanManage && (
-                <>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    icon="content_copy"
-                    disabled={busyAction || isOfflineReadOnly}
-                    onClick={() => setConfirmBulkAction('copy_previous_week')}
-                  >
-                    نسخ الأسبوع السابق
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    icon="restart_alt"
-                    disabled={busyAction || isOfflineReadOnly}
-                    onClick={() => setConfirmBulkAction('reset_to_defaults')}
-                  >
-                    إعادة للجدول الثابت
-                  </Button>
-                  <Button
-                    variant="tonal"
-                    size="sm"
-                    icon="tune"
-                    onClick={() => setSettingsOpen(true)}
-                  >
-                    إعدادات الجدول
-                  </Button>
-                </>
-              )}
-
-              {(canExport || effectiveCanManage) && (
-                <>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    icon="share"
-                    onClick={() => {
-                      const text = formatWeeklyScheduleWhatsApp(scheduleData, storeName);
-                      if (text) openWhatsAppShare(text);
-                    }}
-                  >
-                    واتساب
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    icon="description"
-                    onClick={() => {
-                      exportWeeklyScheduleToWord(scheduleData, storeName);
-                      onToast?.('تم تجهيز ملف Word لجدول الإجازات');
-                    }}
-                  >
-                    Word
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    icon="table_view"
-                    onClick={() => {
-                      exportWeeklyScheduleToCsv(scheduleData);
-                      onToast?.('تم تجهيز ملف Excel لجدول الإجازات');
-                    }}
-                  >
-                    Excel
-                  </Button>
-                </>
-              )}
-            </div>
+            {(canExport || effectiveCanManage) && (
+              <>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    const text = formatWeeklyScheduleWhatsApp(scheduleData, storeName);
+                    if (text) openWhatsAppShare(text);
+                  }}
+                >
+                  واتساب
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    exportWeeklyScheduleToWord(scheduleData, storeName);
+                    onToast?.('تم تصدير Word');
+                  }}
+                >
+                  Word
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={async () => {
+                    try {
+                      await exportWeeklyScheduleToCsv(scheduleData, storeName);
+                      onToast?.('تم تصدير Excel');
+                    } catch (err) {
+                      onToast?.(err?.message || 'تعذر تصدير Excel', 'error');
+                    }
+                  }}
+                >
+                  Excel
+                </Button>
+              </>
+            )}
           </div>
-        )}
-      </Card>
-
-      {/* 2. KPI StatCard Strip */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3">
-        <StatCard
-          label="إجازات هذا الأسبوع"
-          value={kpiMetrics.assignedOffCount}
-          sublabel={`من أصل ${kpiMetrics.totalEmployees} موظف`}
-          icon="date_range"
-          tone="primary"
-        />
-        <StatCard
-          label={resolvedWeekStart === currentCairoWeekStart ? 'إجازة اليوم' : `إجازة ${getScheduleWeekdayLabel(selectedDay)}`}
-          value={kpiMetrics.offTodayCount}
-          sublabel={
-            resolvedWeekStart === currentCairoWeekStart && todayWeekday
-              ? getScheduleWeekdayLabel(todayWeekday)
-              : formatShortDate(weekDates[selectedDay])
-          }
-          icon="event_available"
-          tone="neutral"
-        />
-        <StatCard
-          label="طلبات بانتظارك"
-          value={kpiMetrics.pendingForMe}
-          sublabel={kpiMetrics.pendingForMe > 0 ? 'اضغط للمراجعة السريعة' : 'لا توجد طلبات معلقة لك'}
-          icon="pending_actions"
-          tone={kpiMetrics.pendingForMe > 0 ? 'danger' : 'success'}
-          onClick={() => inboxRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-        />
-        <StatCard
-          label="تنبيهات التغطية"
-          value={kpiMetrics.lowCoverageSlots}
-          sublabel={kpiMetrics.lowCoverageSlots > 0 ? 'أيام أقل من الحد الأدنى' : 'التغطية متوازنة'}
-          icon={kpiMetrics.lowCoverageSlots > 0 ? 'warning' : 'verified'}
-          tone={kpiMetrics.lowCoverageSlots > 0 ? 'warning' : 'success'}
-        />
-      </div>
-
-      {/* 3. Swap / Move Requests Inbox Card */}
-      {(swaps.length > 0 || otherWeekActionableSwaps.length > 0 || effectiveCanSwap) && (
-        <div ref={inboxRef} className="scroll-mt-20">
-          <Card padding="md" className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <span className="w-9 h-9 rounded-xl bg-[var(--g-primary-container)] text-[var(--g-primary)] flex items-center justify-center shrink-0">
-                  <span className="ms-icon filled text-xl">swap_horiz</span>
-                </span>
-                <div>
-                  <h3 className="text-sm sm:text-base font-black text-[var(--g-text)] m-0">
-                    طلبات تبديل وترحيل الإجازات
-                  </h3>
-                  <p className="text-[11px] font-semibold text-[var(--g-muted)] m-0">
-                    {scheduleData?.settings?.swapRequiresManagerApproval
-                      ? 'التبديل يتطلب موافقة الكاشيرين ثم اعتماد الإدارة النهائي'
-                      : 'التبديل يتطلب موافقة الكاشيرين معاً ويُطبق تلقائياً فور موافقتهما'}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                {actionableSwaps.length > 0 && (
-                  <Badge tone="danger" dot pulse numeric>
-                    {actionableSwaps.length} بانتظار قرارك
-                  </Badge>
-                )}
-                {otherSwaps.length > 0 && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    icon={showPastSwaps ? 'expand_less' : 'expand_more'}
-                    onClick={() => setShowPastSwaps((v) => !v)}
-                  >
-                    {showPastSwaps
-                      ? `إخفاء باقي الطلبات (${otherSwaps.length})`
-                      : `باقي طلبات الأسبوع (${otherSwaps.length})`}
-                  </Button>
-                )}
-              </div>
-            </div>
-
-            {/* Alert if user has pending swap actions in another week */}
-            {otherWeekActionableSwaps.length > 0 && (
-              <div className="p-3 rounded-2xl bg-[var(--g-yellow-bg)]/60 border border-[var(--g-yellow-border)]/45 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-xs font-extrabold text-[var(--g-yellow)]">
-                  <span className="ms-icon filled text-lg">notifications_active</span>
-                  <span>
-                    لديك ({otherWeekActionableSwaps.length}) طلب بانتظار موافقتك في أسبوع آخر
-                  </span>
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {Array.from(new Set(otherWeekActionableSwaps.map((s) => s.week_start_date))).map(
-                    (wk) => (
-                      <Button
-                        key={wk}
-                        variant="tonal"
-                        size="sm"
-                        icon="calendar_month"
-                        onClick={() => setWeekStart(wk)}
-                      >
-                        الانتقال لأسبوع <span className="num-ltr">{wk}</span>
-                      </Button>
-                    )
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Actionable Swaps (Awaiting My Action) */}
-            {actionableSwaps.length > 0 && (
-              <div className="space-y-2.5">
-                {actionableSwaps.map((swap) => {
-                  const isBusy = busySwapId === swap.id;
-                  const isRejecting = rejectingSwapId === swap.id;
-                  const isSwap = swap.request_type === 'swap';
-                  const fromLabel = getScheduleWeekdayLabel(swap.requester_from_day);
-                  const toLabel = getScheduleWeekdayLabel(swap.target_from_day);
-
-                  return (
-                    <div
-                      key={swap.id}
-                      className="p-3.5 sm:p-4 rounded-2xl border-2 border-[var(--g-primary)] bg-[var(--g-primary-container)]/20 space-y-2.5"
-                    >
-                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-                        <div className="space-y-1.5 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <Badge tone="primary" icon={isSwap ? 'swap_horiz' : 'event_repeat'}>
-                              {isSwap ? 'تبديل مع زميل' : 'ترحيل ليوم آخر'}
-                            </Badge>
-                            {swap.scope === 'permanent' && (
-                              <Badge tone="purple" icon="repeat">
-                                تغيير دائم
-                              </Badge>
-                            )}
-                            <Badge tone="danger" icon="priority_high">
-                              بانتظار إجراء منك
-                            </Badge>
-                          </div>
-
-                          <div className="text-sm font-black text-[var(--g-text)]">
-                            {isSwap
-                              ? `${swap.requester_name || 'الكاشير الأول'} (${fromLabel}) ↔ ${swap.target_name || 'الكاشير الثاني'} (${toLabel})`
-                              : `${swap.requester_name || 'الموظف'}: ترحيل الإجازة من ${fromLabel} إلى ${toLabel}`}
-                          </div>
-
-                          {swap.reason && (
-                            <div className="text-xs font-semibold text-[var(--g-muted)]">
-                              السبب: {swap.reason}
-                            </div>
-                          )}
-
-                          <SwapApprovalStepper
-                            swap={swap}
-                            swapRequiresManagerApproval={
-                              scheduleData?.settings?.swapRequiresManagerApproval
-                            }
-                          />
-                        </div>
-
-                        <div className="flex flex-wrap items-center gap-2 shrink-0">
-                          <Button
-                            variant="success"
-                            size="md"
-                            icon="check_circle"
-                            iconFilled
-                            loading={isBusy}
-                            disabled={isOfflineReadOnly}
-                            onClick={() => handleSwapRespondOrDecide(swap, 'approve')}
-                          >
-                            قبول
-                          </Button>
-                          <Button
-                            variant="dangerTonal"
-                            size="md"
-                            icon="cancel"
-                            disabled={isBusy || isOfflineReadOnly}
-                            onClick={() => {
-                              if (isRejecting) {
-                                setRejectingSwapId('');
-                                setRejectReason('');
-                              } else {
-                                setRejectingSwapId(swap.id);
-                                setRejectReason('');
-                              }
-                            }}
-                          >
-                            رفض
-                          </Button>
-                        </div>
-                      </div>
-
-                      {isRejecting && (
-                        <div className="pt-2.5 border-t border-[var(--g-border)] flex flex-col sm:flex-row gap-2">
-                          <input
-                            type="text"
-                            value={rejectReason}
-                            onChange={(e) => setRejectReason(e.target.value)}
-                            placeholder="اكتب سبب الرفض (اختياري)..."
-                            className="g-input flex-1 py-2 text-xs"
-                          />
-                          <div className="flex items-center gap-2 shrink-0">
-                            <Button
-                              variant="danger"
-                              size="sm"
-                              loading={isBusy}
-                              onClick={() =>
-                                handleSwapRespondOrDecide(swap, 'reject', rejectReason)
-                              }
-                            >
-                              تأكيد الرفض
-                            </Button>
-                            <Button
-                              variant="secondary"
-                              size="sm"
-                              onClick={() => {
-                                setRejectingSwapId('');
-                                setRejectReason('');
-                              }}
-                            >
-                              تراجع
-                            </Button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Empty Inbox Message when no swaps exist */}
-            {swaps.length === 0 && otherWeekActionableSwaps.length === 0 && (
-              <div className="p-3 rounded-2xl bg-[var(--g-surface-variant)]/60 text-xs font-bold text-[var(--g-muted)] flex items-center justify-between gap-2">
-                <span className="flex items-center gap-2">
-                  <span className="ms-icon text-base text-[var(--g-primary)]">inbox</span>
-                  <span>لا توجد طلبات تبديل أو ترحيل مسجلة في هذا الأسبوع.</span>
-                </span>
-                {effectiveCanSwap && myEmployee?.effective_day_of_week && (
-                  <Button
-                    variant="tonal"
-                    size="sm"
-                    icon="add"
-                    disabled={isOfflineReadOnly}
-                    onClick={() => openSwapComposer({ preferredType: 'swap' })}
-                  >
-                    إنشاء طلب
-                  </Button>
-                )}
-              </div>
-            )}
-
-            {/* Other / Historical Swaps in This Week */}
-            {otherSwaps.length > 0 && (showPastSwaps || actionableSwaps.length === 0) && (
-              <div className="space-y-2 pt-1">
-                {otherSwaps.map((swap) => {
-                  const statusMeta = SWAP_STATUS_META[swap.status] || SWAP_STATUS_META.pending_peer;
-                  const isBusy = busySwapId === swap.id;
-                  const isSwap = swap.request_type === 'swap';
-                  const fromLabel = getScheduleWeekdayLabel(swap.requester_from_day);
-                  const toLabel = getScheduleWeekdayLabel(swap.target_from_day);
-
-                  return (
-                    <div
-                      key={swap.id}
-                      className="p-3 rounded-2xl bg-[var(--g-surface-variant)]/55 border border-[var(--g-border)] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
-                    >
-                      <div className="space-y-1.5 min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <Badge tone={statusMeta.tone} icon={statusMeta.icon}>
-                            {statusMeta.label}
-                          </Badge>
-                          <Badge tone="neutral">
-                            {isSwap ? 'تبديل' : 'ترحيل'}
-                          </Badge>
-                          {swap.scope === 'permanent' && <Badge tone="purple">دائم</Badge>}
-                        </div>
-
-                        <div className="text-xs sm:text-sm font-black text-[var(--g-text)]">
-                          {isSwap
-                            ? `${swap.requester_name || 'موظف'} (${fromLabel}) ↔ ${swap.target_name || 'زميل'} (${toLabel})`
-                            : `${swap.requester_name || 'موظف'}: ${fromLabel} ← ${toLabel}`}
-                        </div>
-
-                        {swap.reason && (
-                          <div className="text-[11px] font-semibold text-[var(--g-muted)]">
-                            السبب: {swap.reason}
-                          </div>
-                        )}
-
-                        {swap.rejection_reason && (
-                          <div className="text-[11px] font-bold text-[var(--g-red)]">
-                            ملاحظة: {swap.rejection_reason}
-                          </div>
-                        )}
-
-                        <SwapApprovalStepper
-                          swap={swap}
-                          swapRequiresManagerApproval={
-                            scheduleData?.settings?.swapRequiresManagerApproval
-                          }
-                        />
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-                        {swap.can_cancel && (
-                          <Button
-                            variant="dangerTonal"
-                            size="sm"
-                            icon="close"
-                            loading={isBusy}
-                            disabled={isOfflineReadOnly}
-                            onClick={() => handleCancelSwap(swap)}
-                          >
-                            إلغاء الطلب
-                          </Button>
-                        )}
-                        {swap.can_revert && effectiveCanManage && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            icon="undo"
-                            loading={isBusy}
-                            disabled={isOfflineReadOnly}
-                            onClick={() => handleRevertSwap(swap)}
-                          >
-                            تراجع عن التبديل
-                          </Button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </Card>
         </div>
       )}
 
-      {/* 4. Mobile Schedule View (< md): Adaptive Day-First Default + Employee Cards Toggle */}
-      <div className="md:hidden space-y-3">
-        {/* View Mode Switcher */}
-        <div className="flex items-center justify-between gap-2">
-          <div className="inline-flex p-1 rounded-2xl bg-[var(--g-surface)] border border-[var(--g-border)] gap-1">
-            <button
-              type="button"
-              onClick={() => setMobileMode('day')}
-              className={`min-h-[40px] px-3 py-1.5 rounded-xl text-xs font-extrabold flex items-center gap-1.5 transition-all ${
-                mobileMode === 'day'
-                  ? 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]'
-                  : 'text-[var(--g-muted)]'
-              }`}
-            >
-              <span className="ms-icon text-base">view_day</span>
-              <span>عرض باليوم</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setMobileMode('employees')}
-              className={`min-h-[40px] px-3 py-1.5 rounded-xl text-xs font-extrabold flex items-center gap-1.5 transition-all ${
-                mobileMode === 'employees'
-                  ? 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]'
-                  : 'text-[var(--g-muted)]'
-              }`}
-            >
-              <span className="ms-icon text-base">badge</span>
-              <span>بطاقات الموظفين</span>
-            </button>
-          </div>
+      {scheduleTab === 'shifts' ? (
+        <ScheduleShiftsTab
+          scheduleData={scheduleData}
+          canVerify={effectiveCanVerify}
+          canWriteAttendance={Boolean(propCanWriteAttendance)}
+          onVerifyLog={handleVerifyShiftLog}
+          onRefresh={() => loadSchedule({ silent: true })}
+          onToast={onToast}
+        />
+      ) : (
+        <>
+          {/* 4. Adaptive 4-Metric Cockpit Strip */}
+          <CockpitMetricStrip items={scheduleMetricItems} columns={4} />
 
-          {myEmployee?.effective_day_of_week && (
-            <Badge tone="primary" icon="event_available">
-              إجازتك: {getScheduleWeekdayLabel(myEmployee.effective_day_of_week)}
-            </Badge>
-          )}
-        </div>
-
-        {mobileMode === 'day' ? (
-          <div className="space-y-3">
-            {/* Compact 7-day selector bar (Sat..Fri, >=44px touch targets) */}
-            <div className="grid grid-cols-7 gap-1 bg-[var(--g-surface)] p-1.5 rounded-2xl border border-[var(--g-border)]">
-              {SCHEDULE_WEEKDAYS.map((day) => {
-                const isSelected = selectedDay === day.code;
-                const dayDateKey = weekDates[day.code] || '';
-                const isToday = dayDateKey === todayDateKey;
-                const isMyOff = myEmployee?.effective_day_of_week === day.code;
-                const offTotal = groups.reduce(
-                  (sum, g) => sum + (g.coverageByDay?.[day.code]?.offCount || 0),
-                  0
-                );
-                const anyLowCov = groups.some((g) => g.coverageByDay?.[day.code]?.lowCoverage);
-
-                return (
-                  <button
-                    key={day.code}
-                    type="button"
-                    onClick={() => setSelectedDay(day.code)}
-                    className={`min-h-[64px] px-1 py-1.5 rounded-xl flex flex-col items-center justify-between gap-0.5 text-center transition-all active:scale-95 relative ${
-                      isSelected
-                        ? 'bg-[var(--g-primary-solid)] text-white shadow-xs'
-                        : isMyOff
-                        ? 'bg-[var(--g-primary-container)]/60 text-[var(--g-on-primary-container)] border border-[var(--g-primary)]/40'
-                        : isToday
-                        ? 'bg-[var(--g-secondary-container)]/65 text-[var(--g-on-secondary-container)]'
-                        : 'bg-[var(--g-surface-variant)]/60 text-[var(--g-text)]'
-                    }`}
-                  >
-                    <span className="text-[10px] font-black leading-tight truncate max-w-full">
-                      {day.shortLabel}
-                    </span>
-                    <span className="num-ltr text-[10px] font-bold opacity-85">
-                      {dayDateKey ? dayDateKey.slice(8) : ''}
-                    </span>
-                    <span
-                      className={`num-ltr text-[10px] min-w-[20px] h-[18px] px-1 rounded-full font-black flex items-center justify-center ${
-                        isSelected
-                          ? 'bg-white/25 text-white'
-                          : anyLowCov
-                          ? 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]'
-                          : 'bg-[var(--g-surface)] text-[var(--g-text)]'
-                      }`}
-                    >
-                      {offTotal}
-                    </span>
-                    {(isToday || isMyOff) && (
-                      <span
-                        className={`text-[8px] font-black leading-none ${
-                          isSelected ? 'text-white/95' : 'text-[var(--g-primary)]'
-                        }`}
+          {/* 5. Swap Inbox — COMPLETELY HIDDEN when swaps.length === 0 && otherWeekActionableSwaps.length === 0 */}
+          {hasSwapsToShow && (
+            <div ref={inboxRef} className="scroll-mt-20 space-y-3">
+              {otherWeekActionableSwaps.length > 0 && (
+                <div className="py-2 border-y border-line flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <StatusDot
+                    tone="warning"
+                    label={`${otherWeekActionableSwaps.length} طلب في أسبوع آخر`}
+                    tintedText
+                  />
+                  <div className="flex flex-wrap gap-1.5">
+                    {Array.from(
+                      new Set(otherWeekActionableSwaps.map((s) => s.week_start_date))
+                    ).map((wk) => (
+                      <Button
+                        key={wk}
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setWeekStart(wk)}
                       >
-                        {isMyOff ? 'إجازتك' : 'اليوم'}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Selected Day Header */}
-            <div className="flex items-center justify-between gap-2 px-1">
-              <div className="flex items-center gap-1.5">
-                <span className="text-sm font-black text-[var(--g-text)]">
-                  يوم {getScheduleWeekdayLabel(selectedDay)}
-                </span>
-                <span className="num-ltr text-xs font-bold text-[var(--g-muted)]">
-                  ({weekDates[selectedDay] || ''})
-                </span>
-                {weekDates[selectedDay] === todayDateKey && (
-                  <Badge tone="success">اليوم</Badge>
-                )}
-              </div>
-
-              {effectiveCanSwap && myEmployee && (
-                <Button
-                  variant="tonal"
-                  size="sm"
-                  icon="swap_horiz"
-                  disabled={isOfflineReadOnly}
-                  onClick={() => openSwapComposer({ preferredType: 'swap' })}
-                >
-                  تبديل / ترحيل
-                </Button>
-              )}
-            </div>
-
-            {/* Group Cards for Selected Day */}
-            {groups.length === 0 ? (
-              <EmptyState
-                icon="groups"
-                title="لا توجد مجموعات موظفين ظاهرة"
-                description="أضف الموظفين أو تأكد من صلاحيات العرض الخاصة بك."
-              />
-            ) : (
-              groups.map((group) => {
-                const style = GROUP_STYLE_BY_TONE[group.tone] || GROUP_STYLE_BY_TONE.primary;
-                const cov = group.coverageByDay?.[selectedDay] || {
-                  offCount: 0,
-                  onDutyCount: 0,
-                  totalCount: 0,
-                  minRequired: 0,
-                  lowCoverage: false,
-                };
-                const offEmps = (group.employees || []).filter(
-                  (e) => e.effective_day_of_week === selectedDay
-                );
-                const unassignedEmps = (group.employees || []).filter(
-                  (e) => !e.effective_day_of_week
-                );
-
-                return (
-                  <Card key={group.id} padding="sm" className={`space-y-2.5 ${style.borderTop}`}>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span
-                          className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${style.iconBox}`}
-                        >
-                          <span className="ms-icon filled text-lg">{group.icon || 'groups'}</span>
-                        </span>
-                        <div className="min-w-0">
-                          <h4 className="text-sm font-black text-[var(--g-text)] m-0 truncate">
-                            {group.label}
-                          </h4>
-                          <div className="text-[11px] font-bold text-[var(--g-muted)]">
-                            <span className="num-ltr">{cov.offCount}</span> إجازة •{' '}
-                            <span className="num-ltr">{cov.onDutyCount}</span> متواجد
-                          </div>
-                        </div>
-                      </div>
-
-                      {cov.lowCoverage ? (
-                        <Badge tone="warning" icon="warning">
-                          تغطية منخفضة (أدنى <span className="num-ltr">{cov.minRequired}</span>)
-                        </Badge>
-                      ) : (
-                        <Badge tone={style.badgeTone} numeric>
-                          {cov.onDutyCount}/{cov.totalCount} دوام
-                        </Badge>
-                      )}
-                    </div>
-
-                    {offEmps.length === 0 ? (
-                      <div className="p-2.5 rounded-xl bg-[var(--g-surface-variant)]/55 text-xs font-bold text-[var(--g-muted)] text-center">
-                        الجميع متواجد في العمل هذا اليوم
-                      </div>
-                    ) : (
-                      <div className="space-y-1.5">
-                        {offEmps.map((emp) => {
-                          const isMe = emp.id === myEmployeeId;
-                          const canSwapThis =
-                            effectiveCanSwap &&
-                            !isMe &&
-                            myEmployee &&
-                            myEmployee.team_group === emp.team_group &&
-                            myEmployee.effective_day_of_week &&
-                            emp.effective_day_of_week !== myEmployee.effective_day_of_week;
-
-                          return (
-                            <div
-                              key={emp.id}
-                              className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 ${
-                                isMe
-                                  ? 'bg-[var(--g-primary-container)]/30 border-[var(--g-primary)]/45'
-                                  : 'bg-[var(--g-surface-variant)]/50 border-[var(--g-border)]'
-                              }`}
-                            >
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span
-                                  style={{ backgroundColor: emp.avatar_color || '#0B57D0' }}
-                                  className="w-8 h-8 rounded-xl text-white text-xs font-black flex items-center justify-center shrink-0"
-                                >
-                                  {getInitials(emp.name)}
-                                </span>
-                                <div className="min-w-0">
-                                  <div className="flex items-center gap-1.5 flex-wrap">
-                                    <span className="text-xs font-black text-[var(--g-text)] truncate">
-                                      {emp.name}
-                                    </span>
-                                    {isMe && <Badge tone="primary">أنت</Badge>}
-                                    {emp.is_override && <Badge tone="orange">تعديل أسبوعي</Badge>}
-                                  </div>
-                                  <div className="text-[10px] font-semibold text-[var(--g-muted)] truncate">
-                                    {emp.department}
-                                    {emp.role_title ? ` • ${emp.role_title}` : ''}
-                                  </div>
-                                </div>
-                              </div>
-
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                {canSwapThis && (
-                                  <Button
-                                    variant="tonal"
-                                    size="sm"
-                                    icon="swap_horiz"
-                                    disabled={isOfflineReadOnly}
-                                    onClick={() =>
-                                      openSwapComposer({
-                                        preselectedTargetId: emp.id,
-                                        preferredType: 'swap',
-                                      })
-                                    }
-                                  >
-                                    تبديل
-                                  </Button>
-                                )}
-                                {effectiveCanManage && (
-                                  <Button
-                                    variant="secondary"
-                                    size="sm"
-                                    icon="edit"
-                                    disabled={isOfflineReadOnly}
-                                    onClick={() =>
-                                      setEditingEmployee({
-                                        emp,
-                                        dayOfWeek: emp.effective_day_of_week || '',
-                                        teamGroup: emp.team_group,
-                                        scope: editScope,
-                                      })
-                                    }
-                                  >
-                                    تعديل
-                                  </Button>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-
-                    {/* Unassigned Employees quick-assign strip for Admin */}
-                    {effectiveCanManage && unassignedEmps.length > 0 && (
-                      <div className="pt-2 border-t border-[var(--g-border)] space-y-1.5">
-                        <div className="text-[11px] font-extrabold text-[var(--g-muted)]">
-                          موظفون بدون يوم إجازة محدد ({unassignedEmps.length}):
-                        </div>
-                        <div className="flex flex-wrap gap-1.5">
-                          {unassignedEmps.map((emp) => (
-                            <button
-                              key={emp.id}
-                              type="button"
-                              disabled={isOfflineReadOnly}
-                              onClick={() =>
-                                setEditingEmployee({
-                                  emp,
-                                  dayOfWeek: selectedDay,
-                                  teamGroup: emp.team_group,
-                                  scope: editScope,
-                                })
-                              }
-                              className="min-h-[34px] px-2.5 py-1 rounded-xl bg-[var(--g-surface)] border border-dashed border-[var(--g-primary)]/50 text-[11px] font-extrabold text-[var(--g-primary)] flex items-center gap-1"
-                            >
-                              <span className="ms-icon text-sm">add</span>
-                              <span>{emp.name}</span>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </Card>
-                );
-              })
-            )}
-          </div>
-        ) : (
-          /* Mobile Employee Cards View */
-          <div className="space-y-3">
-            {groups.length > 1 && (
-              <FilterChipRail
-                activeId={mobileGroupFilter}
-                onSelect={setMobileGroupFilter}
-                items={[
-                  {
-                    id: 'all',
-                    label: 'كل الفرق',
-                    icon: 'groups',
-                    count: allVisibleEmployees.length,
-                  },
-                  ...groups.map((g) => ({
-                    id: g.id,
-                    label: g.shortLabel || g.label,
-                    icon: g.icon,
-                    count: (g.employees || []).length,
-                  })),
-                ]}
-              />
-            )}
-
-            {filteredMobileGroups.map((group) => {
-              const style = GROUP_STYLE_BY_TONE[group.tone] || GROUP_STYLE_BY_TONE.primary;
-              return (
-                <div key={group.id} className="space-y-2">
-                  <div className="flex items-center justify-between px-1">
-                    <span className="text-xs font-black text-[var(--g-muted)] flex items-center gap-1.5">
-                      <span className="ms-icon text-base">{group.icon}</span>
-                      <span>{group.label}</span>
-                    </span>
-                    <span className="num-ltr text-[11px] font-bold text-[var(--g-muted)]">
-                      {(group.employees || []).length} موظف
-                    </span>
+                        <span className="num-ltr">{wk}</span>
+                      </Button>
+                    ))}
                   </div>
+                </div>
+              )}
 
-                  {(group.employees || []).length === 0 ? (
-                    <Card padding="sm" className="text-center text-xs font-bold text-[var(--g-muted)]">
-                      لا يوجد موظفون في هذا الفريق حالياً
-                    </Card>
-                  ) : (
-                    (group.employees || []).map((emp) => {
-                      const isMe = emp.id === myEmployeeId;
-                      const offLabel = emp.effective_day_of_week
-                        ? getScheduleWeekdayLabel(emp.effective_day_of_week)
-                        : 'غير محدد';
-                      const offDateShort = emp.effective_day_of_week
-                        ? formatShortDate(weekDates[emp.effective_day_of_week])
-                        : '';
-                      const canSwapThis =
-                        effectiveCanSwap &&
-                        !isMe &&
-                        myEmployee &&
-                        myEmployee.team_group === emp.team_group &&
-                        emp.effective_day_of_week &&
-                        myEmployee.effective_day_of_week &&
-                        emp.effective_day_of_week !== myEmployee.effective_day_of_week;
+              {swaps.length > 0 && (
+                <GroupedList
+                  label="طلبات التبديل"
+                  count={swaps.length}
+                  actions={
+                    otherSwaps.length > 0 && actionableSwaps.length > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowPastSwaps((v) => !v)}
+                        className="text-xs font-medium text-primary hover:underline cursor-pointer min-h-[32px] px-1"
+                      >
+                        {showPastSwaps ? 'إخفاء السابقة' : `الكل (${otherSwaps.length})`}
+                      </button>
+                    ) : null
+                  }
+                >
+                  {actionableSwaps.map((swap) => {
+                    const isBusy = busySwapId === swap.id;
+                    const isRejecting = rejectingSwapId === swap.id;
+                    const isSwap = swap.request_type === 'swap';
+                    const fromLabel = getScheduleWeekdayLabel(swap.requester_from_day);
+                    const toLabel = getScheduleWeekdayLabel(swap.target_from_day);
 
-                      return (
-                        <Card
-                          key={emp.id}
-                          padding="sm"
-                          className={`flex items-center justify-between gap-2.5 ${
-                            isMe ? 'ring-2 ring-[var(--g-primary)]/45' : ''
-                          }`}
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <span
-                              style={{ backgroundColor: emp.avatar_color || '#0B57D0' }}
-                              className="w-10 h-10 rounded-xl text-white text-xs font-black flex items-center justify-center shrink-0"
-                            >
-                              {getInitials(emp.name)}
-                            </span>
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-1.5 flex-wrap">
-                                <span className="text-sm font-black text-[var(--g-text)] truncate">
-                                  {emp.name}
-                                </span>
-                                {isMe && <Badge tone="primary">أنت</Badge>}
-                                {emp.is_override && <Badge tone="orange">تعديل</Badge>}
-                              </div>
-                              <div className="flex items-center gap-1.5 flex-wrap mt-1">
-                                <span
-                                  className={`px-2 py-0.5 rounded-full text-[11px] font-extrabold inline-flex items-center gap-1 ${
-                                    emp.effective_day_of_week
-                                      ? style.offPill
-                                      : 'bg-[var(--g-surface-variant)] text-[var(--g-muted)]'
-                                  }`}
-                                >
-                                  <span className="ms-icon text-xs">event_available</span>
-                                  <span>{offLabel}</span>
-                                  {offDateShort && (
-                                    <span className="num-ltr opacity-80">({offDateShort})</span>
-                                  )}
-                                </span>
-                              </div>
+                    return (
+                      <div key={swap.id} className="px-3.5 py-3 space-y-2.5 bg-surface-tint">
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2.5">
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <StatusDot tone="danger" label="بانتظار قرارك" pulse tintedText />
+                              {swap.scope === 'permanent' && (
+                                <span className="text-xs font-medium text-purple">دائم</span>
+                              )}
                             </div>
+                            <div className="text-sm font-semibold text-ink">
+                              {isSwap
+                                ? `${swap.requester_name || 'موظف'} (${fromLabel}) مع ${swap.target_name || 'زميل'} (${toLabel})`
+                                : `${swap.requester_name || 'موظف'}: ${fromLabel} ← ${toLabel}`}
+                            </div>
+                            {swap.reason && (
+                              <div className="text-xs text-ink-muted">{swap.reason}</div>
+                            )}
+                            <SwapApprovalStepper
+                              swap={swap}
+                              swapRequiresManagerApproval={
+                                scheduleData?.settings?.swapRequiresManagerApproval
+                              }
+                            />
                           </div>
 
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            {canSwapThis && (
+                          <div className="grid grid-cols-2 sm:flex w-full sm:w-auto items-center gap-2 shrink-0">
+                            <Button
+                              variant="success"
+                              size="sm"
+                              loading={isBusy}
+                              disabled={isOfflineReadOnly}
+                              onClick={() => handleSwapRespondOrDecide(swap, 'approve')}
+                            >
+                              قبول
+                            </Button>
+                            <Button
+                              variant="dangerTonal"
+                              size="sm"
+                              disabled={isBusy || isOfflineReadOnly}
+                              onClick={() => {
+                                if (isRejecting) {
+                                  setRejectingSwapId('');
+                                  setRejectReason('');
+                                } else {
+                                  setRejectingSwapId(swap.id);
+                                  setRejectReason('');
+                                }
+                              }}
+                            >
+                              رفض
+                            </Button>
+                          </div>
+                        </div>
+
+                        {isRejecting && (
+                          <div className="pt-2 border-t border-line flex flex-col sm:flex-row gap-2">
+                            <input
+                              type="text"
+                              value={rejectReason}
+                              onChange={(e) => setRejectReason(e.target.value)}
+                              placeholder="سبب الرفض (اختياري)..."
+                              className="g-input flex-1"
+                            />
+                            <div className="grid grid-cols-2 sm:flex w-full sm:w-auto items-center gap-2 shrink-0">
                               <Button
-                                variant="tonal"
+                                variant="danger"
                                 size="sm"
-                                icon="swap_horiz"
-                                disabled={isOfflineReadOnly}
+                                loading={isBusy}
                                 onClick={() =>
-                                  openSwapComposer({
-                                    preselectedTargetId: emp.id,
-                                    preferredType: 'swap',
-                                  })
+                                  handleSwapRespondOrDecide(swap, 'reject', rejectReason)
                                 }
                               >
-                                تبديل
+                                تأكيد الرفض
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                  setRejectingSwapId('');
+                                  setRejectReason('');
+                                }}
+                              >
+                                إلغاء
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  {(showPastSwaps || actionableSwaps.length === 0) &&
+                    otherSwaps.map((swap) => {
+                      const statusMeta =
+                        SWAP_STATUS_META[swap.status] || SWAP_STATUS_META.pending_peer;
+                      const isBusy = busySwapId === swap.id;
+                      const isSwap = swap.request_type === 'swap';
+                      const fromLabel = getScheduleWeekdayLabel(swap.requester_from_day);
+                      const toLabel = getScheduleWeekdayLabel(swap.target_from_day);
+
+                      return (
+                        <div
+                          key={swap.id}
+                          className="px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                        >
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <StatusDot tone={statusMeta.tone} label={statusMeta.label} />
+                              {swap.scope === 'permanent' && (
+                                <span className="text-xs font-medium text-purple">دائم</span>
+                              )}
+                            </div>
+                            <div className="text-xs sm:text-sm font-medium text-ink">
+                              {isSwap
+                                ? `${swap.requester_name || 'موظف'} (${fromLabel}) مع ${swap.target_name || 'زميل'} (${toLabel})`
+                                : `${swap.requester_name || 'موظف'}: ${fromLabel} ← ${toLabel}`}
+                            </div>
+                            {swap.reason && (
+                              <div className="text-xs text-ink-muted">{swap.reason}</div>
+                            )}
+                            {swap.rejection_reason && (
+                              <div className="text-xs text-danger">{swap.rejection_reason}</div>
+                            )}
+                            <SwapApprovalStepper
+                              swap={swap}
+                              swapRequiresManagerApproval={
+                                scheduleData?.settings?.swapRequiresManagerApproval
+                              }
+                            />
+                          </div>
+
+                          <div className="grid grid-cols-2 sm:flex w-full sm:w-auto items-center gap-2 shrink-0">
+                            {swap.can_cancel && (
+                              <Button
+                                variant="dangerTonal"
+                                size="sm"
+                                loading={isBusy}
+                                disabled={isOfflineReadOnly}
+                                onClick={() => setConfirmSwapAction({ mode: 'cancel', swap })}
+                              >
+                                إلغاء
                               </Button>
                             )}
-                            {effectiveCanManage && (
+                            {swap.can_revert && effectiveCanManage && (
                               <Button
                                 variant="secondary"
                                 size="sm"
-                                icon="edit"
+                                loading={isBusy}
                                 disabled={isOfflineReadOnly}
-                                onClick={() =>
-                                  setEditingEmployee({
-                                    emp,
-                                    dayOfWeek: emp.effective_day_of_week || '',
-                                    teamGroup: emp.team_group,
-                                    scope: editScope,
-                                  })
-                                }
+                                onClick={() => setConfirmSwapAction({ mode: 'revert', swap })}
                               >
-                                تعديل
+                                تراجع
                               </Button>
                             )}
                           </div>
-                        </Card>
+                        </div>
                       );
-                    })
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
+                    })}
+                </GroupedList>
+              )}
+            </div>
+          )}
 
-      {/* 5. Desktop Schedule Tables (md+): 3 Separate Color-Coded Team Group Sections */}
-      <div className="hidden md:block space-y-5">
-        {groups.length === 0 ? (
-          <EmptyState
-            icon="calendar_month"
-            title="لا توجد فرق مسجلة في جدول الإجازات"
-            description="أضف الموظفين أولاً أو تحقق من الصلاحيات."
-          />
-        ) : (
-          groups.map((group) => {
-            const style = GROUP_STYLE_BY_TONE[group.tone] || GROUP_STYLE_BY_TONE.primary;
-            const emps = group.employees || [];
-            const minRequired =
-              group.coverageByDay?.sat?.minRequired ??
-              scheduleData?.settings?.minOnDuty?.[group.id] ??
-              0;
+          {/* 6. Mobile View (< md) */}
+          <div className="md:hidden space-y-4">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <SegmentedControl
+                ariaLabel="طريقة العرض"
+                value={mobileMode}
+                onChange={setMobileMode}
+                options={[
+                  { id: 'day', label: 'باليوم' },
+                  { id: 'employees', label: 'بالموظف' },
+                ]}
+              />
 
-            return (
-              <Card key={group.id} padding="none" className={`overflow-hidden ${style.borderTop}`}>
-                {/* Group Header */}
-                <div className="p-4 flex items-center justify-between gap-3 border-b border-[var(--g-border)] bg-[var(--g-surface-tint)]">
-                  <div className="flex items-center gap-3">
-                    <span
-                      className={`w-10 h-10 rounded-2xl flex items-center justify-center shrink-0 ${style.iconBox}`}
-                    >
-                      <span className="ms-icon filled text-xl">{group.icon || 'groups'}</span>
-                    </span>
-                    <div>
-                      <h3 className="text-base font-black text-[var(--g-text)] m-0">
-                        {group.label}
-                      </h3>
-                      <div className="text-xs font-bold text-[var(--g-muted)]">
-                        إجمالي الفريق: <span className="num-ltr">{emps.length}</span> موظف • الحد
-                        الأدنى للمتواجدين يومياً: <span className="num-ltr">{minRequired}</span>
-                      </div>
-                    </div>
-                  </div>
+              {myEmployee?.effective_day_of_week && (
+                <span className="text-xs font-medium text-primary">
+                  إجازتك: {getScheduleWeekdayLabel(myEmployee.effective_day_of_week)}
+                </span>
+              )}
+            </div>
 
-                  {effectiveCanSwap && myEmployee?.team_group === group.id && (
-                    <Button
-                      variant="tonal"
-                      size="sm"
-                      icon="swap_horiz"
-                      disabled={isOfflineReadOnly}
-                      onClick={() => openSwapComposer({ preferredType: 'swap' })}
-                    >
-                      طلب تبديل / ترحيل إجازتي
-                    </Button>
-                  )}
-                </div>
+            {mobileMode === 'day' ? (
+              <div className="space-y-4">
+                <WeekDayStrip
+                  activeId={selectedDay}
+                  onSelect={setSelectedDay}
+                  ariaLabel="أيام إجازات الأسبوع"
+                  days={SCHEDULE_WEEKDAYS.map((day) => {
+                    const dayDateKey = weekDates[day.code] || '';
+                    const isToday = dayDateKey === todayDateKey;
+                    const offTotal = groups.reduce(
+                      (sum, g) => sum + (g.coverageByDay?.[day.code]?.offCount || 0),
+                      0
+                    );
+                    const anyLowCov = groups.some((g) => g.coverageByDay?.[day.code]?.lowCoverage);
+                    return {
+                      id: day.code,
+                      shortLabel: day.shortLabel,
+                      label: day.label,
+                      dateNum: dayDateKey ? dayDateKey.slice(8) : '',
+                      badge: String(offTotal),
+                      alert: anyLowCov,
+                      isToday,
+                    };
+                  })}
+                />
 
-                {emps.length === 0 ? (
-                  <div className="p-6 text-center text-sm font-bold text-[var(--g-muted)]">
-                    لا يوجد موظفون في فريق ({group.label}) حالياً.
-                  </div>
+                {groups.length === 0 ? (
+                  <EmptyState compact title="لا توجد مجموعات" />
                 ) : (
-                  <div className="overflow-x-auto">
-                    <table className="w-full border-collapse text-right">
-                      <thead>
-                        <tr className="bg-[var(--g-surface-variant)]/65 border-b border-[var(--g-border)]">
-                          <th className="p-3 text-xs font-black text-[var(--g-text)] min-w-[210px]">
-                            الموظف
-                          </th>
-                          {SCHEDULE_WEEKDAYS.map((day) => {
-                            const dKey = weekDates[day.code] || '';
-                            const isToday = dKey === todayDateKey;
-                            return (
-                              <th
-                                key={day.code}
-                                className={`p-2.5 text-center min-w-[96px] border-r border-[var(--g-border)]/70 ${
-                                  isToday ? 'bg-[var(--g-primary-container)]/40' : ''
-                                }`}
-                              >
-                                <div className="text-xs font-black text-[var(--g-text)] flex items-center justify-center gap-1">
-                                  <span>{day.label}</span>
-                                  {isToday && (
-                                    <span className="text-[10px] px-1.5 py-0.25 rounded-full bg-[var(--g-primary-solid)] text-white">
-                                      اليوم
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="num-ltr text-[11px] font-bold text-[var(--g-muted)] mt-0.5">
-                                  {formatShortDate(dKey)}
-                                </div>
-                              </th>
-                            );
-                          })}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {emps.map((emp) => {
-                          const isMe = emp.id === myEmployeeId;
-                          const canSwapRow =
-                            effectiveCanSwap &&
-                            !isMe &&
-                            myEmployee &&
-                            myEmployee.team_group === emp.team_group &&
-                            myEmployee.effective_day_of_week &&
-                            emp.effective_day_of_week &&
-                            emp.effective_day_of_week !== myEmployee.effective_day_of_week;
+                  <div className="space-y-4">
+                    {groups.map((group) => {
+                      const cov = group.coverageByDay?.[selectedDay] || {
+                        offCount: 0,
+                        onDutyCount: 0,
+                        totalCount: 0,
+                        minRequired: 0,
+                        lowCoverage: false,
+                      };
+                      const offEmps = (group.employees || []).filter(
+                        (e) => e.effective_day_of_week === selectedDay
+                      );
+                      const unassignedEmps = (group.employees || []).filter(
+                        (e) => !e.effective_day_of_week
+                      );
 
-                          return (
-                            <tr
-                              key={emp.id}
-                              className={`border-b border-[var(--g-border)]/70 transition-colors ${
-                                isMe
-                                  ? 'bg-[var(--g-primary-container)]/18'
-                                  : 'hover:bg-[var(--g-surface-variant)]/35'
-                              }`}
-                            >
-                              {/* Employee Info + Admin Group Selector / Cashier Swap Trigger */}
-                              <td className="p-3 align-middle">
-                                <div className="flex items-center justify-between gap-2">
+                      return (
+                        <GroupedList
+                          key={group.id}
+                          label={group.label}
+                          count={`${cov.onDutyCount}/${cov.totalCount}`}
+                          actions={
+                            cov.lowCoverage ? (
+                              <StatusDot
+                                tone="warning"
+                                label={`أقل من ${cov.minRequired}`}
+                                tintedText
+                              />
+                            ) : null
+                          }
+                        >
+                          {offEmps.length === 0 ? (
+                            <div className="px-3.5 py-3 text-xs text-ink-muted">
+                              لا إجازات
+                            </div>
+                          ) : (
+                            offEmps.map((emp) => {
+                              const isMe = emp.id === myEmployeeId;
+                              const canSwapThis =
+                                effectiveCanSwap &&
+                                !isMe &&
+                                myEmployee &&
+                                myEmployee.team_group === emp.team_group &&
+                                myEmployee.effective_day_of_week &&
+                                emp.effective_day_of_week !== myEmployee.effective_day_of_week;
+
+                              return (
+                                <div
+                                  key={emp.id}
+                                  className={`min-h-[52px] px-3.5 py-2 flex items-center justify-between gap-2 ${
+                                    isMe ? 'bg-surface-tint' : ''
+                                  }`}
+                                >
                                   <div className="flex items-center gap-2.5 min-w-0">
-                                    <span
-                                      style={{ backgroundColor: emp.avatar_color || '#0B57D0' }}
-                                      className="w-9 h-9 rounded-xl text-white text-xs font-black flex items-center justify-center shrink-0"
-                                    >
-                                      {getInitials(emp.name)}
-                                    </span>
+                                    <RoleAvatar
+                                      src={emp.avatar_url || ''}
+                                      name={emp.name}
+                                      color={emp.avatar_color || 'var(--g-primary-solid)'}
+                                      preset="initials_gradient"
+                                      size="xs"
+                                      shape="circle"
+                                    />
                                     <div className="min-w-0">
-                                      <div className="flex items-center gap-1.5 flex-wrap">
-                                        <span className="text-sm font-black text-[var(--g-text)] truncate">
-                                          {emp.name}
-                                        </span>
-                                        {isMe && <Badge tone="primary">أنت</Badge>}
+                                      <div className="text-xs sm:text-sm font-medium text-ink truncate">
+                                        {emp.name}
+                                        {isMe && (
+                                          <span className="text-primary"> · أنت</span>
+                                        )}
                                         {emp.is_override && (
-                                          <Badge tone="orange">تعديل أسبوعي</Badge>
+                                          <span className="text-warning"> · معدل</span>
                                         )}
                                       </div>
-                                      <div className="text-[11px] font-semibold text-[var(--g-muted)] truncate">
+                                      <div className="text-xs text-ink-muted truncate">
                                         {emp.department}
-                                        {emp.role_title ? ` • ${emp.role_title}` : ''}
                                       </div>
                                     </div>
                                   </div>
 
-                                  <div className="flex items-center gap-1.5 shrink-0">
-                                    {canSwapRow && (
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    {canSwapThis && (
                                       <Button
-                                        variant="tonal"
+                                        variant="ghost"
                                         size="sm"
-                                        icon="swap_horiz"
                                         disabled={isOfflineReadOnly}
                                         onClick={() =>
                                           openSwapComposer({
@@ -1899,224 +1360,573 @@ export default function ScheduleView({
                                       </Button>
                                     )}
                                     {effectiveCanManage && (
-                                      <select
-                                        aria-label={`فريق ${emp.name}`}
-                                        value={emp.team_group}
-                                        disabled={busyAction || isOfflineReadOnly}
-                                        onChange={(e) =>
-                                          handleTeamGroupQuickChange(emp, e.target.value)
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        disabled={isOfflineReadOnly}
+                                        onClick={() =>
+                                          setEditingEmployee({
+                                            emp,
+                                            dayOfWeek: emp.effective_day_of_week || '',
+                                            teamGroup: emp.team_group,
+                                            scope: editScope,
+                                          })
                                         }
-                                        className="bg-[var(--g-surface-variant)] border border-[var(--g-border)] rounded-xl px-2 py-1 text-[11px] font-extrabold text-[var(--g-text)] outline-none focus:border-[var(--g-primary)]"
                                       >
-                                        {SCHEDULE_TEAM_GROUPS.map((tg) => (
-                                          <option key={tg.id} value={tg.id}>
-                                            {tg.label}
-                                          </option>
-                                        ))}
-                                      </select>
+                                        تعديل
+                                      </Button>
                                     )}
                                   </div>
                                 </div>
-                              </td>
+                              );
+                            })
+                          )}
 
-                              {/* 7 Day Cells (Sat..Fri) */}
+                          {effectiveCanManage && unassignedEmps.length > 0 && (
+                            <div className="px-3.5 py-2.5 flex flex-wrap items-center gap-1.5">
+                              <span className="text-[11px] font-medium text-ink-muted">
+                                بدون يوم:
+                              </span>
+                              {unassignedEmps.map((emp) => (
+                                <button
+                                  key={emp.id}
+                                  type="button"
+                                  disabled={isOfflineReadOnly}
+                                  onClick={() =>
+                                    setEditingEmployee({
+                                      emp,
+                                      dayOfWeek: selectedDay,
+                                      teamGroup: emp.team_group,
+                                      scope: editScope,
+                                    })
+                                  }
+                                  className="min-h-[36px] px-2.5 py-1 rounded-[var(--g-radius-btn)] border border-dashed border-line-strong text-xs font-medium text-primary cursor-pointer"
+                                >
+                                  + {emp.name}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </GroupedList>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {groups.length > 1 && (
+                  <FilterChipRail
+                    activeId={mobileGroupFilter}
+                    onSelect={setMobileGroupFilter}
+                    items={[
+                      { id: 'all', label: 'الكل', count: allVisibleEmployees.length },
+                      ...groups.map((g) => ({
+                        id: g.id,
+                        label: g.shortLabel || g.label,
+                        count: (g.employees || []).length,
+                      })),
+                    ]}
+                  />
+                )}
+
+                {filteredMobileGroups.map((group) => (
+                  <GroupedList
+                    key={group.id}
+                    label={group.label}
+                    count={(group.employees || []).length}
+                  >
+                    {(group.employees || []).length === 0 ? (
+                      <div className="px-3.5 py-3 text-xs text-ink-muted">
+                        لا يوجد موظفون
+                      </div>
+                    ) : (
+                      (group.employees || []).map((emp) => {
+                        const isMe = emp.id === myEmployeeId;
+                        const offLabel = emp.effective_day_of_week
+                          ? getScheduleWeekdayLabel(emp.effective_day_of_week)
+                          : 'غير محدد';
+                        const offDateShort = emp.effective_day_of_week
+                          ? formatShortDate(weekDates[emp.effective_day_of_week])
+                          : '';
+                        const canSwapThis =
+                          effectiveCanSwap &&
+                          !isMe &&
+                          myEmployee &&
+                          myEmployee.team_group === emp.team_group &&
+                          emp.effective_day_of_week &&
+                          myEmployee.effective_day_of_week &&
+                          emp.effective_day_of_week !== myEmployee.effective_day_of_week;
+
+                        return (
+                          <div
+                            key={emp.id}
+                            className={`min-h-[54px] px-3.5 py-2.5 flex items-center justify-between gap-2 ${
+                              isMe ? 'bg-surface-tint' : ''
+                            }`}
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <RoleAvatar
+                                src={emp.avatar_url || ''}
+                                name={emp.name}
+                                color={emp.avatar_color || 'var(--g-primary-solid)'}
+                                preset="initials_gradient"
+                                size="sm"
+                                shape="circle"
+                              />
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium text-ink truncate">
+                                  {emp.name}
+                                  {isMe && <span className="text-primary"> · أنت</span>}
+                                </div>
+                                <div className="text-xs text-ink-muted truncate">
+                                  {offLabel}
+                                  {offDateShort ? ` (${offDateShort})` : ''}
+                                  {emp.is_override ? ' · معدل' : ''}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1 shrink-0">
+                              {canSwapThis && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  disabled={isOfflineReadOnly}
+                                  onClick={() =>
+                                    openSwapComposer({
+                                      preselectedTargetId: emp.id,
+                                      preferredType: 'swap',
+                                    })
+                                  }
+                                >
+                                  تبديل
+                                </Button>
+                              )}
+                              {effectiveCanManage && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  disabled={isOfflineReadOnly}
+                                  onClick={() =>
+                                    setEditingEmployee({
+                                      emp,
+                                      dayOfWeek: emp.effective_day_of_week || '',
+                                      teamGroup: emp.team_group,
+                                      scope: editScope,
+                                    })
+                                  }
+                                >
+                                  تعديل
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </GroupedList>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 7. Desktop Matrix Tables (md+) */}
+          <div className="hidden md:block space-y-6">
+            {groups.length === 0 ? (
+              <EmptyState compact title="لا توجد فرق مسجلة" />
+            ) : (
+              groups.map((group) => {
+                const emps = group.employees || [];
+                const minRequired =
+                  group.coverageByDay?.sat?.minRequired ??
+                  scheduleData?.settings?.minOnDuty?.[group.id] ??
+                  0;
+
+                return (
+                  <Card key={group.id} padding="none" className="overflow-hidden">
+                    <div className="px-4 py-3 flex items-center justify-between gap-3 border-b border-line">
+                      <div className="flex items-baseline gap-2.5">
+                        <h3 className="text-sm font-semibold text-ink m-0">{group.label}</h3>
+                        <span className="text-xs text-ink-muted num-ltr">
+                          {emps.length} موظف · حد أدنى {minRequired}
+                        </span>
+                      </div>
+
+                      {effectiveCanSwap && myEmployee?.team_group === group.id && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={isOfflineReadOnly}
+                          onClick={() => openSwapComposer({ preferredType: 'swap' })}
+                        >
+                          + تبديل
+                        </Button>
+                      )}
+                    </div>
+
+                    {emps.length === 0 ? (
+                      <div className="p-6 text-center text-xs text-ink-muted">
+                        لا يوجد موظفون
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full border-collapse text-start">
+                          <thead>
+                            <tr className="border-b border-line">
+                              <th className="sticky start-0 z-10 bg-surface p-3 text-xs font-semibold text-ink-muted min-w-[210px]">
+                                الموظف
+                              </th>
                               {SCHEDULE_WEEKDAYS.map((day) => {
-                                const isOff = emp.effective_day_of_week === day.code;
-                                const isToday = weekDates[day.code] === todayDateKey;
+                                const dKey = weekDates[day.code] || '';
+                                const isToday = dKey === todayDateKey;
+                                return (
+                                  <th
+                                    key={day.code}
+                                    className={`p-2.5 text-center min-w-[88px] border-s border-line ${
+                                      isToday ? 'bg-surface-tint' : ''
+                                    }`}
+                                  >
+                                    <div
+                                      className={`text-xs font-semibold ${
+                                        isToday ? 'text-primary' : 'text-ink'
+                                      }`}
+                                    >
+                                      {day.label}
+                                    </div>
+                                    <div className="num-ltr text-[11px] font-normal text-ink-muted mt-0.5">
+                                      {formatShortDate(dKey)}
+                                    </div>
+                                  </th>
+                                );
+                              })}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {emps.map((emp) => {
+                              const isMe = emp.id === myEmployeeId;
+                              const canSwapRow =
+                                effectiveCanSwap &&
+                                !isMe &&
+                                myEmployee &&
+                                myEmployee.team_group === emp.team_group &&
+                                myEmployee.effective_day_of_week &&
+                                emp.effective_day_of_week &&
+                                emp.effective_day_of_week !== myEmployee.effective_day_of_week;
 
+                              return (
+                                <tr
+                                  key={emp.id}
+                                  className={`border-b border-line transition-[background-color] duration-150 ${
+                                    isMe ? 'bg-surface-tint' : 'hover:bg-surface-tint'
+                                  }`}
+                                >
+                                  <td className="sticky start-0 z-10 bg-surface p-3 align-middle">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <div className="flex items-center gap-2.5 min-w-0">
+                                        <RoleAvatar
+                                          src={emp.avatar_url || ''}
+                                          name={emp.name}
+                                          color={emp.avatar_color || 'var(--g-primary-solid)'}
+                                          preset="initials_gradient"
+                                          size="xs"
+                                          shape="circle"
+                                        />
+                                        <div className="min-w-0">
+                                          <div className="text-xs sm:text-sm font-medium text-ink truncate">
+                                            {emp.name}
+                                            {isMe && (
+                                              <span className="text-primary"> · أنت</span>
+                                            )}
+                                            {emp.is_override && (
+                                              <span className="text-warning"> · معدل</span>
+                                            )}
+                                          </div>
+                                          <div className="text-[11px] text-ink-muted truncate">
+                                            {emp.department}
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      <div className="flex items-center gap-1 shrink-0">
+                                        {canSwapRow && (
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            disabled={isOfflineReadOnly}
+                                            onClick={() =>
+                                              openSwapComposer({
+                                                preselectedTargetId: emp.id,
+                                                preferredType: 'swap',
+                                              })
+                                            }
+                                          >
+                                            تبديل
+                                          </Button>
+                                        )}
+                                        {effectiveCanManage && (
+                                          <select
+                                            aria-label={`فريق ${emp.name}`}
+                                            value={emp.team_group}
+                                            disabled={busyAction || isOfflineReadOnly}
+                                            onChange={(e) =>
+                                              handleTeamGroupQuickChange(emp, e.target.value)
+                                            }
+                                            className="min-h-[36px] bg-transparent border border-line rounded-[var(--g-radius-btn)] px-2 py-1 text-[11px] font-medium text-ink outline-none focus:border-[var(--g-primary)]"
+                                          >
+                                            {SCHEDULE_TEAM_GROUPS.map((tg) => (
+                                              <option key={tg.id} value={tg.id}>
+                                                {tg.shortLabel || tg.label}
+                                              </option>
+                                            ))}
+                                          </select>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </td>
+
+                                  {SCHEDULE_WEEKDAYS.map((day) => {
+                                    const isOff = emp.effective_day_of_week === day.code;
+                                    const isToday = weekDates[day.code] === todayDateKey;
+
+                                    return (
+                                      <td
+                                        key={day.code}
+                                        className={`p-1.5 text-center align-middle border-s border-line ${
+                                          isToday ? 'bg-surface-tint' : ''
+                                        }`}
+                                      >
+                                        {effectiveCanManage ? (
+                                          <button
+                                            type="button"
+                                            disabled={busyAction || isOfflineReadOnly}
+                                            onClick={() => {
+                                              if (isOff) {
+                                                setEditingEmployee({
+                                                  emp,
+                                                  dayOfWeek: emp.effective_day_of_week || '',
+                                                  teamGroup: emp.team_group,
+                                                  scope: editScope,
+                                                });
+                                              } else {
+                                                handleAssignDayOff(emp, day.code);
+                                              }
+                                            }}
+                                            className={`w-full min-h-[40px] px-2 py-1 rounded-[var(--g-radius-btn)] text-xs font-medium inline-flex items-center justify-center transition-[background-color,color] duration-150 cursor-pointer disabled:opacity-50 ${
+                                              isOff
+                                                ? 'bg-secondary-container text-on-secondary-container font-semibold'
+                                                : 'text-ink-muted hover:bg-surface-2 hover:text-ink'
+                                            }`}
+                                          >
+                                            {isOff ? 'إجازة' : '—'}
+                                          </button>
+                                        ) : isOff ? (
+                                          <span className="inline-flex items-center justify-center px-2.5 py-1 rounded-[var(--g-radius-btn)] bg-secondary-container text-on-secondary-container text-xs font-semibold">
+                                            إجازة
+                                          </span>
+                                        ) : (
+                                          <span className="text-xs text-ink-muted">—</span>
+                                        )}
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                          <tfoot>
+                            <tr>
+                              <td className="sticky start-0 z-10 bg-surface p-3 text-xs font-semibold text-ink-muted">
+                                التغطية
+                              </td>
+                              {SCHEDULE_WEEKDAYS.map((day) => {
+                                const cov = group.coverageByDay?.[day.code] || {
+                                  offCount: 0,
+                                  onDutyCount: 0,
+                                  lowCoverage: false,
+                                };
                                 return (
                                   <td
                                     key={day.code}
-                                    className={`p-2 text-center align-middle border-r border-[var(--g-border)]/70 ${
-                                      isToday ? 'bg-[var(--g-primary-container)]/18' : ''
+                                    className={`p-2 text-center border-s border-line num-ltr text-xs ${
+                                      cov.lowCoverage
+                                        ? 'text-warning font-semibold'
+                                        : 'text-ink-muted'
                                     }`}
                                   >
-                                    {effectiveCanManage ? (
-                                      <button
-                                        type="button"
-                                        disabled={busyAction || isOfflineReadOnly}
-                                        onClick={() => {
-                                          if (isOff) {
-                                            setEditingEmployee({
-                                              emp,
-                                              dayOfWeek: emp.effective_day_of_week || '',
-                                              teamGroup: emp.team_group,
-                                              scope: editScope,
-                                            });
-                                          } else {
-                                            handleAssignDayOff(emp, day.code);
-                                          }
-                                        }}
-                                        title={
-                                          isOff
-                                            ? `تعديل إجازة ${emp.name}`
-                                            : `تعيين ${day.label} إجازة لـ ${emp.name}`
-                                        }
-                                        className={`w-full min-h-[40px] px-2 py-1.5 rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1 transition-all cursor-pointer active:scale-95 disabled:opacity-50 ${
-                                          isOff
-                                            ? `${style.offPill} shadow-2xs`
-                                            : 'text-[var(--g-muted)] hover:bg-[var(--g-surface-variant)] hover:text-[var(--g-text)] border border-transparent hover:border-[var(--g-border)]'
-                                        }`}
-                                      >
-                                        {isOff ? (
-                                          <>
-                                            <span className="ms-icon filled text-sm">
-                                              event_available
-                                            </span>
-                                            <span>إجازة</span>
-                                          </>
-                                        ) : (
-                                          <span>—</span>
-                                        )}
-                                      </button>
-                                    ) : isOff ? (
-                                      <span
-                                        className={`w-full min-h-[38px] px-2 py-1.5 rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1 ${style.offPill}`}
-                                      >
-                                        <span className="ms-icon filled text-sm">
-                                          event_available
-                                        </span>
-                                        <span>إجازة</span>
-                                      </span>
-                                    ) : (
-                                      <span className="text-xs font-semibold text-[var(--g-muted)]">
-                                        دوام
-                                      </span>
-                                    )}
+                                    {cov.onDutyCount}/{cov.onDutyCount + cov.offCount}
                                   </td>
                                 );
                               })}
                             </tr>
-                          );
-                        })}
-                      </tbody>
-                      {/* Coverage Summary Footer Row */}
-                      <tfoot>
-                        <tr className="bg-[var(--g-surface-variant)]/55">
-                          <td className="p-3 text-xs font-black text-[var(--g-text)]">
-                            ملخص التغطية اليومية
-                          </td>
-                          {SCHEDULE_WEEKDAYS.map((day) => {
-                            const cov = group.coverageByDay?.[day.code] || {
-                              offCount: 0,
-                              onDutyCount: 0,
-                              lowCoverage: false,
-                            };
-                            return (
-                              <td
-                                key={day.code}
-                                className={`p-2 text-center border-r border-[var(--g-border)]/70 ${
-                                  cov.lowCoverage ? 'bg-[var(--g-yellow-bg)]/55' : ''
-                                }`}
-                              >
-                                <div className="text-[11px] font-black text-[var(--g-text)] num-ltr">
-                                  {cov.offCount} إجازة • {cov.onDutyCount} دوام
-                                </div>
-                                {cov.lowCoverage && (
-                                  <div className="mt-1">
-                                    <Badge tone="warning" icon="warning">
-                                      تغطية منخفضة
-                                    </Badge>
-                                  </div>
-                                )}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      </tfoot>
-                    </table>
-                  </div>
-                )}
-              </Card>
-            );
-          })
-        )}
-      </div>
+                          </tfoot>
+                        </table>
+                      </div>
+                    )}
+                  </Card>
+                );
+              })
+            )}
+          </div>
+        </>
+      )}
 
-      {/* 6. Admin Settings BottomSheet (NO peak-day locking UI) */}
+      {/* 7b. Mobile Schedule Actions BottomSheet */}
+      <BottomSheet
+        open={actionsSheetOpen}
+        onClose={() => setActionsSheetOpen(false)}
+        title="خيارات الجدول"
+        subtitle={dateRangeLabel}
+        maxWidth="max-w-md"
+      >
+        <div className="space-y-4">
+          {effectiveCanManage && (
+            <>
+              <div className="space-y-1.5">
+                <span className="block text-xs font-medium text-ink-muted">
+                  نطاق التعديل
+                </span>
+                <SegmentedControl
+                  fullWidth
+                  ariaLabel="نطاق التعديل"
+                  value={editScope}
+                  onChange={setEditScope}
+                  options={[
+                    { id: 'week', label: 'هذا الأسبوع' },
+                    { id: 'default', label: 'الثابت' },
+                  ]}
+                />
+              </div>
+
+              <GroupedList label="إدارة الجدول">
+                <GroupedRow
+                  onClick={() => {
+                    setActionsSheetOpen(false);
+                    setSettingsOpen(true);
+                  }}
+                >
+                  <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                    <Icon name="tune" size={19} className="text-ink-muted" />
+                    <span>إعدادات الجدول</span>
+                  </span>
+                  <Icon
+                    name="chevron_left"
+                    size={18}
+                    className="text-ink-muted ltr:rotate-180"
+                  />
+                </GroupedRow>
+
+                <GroupedRow
+                  onClick={() => {
+                    if (busyAction || isOfflineReadOnly) return;
+                    setActionsSheetOpen(false);
+                    setConfirmBulkAction('copy_previous_week');
+                  }}
+                >
+                  <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                    <Icon name="content_copy" size={19} className="text-ink-muted" />
+                    <span>نسخ الأسبوع السابق</span>
+                  </span>
+                  <Icon
+                    name="chevron_left"
+                    size={18}
+                    className="text-ink-muted ltr:rotate-180"
+                  />
+                </GroupedRow>
+
+                <GroupedRow
+                  onClick={() => {
+                    if (busyAction || isOfflineReadOnly) return;
+                    setActionsSheetOpen(false);
+                    setConfirmBulkAction('reset_to_defaults');
+                  }}
+                >
+                  <span className="flex items-center gap-2.5 text-sm font-medium text-danger">
+                    <Icon name="restart_alt" size={19} className="text-danger" />
+                    <span>إعادة للجدول الثابت</span>
+                  </span>
+                  <Icon
+                    name="chevron_left"
+                    size={18}
+                    className="text-ink-muted ltr:rotate-180"
+                  />
+                </GroupedRow>
+              </GroupedList>
+            </>
+          )}
+
+          {(canExport || effectiveCanManage) && (
+            <GroupedList label="تصدير ومشاركة">
+              <GroupedRow
+                onClick={() => {
+                  setActionsSheetOpen(false);
+                  const text = formatWeeklyScheduleWhatsApp(scheduleData, storeName);
+                  if (text) openWhatsAppShare(text);
+                }}
+              >
+                <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                  <Icon name="send" size={19} className="text-[var(--g-whatsapp)]" />
+                  <span>واتساب</span>
+                </span>
+                <Icon
+                  name="chevron_left"
+                  size={18}
+                  className="text-ink-muted ltr:rotate-180"
+                />
+              </GroupedRow>
+
+              <GroupedRow
+                onClick={() => {
+                  setActionsSheetOpen(false);
+                  exportWeeklyScheduleToWord(scheduleData, storeName);
+                  onToast?.('تم تصدير Word');
+                }}
+              >
+                <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                  <Icon name="description" size={19} className="text-primary" />
+                  <span>Word (.doc)</span>
+                </span>
+                <Icon
+                  name="download"
+                  size={18}
+                  className="text-ink-muted opacity-70"
+                />
+              </GroupedRow>
+
+              <GroupedRow
+                onClick={async () => {
+                  setActionsSheetOpen(false);
+                  try {
+                    await exportWeeklyScheduleToCsv(scheduleData, storeName);
+                    onToast?.('تم تصدير Excel');
+                  } catch (err) {
+                    onToast?.(err?.message || 'تعذر تصدير Excel', 'error');
+                  }
+                }}
+              >
+                <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                  <Icon name="table_view" size={19} className="text-success" />
+                  <span>Excel (.xlsx)</span>
+                </span>
+                <Icon
+                  name="download"
+                  size={18}
+                  className="text-ink-muted opacity-70"
+                />
+              </GroupedRow>
+            </GroupedList>
+          )}
+        </div>
+      </BottomSheet>
+
+      {/* 8. Settings BottomSheet */}
       <BottomSheet
         open={settingsOpen}
         onClose={() => !busyAction && setSettingsOpen(false)}
-        title="إعدادات جدول الإجازات"
-        subtitle="التحكم في قواعد اعتماد التبديلات والحد الأدنى للتغطية اليومية"
-        icon="tune"
+        title="إعدادات الجدول"
         maxWidth="max-w-md"
-      >
-        <form onSubmit={handleSaveSettings} className="space-y-4">
-          <label className="p-3.5 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] flex items-start gap-3 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={Boolean(settingsForm.swapRequiresManagerApproval)}
-              onChange={(e) =>
-                setSettingsForm((prev) => ({
-                  ...prev,
-                  swapRequiresManagerApproval: e.target.checked,
-                }))
-              }
-              className="w-5 h-5 mt-0.5 accent-[var(--g-primary-solid)] shrink-0"
-            />
-            <div className="space-y-0.5">
-              <div className="text-sm font-black text-[var(--g-text)]">
-                تفعيل اعتماد المدير النهائي بعد موافقة الكاشيرين
-              </div>
-              <p className="text-xs font-medium text-[var(--g-muted)] m-0 leading-relaxed">
-                عند التفعيل، تمر طلبات التبديل بين الزملاء بموافقة الإدارة بعد موافقة الكاشيرين. عند
-                الإيقاف، يتم تطبيق التبديل تلقائياً بمجرد موافقة الكاشيرين (الترحيل ليوم آخر يتطلب
-                موافقة الإدارة دائماً).
-              </p>
-            </div>
-          </label>
-
-          <div className="space-y-2.5">
-            <div className="text-xs font-black text-[var(--g-muted)]">
-              الحد الأدنى للموظفين المتواجدين يومياً (لتنبيهات التغطية المنخفضة):
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-              {SCHEDULE_TEAM_GROUPS.map((grp) => (
-                <div
-                  key={grp.id}
-                  className="p-3 rounded-2xl bg-[var(--g-surface-variant)]/70 border border-[var(--g-border)] space-y-1.5"
-                >
-                  <label
-                    htmlFor={`min-onduty-${grp.id}`}
-                    className="block text-xs font-black text-[var(--g-text)]"
-                  >
-                    {grp.label}
-                  </label>
-                  <input
-                    id={`min-onduty-${grp.id}`}
-                    type="number"
-                    min="0"
-                    max="99"
-                    value={settingsForm.minOnDuty[grp.id] ?? 0}
-                    onChange={(e) =>
-                      setSettingsForm((prev) => ({
-                        ...prev,
-                        minOnDuty: {
-                          ...prev.minOnDuty,
-                          [grp.id]: Math.max(0, Number(e.target.value) || 0),
-                        },
-                      }))
-                    }
-                    className="g-input num-ltr text-center font-black py-2"
-                  />
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 pt-1">
-            <Button
-              type="submit"
-              variant="primary"
-              fullWidth
-              loading={busyAction}
-              disabled={isOfflineReadOnly}
-              icon="save"
-            >
-              حفظ الإعدادات
-            </Button>
+        footer={
+          <div className="flex items-center gap-2">
             <Button
               type="button"
               variant="secondary"
@@ -2125,159 +1935,134 @@ export default function ScheduleView({
             >
               إلغاء
             </Button>
+            <Button
+              type="submit"
+              form="schedule-settings-form"
+              variant="primary"
+              fullWidth
+              loading={busyAction}
+              disabled={isOfflineReadOnly}
+            >
+              حفظ
+            </Button>
           </div>
+        }
+      >
+        <form id="schedule-settings-form" onSubmit={handleSaveSettings} className="space-y-4">
+          <div className="border-y border-line">
+            <ToggleSwitch
+              checked={Boolean(settingsForm.swapRequiresManagerApproval)}
+              onChange={(val) =>
+                setSettingsForm((prev) => ({
+                  ...prev,
+                  swapRequiresManagerApproval: val,
+                }))
+              }
+              label="اعتماد المدير للتبديل"
+            />
+          </div>
+
+          <GroupedList label="الحد الأدنى اليومي">
+            {SCHEDULE_TEAM_GROUPS.map((grp) => {
+              const count = Number(settingsForm.minOnDuty[grp.id] ?? 0);
+              return (
+                <div
+                  key={grp.id}
+                  className="min-h-[54px] px-3.5 py-2 flex items-center justify-between gap-3"
+                >
+                  <span className="text-sm font-medium text-ink min-w-0 truncate">
+                    {grp.label}
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      disabled={busyAction || isOfflineReadOnly || count <= 0}
+                      aria-label={`تقليل ${grp.label}`}
+                      onClick={() =>
+                        setSettingsForm((prev) => ({
+                          ...prev,
+                          minOnDuty: {
+                            ...prev.minOnDuty,
+                            [grp.id]: Math.max(0, Number(prev.minOnDuty[grp.id] ?? 0) - 1),
+                          },
+                        }))
+                      }
+                      className="w-11 h-11 rounded-[var(--g-radius-btn)] bg-surface-2 border border-line text-ink hover:border-line-strong disabled:opacity-40 inline-flex items-center justify-center cursor-pointer transition-colors duration-150"
+                    >
+                      <Icon name="remove" size={18} />
+                    </button>
+                    <span
+                      className="min-w-[2.25rem] text-center num-ltr text-base font-semibold text-ink"
+                      aria-live="polite"
+                    >
+                      {count}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={busyAction || isOfflineReadOnly || count >= 99}
+                      aria-label={`زيادة ${grp.label}`}
+                      onClick={() =>
+                        setSettingsForm((prev) => ({
+                          ...prev,
+                          minOnDuty: {
+                            ...prev.minOnDuty,
+                            [grp.id]: Math.min(99, Number(prev.minOnDuty[grp.id] ?? 0) + 1),
+                          },
+                        }))
+                      }
+                      className="w-11 h-11 rounded-[var(--g-radius-btn)] bg-surface-2 border border-line text-ink hover:border-line-strong disabled:opacity-40 inline-flex items-center justify-center cursor-pointer transition-colors duration-150"
+                    >
+                      <Icon name="add" size={18} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </GroupedList>
         </form>
       </BottomSheet>
 
-      {/* 7. Admin Bulk Action Confirmation BottomSheet */}
-      <BottomSheet
+      {/* 9. Bulk Action ConfirmSheet */}
+      <ConfirmSheet
         open={Boolean(confirmBulkAction)}
         onClose={() => !busyAction && setConfirmBulkAction(null)}
+        onConfirm={handleBulkActionConfirm}
+        loading={busyAction}
+        tone={confirmBulkAction === 'reset_to_defaults' ? 'danger' : 'warning'}
         title={
           confirmBulkAction === 'copy_previous_week'
-            ? 'نسخ جدول الأسبوع السابق'
-            : 'إعادة تعيين للجدول الثابت'
+            ? 'نسخ الأسبوع السابق'
+            : 'إعادة للجدول الثابت'
         }
-        subtitle={`الأسبوع المستهدف: ${resolvedWeekStart}`}
-        icon={confirmBulkAction === 'copy_previous_week' ? 'content_copy' : 'restart_alt'}
-        maxWidth="max-w-md"
-      >
-        <div className="space-y-4">
-          <p className="text-xs sm:text-sm font-semibold text-[var(--g-muted)] m-0 leading-relaxed">
-            {confirmBulkAction === 'copy_previous_week'
-              ? 'سيتم نسخ أيام الإجازة المعتمدة في الأسبوع السابق وتطبيقها على هذا الأسبوع كإجازات أسبوعية.'
-              : 'سيتم حذف جميع التعديلات الاستثنائية لهذا الأسبوع والعودة للجدول الثابت المتكرر لكل موظف، وإلغاء الطلبات المعلقة في هذا الأسبوع.'}
-          </p>
+        description={
+          confirmBulkAction === 'copy_previous_week'
+            ? `نسخ إجازات الأسبوع السابق إلى أسبوع ${resolvedWeekStart}؟`
+            : `إعادة أسبوع ${resolvedWeekStart} للجدول الثابت وإلغاء الطلبات المعلقة؟`
+        }
+        confirmLabel="تأكيد"
+      />
 
-          <div className="flex items-center gap-2">
-            <Button
-              variant={confirmBulkAction === 'reset_to_defaults' ? 'danger' : 'primary'}
-              fullWidth
-              loading={busyAction}
-              icon="check_circle"
-              onClick={handleBulkActionConfirm}
-            >
-              تأكيد التنفيذ
-            </Button>
-            <Button
-              variant="secondary"
-              disabled={busyAction}
-              onClick={() => setConfirmBulkAction(null)}
-            >
-              إلغاء
-            </Button>
-          </div>
-        </div>
-      </BottomSheet>
-
-      {/* 8. Admin Quick-Edit Employee Day & Group BottomSheet */}
+      {/* 10. Quick-Edit Employee Day & Group BottomSheet */}
       <BottomSheet
         open={Boolean(editingEmployee)}
         onClose={() => !busyAction && setEditingEmployee(null)}
-        title={editingEmployee ? `تعديل إجازة: ${editingEmployee.emp.name}` : ''}
+        title={editingEmployee?.emp?.name || ''}
         subtitle={editingEmployee?.emp?.department || ''}
-        icon="edit_calendar"
         maxWidth="max-w-md"
-      >
-        {editingEmployee && (
-          <div className="space-y-4">
-            {/* Scope Toggle */}
-            <div className="space-y-1.5">
-              <div className="text-xs font-black text-[var(--g-muted)]">نطاق التعديل:</div>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setEditingEmployee((s) => ({ ...s, scope: 'week' }))}
-                  className={`min-h-[42px] px-3 py-2 rounded-xl text-xs font-extrabold border transition-all ${
-                    editingEmployee.scope === 'week'
-                      ? 'bg-[var(--g-primary-solid)] text-white border-transparent'
-                      : 'bg-[var(--g-surface-variant)] text-[var(--g-text)] border-[var(--g-border)]'
-                  }`}
-                >
-                  لهذا الأسبوع فقط
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setEditingEmployee((s) => ({ ...s, scope: 'default' }))}
-                  className={`min-h-[42px] px-3 py-2 rounded-xl text-xs font-extrabold border transition-all ${
-                    editingEmployee.scope === 'default'
-                      ? 'bg-[var(--g-purple)] text-white border-transparent'
-                      : 'bg-[var(--g-surface-variant)] text-[var(--g-text)] border-[var(--g-border)]'
-                  }`}
-                >
-                  الجدول الثابت المتكرر
-                </button>
-              </div>
-            </div>
-
-            {/* Team Group Picker */}
-            <div className="space-y-1.5">
-              <div className="text-xs font-black text-[var(--g-muted)]">الفريق / المجموعة:</div>
-              <div className="grid grid-cols-3 gap-1.5">
-                {SCHEDULE_TEAM_GROUPS.map((tg) => (
-                  <button
-                    key={tg.id}
-                    type="button"
-                    onClick={() => setEditingEmployee((s) => ({ ...s, teamGroup: tg.id }))}
-                    className={`min-h-[44px] px-2 py-2 rounded-xl text-[11px] font-extrabold border flex flex-col items-center justify-center gap-1 transition-all ${
-                      editingEmployee.teamGroup === tg.id
-                        ? 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] border-[var(--g-primary)]'
-                        : 'bg-[var(--g-surface-variant)] text-[var(--g-text)] border-[var(--g-border)]'
-                    }`}
-                  >
-                    <span className="ms-icon text-base">{tg.icon}</span>
-                    <span>{tg.label}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Day-of-Week Picker */}
-            <div className="space-y-1.5">
-              <div className="text-xs font-black text-[var(--g-muted)]">يوم الإجازة:</div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-                {SCHEDULE_WEEKDAYS.map((day) => {
-                  const active = editingEmployee.dayOfWeek === day.code;
-                  return (
-                    <button
-                      key={day.code}
-                      type="button"
-                      onClick={() => setEditingEmployee((s) => ({ ...s, dayOfWeek: day.code }))}
-                      className={`min-h-[44px] px-2.5 py-2 rounded-xl text-xs font-extrabold border transition-all ${
-                        active
-                          ? 'bg-[var(--g-primary-solid)] text-white border-transparent'
-                          : 'bg-[var(--g-surface-variant)] text-[var(--g-text)] border-[var(--g-border)]'
-                      }`}
-                    >
-                      <div>{day.label}</div>
-                      <div className="num-ltr text-[10px] opacity-80">
-                        {formatShortDate(weekDates[day.code])}
-                      </div>
-                    </button>
-                  );
-                })}
-                <button
-                  type="button"
-                  onClick={() => setEditingEmployee((s) => ({ ...s, dayOfWeek: '' }))}
-                  className={`min-h-[44px] px-2.5 py-2 rounded-xl text-xs font-extrabold border transition-all ${
-                    editingEmployee.dayOfWeek === ''
-                      ? 'bg-[var(--g-red-bg)] text-[var(--g-red)] border-[var(--g-red-border)]'
-                      : 'bg-[var(--g-surface-variant)] text-[var(--g-muted)] border-[var(--g-border)]'
-                  }`}
-                >
-                  {editingEmployee.scope === 'week'
-                    ? 'إلغاء تعديل الأسبوع'
-                    : 'إزالة الإجازة الثابتة'}
-                </button>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2 pt-1">
+        footer={
+          editingEmployee && (
+            <div className="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                disabled={busyAction}
+                onClick={() => setEditingEmployee(null)}
+              >
+                إلغاء
+              </Button>
               <Button
                 variant="primary"
                 fullWidth
                 loading={busyAction}
-                icon="save"
                 onClick={() =>
                   handleAssignDayOff(
                     editingEmployee.emp,
@@ -2287,57 +2072,141 @@ export default function ScheduleView({
                   )
                 }
               >
-                حفظ التعديل
+                حفظ
               </Button>
-              <Button
-                variant="secondary"
-                disabled={busyAction}
-                onClick={() => setEditingEmployee(null)}
-              >
-                إلغاء
-              </Button>
+            </div>
+          )
+        }
+      >
+        {editingEmployee && (
+          <div className="space-y-4">
+            <SegmentedControl
+              fullWidth
+              ariaLabel="نطاق التعديل"
+              value={editingEmployee.scope}
+              onChange={(val) => setEditingEmployee((s) => ({ ...s, scope: val }))}
+              options={[
+                { id: 'week', label: 'هذا الأسبوع' },
+                { id: 'default', label: 'الثابت' },
+              ]}
+            />
+
+            <div className="space-y-1.5">
+              <span className="block text-xs font-medium text-ink-muted">الفريق</span>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+                {SCHEDULE_TEAM_GROUPS.map((tg) => (
+                  <button
+                    key={tg.id}
+                    type="button"
+                    onClick={() => setEditingEmployee((s) => ({ ...s, teamGroup: tg.id }))}
+                    className={`min-h-[42px] px-2 py-1.5 rounded-[var(--g-radius-btn)] text-xs font-medium border transition-[background-color,border-color,color] duration-150 cursor-pointer ${
+                      editingEmployee.teamGroup === tg.id
+                        ? 'bg-secondary-container text-on-secondary-container border-transparent font-semibold'
+                        : 'bg-transparent text-ink border-line hover:border-line-strong'
+                    }`}
+                  >
+                    {tg.shortLabel || tg.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <span className="block text-xs font-medium text-ink-muted">يوم الإجازة</span>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                {SCHEDULE_WEEKDAYS.map((day) => {
+                  const active = editingEmployee.dayOfWeek === day.code;
+                  return (
+                    <button
+                      key={day.code}
+                      type="button"
+                      onClick={() => setEditingEmployee((s) => ({ ...s, dayOfWeek: day.code }))}
+                      className={`min-h-[44px] px-2.5 py-1.5 rounded-[var(--g-radius-btn)] text-xs font-medium border transition-[background-color,border-color,color] duration-150 cursor-pointer ${
+                        active
+                          ? 'bg-primary-solid text-on-primary border-transparent font-semibold'
+                          : 'bg-transparent text-ink border-line hover:border-line-strong'
+                      }`}
+                    >
+                      <div>{day.label}</div>
+                      <div className="num-ltr text-[11px] opacity-80">
+                        {formatShortDate(weekDates[day.code])}
+                      </div>
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  onClick={() => setEditingEmployee((s) => ({ ...s, dayOfWeek: '' }))}
+                  className={`min-h-[44px] px-2.5 py-1.5 rounded-[var(--g-radius-btn)] text-xs font-medium border transition-[background-color,border-color,color] duration-150 cursor-pointer ${
+                    editingEmployee.dayOfWeek === ''
+                      ? 'bg-danger-bg text-danger border-[var(--g-red-border)] font-semibold'
+                      : 'bg-transparent text-ink-muted border-line'
+                  }`}
+                >
+                  بدون يوم
+                </button>
+              </div>
             </div>
           </div>
         )}
       </BottomSheet>
 
-      {/* 9. Swap / Move Composer BottomSheet */}
+      {/* 11. Swap / Move Composer BottomSheet */}
       <BottomSheet
         open={Boolean(swapComposer)}
         onClose={() => !busyAction && setSwapComposer(null)}
-        title="طلب تبديل أو ترحيل إجازة"
+        title="تبديل إجازة"
         subtitle={
           composerContext?.reqEmp
-            ? `${composerContext.reqEmp.name} • إجازتك الحالية: ${
+            ? `${composerContext.reqEmp.name}${
                 composerContext.reqDay
-                  ? `${getScheduleWeekdayLabel(composerContext.reqDay)} (${formatShortDate(
-                      weekDates[composerContext.reqDay]
-                    )})`
-                  : 'غير محددة'
+                  ? ` · ${getScheduleWeekdayLabel(composerContext.reqDay)}`
+                  : ''
               }`
             : ''
         }
-        icon="swap_horiz"
         maxWidth="max-w-lg"
+        footer={
+          swapComposer && composerContext?.reqDay ? (
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={busyAction}
+                onClick={() => setSwapComposer(null)}
+              >
+                إلغاء
+              </Button>
+              <Button
+                type="button"
+                variant="primary"
+                fullWidth
+                loading={busyAction}
+                disabled={!composerContext.canSubmit || isOfflineReadOnly}
+                onClick={handleSubmitSwapComposer}
+              >
+                إرسال الطلب
+              </Button>
+            </div>
+          ) : null
+        }
       >
         {swapComposer && composerContext && (
           <form onSubmit={handleSubmitSwapComposer} className="space-y-4">
-            {/* Manager optional requester switcher */}
             {effectiveCanManage && allVisibleEmployees.length > 1 && (
-              <div className="space-y-1">
-                <label className="block text-xs font-black text-[var(--g-muted)]">
-                  الموظف مقدم الطلب:
+              <div>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  الموظف
                 </label>
                 <select
                   value={swapComposer.requesterId}
-                  onChange={(e) => {
-                    const nextId = e.target.value;
+                  onChange={(e) =>
                     openSwapComposer({
-                      requesterIdOverride: nextId,
+                      requesterIdOverride: e.target.value,
                       preferredType: swapComposer.requestType,
-                    });
-                  }}
-                  className="g-input text-xs font-extrabold py-2"
+                    })
+                  }
+                  className="g-input"
                 >
                   {allVisibleEmployees.map((emp) => (
                     <option key={emp.id} value={emp.id}>
@@ -2352,100 +2221,48 @@ export default function ScheduleView({
             )}
 
             {!composerContext.reqDay ? (
-              <div className="p-3.5 rounded-2xl bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] text-xs font-extrabold flex items-center gap-2">
-                <span className="ms-icon filled text-lg">info</span>
-                <span>
-                  لم يتم تحديد يوم إجازة حالي في هذا الأسبوع — تواصل مع الإدارة لتحديد يوم الإجازة
-                  أولاً.
-                </span>
+              <div className="text-xs font-medium text-warning">
+                لم يتم تحديد يوم إجازة لهذا الموظف بعد.
               </div>
             ) : (
               <>
                 {composerContext.isReqPast && (
-                  <div className="p-3 rounded-2xl bg-[var(--g-red-bg)] text-[var(--g-red)] text-xs font-extrabold flex items-center gap-2">
-                    <span className="ms-icon filled text-lg">event_busy</span>
-                    <span>يوم إجازتك الحالي في هذا الأسبوع قد مضى — لا يمكن تبديله.</span>
+                  <div className="text-xs font-medium text-danger">
+                    يوم الإجازة الحالي قد مضى.
                   </div>
                 )}
 
-                {/* Request Type Segmented Selector */}
-                <div className="space-y-1.5">
-                  <div className="text-xs font-black text-[var(--g-muted)]">نوع الطلب:</div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setSwapComposer((prev) => ({ ...prev, requestType: 'swap' }))
-                      }
-                      className={`min-h-[46px] px-3 py-2 rounded-2xl text-xs font-extrabold border flex items-center justify-center gap-1.5 transition-all ${
-                        swapComposer.requestType === 'swap'
-                          ? 'bg-[var(--g-primary-solid)] text-white border-transparent shadow-2xs'
-                          : 'bg-[var(--g-surface-variant)] text-[var(--g-text)] border-[var(--g-border)]'
-                      }`}
-                    >
-                      <span className="ms-icon text-base">swap_horiz</span>
-                      <span>تبديل مع زميل</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setSwapComposer((prev) => ({ ...prev, requestType: 'move' }))
-                      }
-                      className={`min-h-[46px] px-3 py-2 rounded-2xl text-xs font-extrabold border flex items-center justify-center gap-1.5 transition-all ${
-                        swapComposer.requestType === 'move'
-                          ? 'bg-[var(--g-primary-solid)] text-white border-transparent shadow-2xs'
-                          : 'bg-[var(--g-surface-variant)] text-[var(--g-text)] border-[var(--g-border)]'
-                      }`}
-                    >
-                      <span className="ms-icon text-base">event_repeat</span>
-                      <span>ترحيل ليوم آخر (بموافقة المدير)</span>
-                    </button>
-                  </div>
-                </div>
+                <SegmentedControl
+                  fullWidth
+                  ariaLabel="نوع الطلب"
+                  value={swapComposer.requestType}
+                  onChange={(val) =>
+                    setSwapComposer((prev) => ({ ...prev, requestType: val }))
+                  }
+                  options={[
+                    { id: 'swap', label: 'تبديل مع زميل' },
+                    { id: 'move', label: 'ترحيل ليوم آخر' },
+                  ]}
+                />
 
-                {/* Scope Selector */}
-                <div className="space-y-1.5">
-                  <div className="text-xs font-black text-[var(--g-muted)]">نطاق التغيير:</div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setSwapComposer((prev) => ({ ...prev, scope: 'week' }))}
-                      className={`min-h-[42px] px-3 py-2 rounded-xl text-xs font-extrabold border transition-all ${
-                        swapComposer.scope === 'week'
-                          ? 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] border-[var(--g-primary)]'
-                          : 'bg-[var(--g-surface-variant)] text-[var(--g-text)] border-[var(--g-border)]'
-                      }`}
-                    >
-                      لهذا الأسبوع فقط
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setSwapComposer((prev) => ({ ...prev, scope: 'permanent' }))
-                      }
-                      className={`min-h-[42px] px-3 py-2 rounded-xl text-xs font-extrabold border transition-all ${
-                        swapComposer.scope === 'permanent'
-                          ? 'bg-[var(--g-purple-bg)] text-[var(--g-purple)] border-[var(--g-purple-border)]'
-                          : 'bg-[var(--g-surface-variant)] text-[var(--g-text)] border-[var(--g-border)]'
-                      }`}
-                    >
-                      تغيير دائم في الجدول الثابت
-                    </button>
-                  </div>
-                </div>
+                <SegmentedControl
+                  fullWidth
+                  ariaLabel="نطاق التغيير"
+                  value={swapComposer.scope}
+                  onChange={(val) => setSwapComposer((prev) => ({ ...prev, scope: val }))}
+                  options={[
+                    { id: 'week', label: 'هذا الأسبوع' },
+                    { id: 'permanent', label: 'دائم' },
+                  ]}
+                />
 
-                {/* Colleague Picker OR Target Day Picker */}
                 {swapComposer.requestType === 'swap' ? (
                   <div className="space-y-1.5">
-                    <div className="text-xs font-black text-[var(--g-muted)]">
-                      اختر الزميل للتبديل معه (من نفس الفريق):
-                    </div>
+                    <span className="block text-xs font-medium text-ink-muted">الزميل</span>
                     {composerContext.sameGroupColleagues.length === 0 ? (
-                      <div className="p-3 rounded-xl bg-[var(--g-surface-variant)] text-xs font-bold text-[var(--g-muted)]">
-                        لا يوجد زملاء متاحون في نفس الفريق للتبديل معهم.
-                      </div>
+                      <div className="text-xs text-ink-muted">لا يوجد زملاء متاحون</div>
                     ) : (
-                      <div className="space-y-1.5 max-h-48 overflow-y-auto pr-0.5">
+                      <GroupedList>
                         {composerContext.sameGroupColleagues.map((col) => {
                           const colDay = col.effective_day_of_week;
                           const sameDay = colDay === composerContext.reqDay;
@@ -2462,56 +2279,47 @@ export default function ScheduleView({
                               type="button"
                               disabled={disabled}
                               onClick={() =>
-                                setSwapComposer((prev) => ({ ...prev, targetEmployeeId: col.id }))
+                                setSwapComposer((prev) => ({
+                                  ...prev,
+                                  targetEmployeeId: col.id,
+                                }))
                               }
-                              className={`w-full min-h-[48px] p-2.5 rounded-2xl border text-right flex items-center justify-between gap-2 transition-all disabled:opacity-45 disabled:cursor-not-allowed ${
-                                isPicked
-                                  ? 'bg-[var(--g-primary-container)]/50 border-[var(--g-primary)] ring-1 ring-[var(--g-primary)]'
-                                  : 'bg-[var(--g-surface-variant)]/65 border-[var(--g-border)] hover:border-[var(--g-primary)]'
+                              className={`w-full min-h-[48px] px-3.5 py-2 text-start flex items-center justify-between gap-2 transition-[background-color] duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                                isPicked ? 'bg-surface-tint' : 'hover:bg-surface-tint'
                               }`}
                             >
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span
-                                  style={{ backgroundColor: col.avatar_color || '#0B57D0' }}
-                                  className="w-8 h-8 rounded-xl text-white text-xs font-black flex items-center justify-center shrink-0"
-                                >
-                                  {getInitials(col.name)}
-                                </span>
-                                <div className="min-w-0">
-                                  <div className="text-xs font-black text-[var(--g-text)] truncate">
-                                    {col.name}
-                                  </div>
-                                  <div className="text-[10px] font-semibold text-[var(--g-muted)]">
-                                    {col.department}
-                                  </div>
+                              <div className="min-w-0">
+                                <div className="text-xs sm:text-sm font-medium text-ink truncate">
+                                  {col.name}
+                                </div>
+                                <div className="text-[11px] text-ink-muted">
+                                  {col.department}
                                 </div>
                               </div>
-
-                              <div className="shrink-0 text-left">
-                                {colDay ? (
-                                  <Badge
-                                    tone={sameDay || isPast ? 'neutral' : 'primary'}
-                                    numeric
-                                  >
-                                    {getScheduleWeekdayLabel(colDay)} (
-                                    {formatShortDate(weekDates[colDay])})
-                                    {isPast ? ' • ماضي' : sameDay ? ' • نفس اليوم' : ''}
-                                  </Badge>
-                                ) : (
-                                  <Badge tone="neutral">غير محدد</Badge>
-                                )}
-                              </div>
+                              <span
+                                className={`text-xs num-ltr shrink-0 ${
+                                  isPicked
+                                    ? 'text-primary font-semibold'
+                                    : 'text-ink-muted'
+                                }`}
+                              >
+                                {colDay
+                                  ? `${getScheduleWeekdayLabel(colDay)} (${formatShortDate(
+                                      weekDates[colDay]
+                                    )})`
+                                  : 'غير محدد'}
+                              </span>
                             </button>
                           );
                         })}
-                      </div>
+                      </GroupedList>
                     )}
                   </div>
                 ) : (
                   <div className="space-y-1.5">
-                    <div className="text-xs font-black text-[var(--g-muted)]">
-                      اختر يوم الإجازة المطلوب الترحيل إليه:
-                    </div>
+                    <span className="block text-xs font-medium text-ink-muted">
+                      اليوم المطلوب
+                    </span>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
                       {SCHEDULE_WEEKDAYS.filter((d) => d.code !== composerContext.reqDay).map(
                         (day) => {
@@ -2527,16 +2335,15 @@ export default function ScheduleView({
                               onClick={() =>
                                 setSwapComposer((prev) => ({ ...prev, targetDay: day.code }))
                               }
-                              className={`min-h-[46px] px-3 py-2 rounded-xl text-xs font-extrabold border transition-all disabled:opacity-45 disabled:cursor-not-allowed ${
+                              className={`min-h-[44px] px-3 py-1.5 rounded-[var(--g-radius-btn)] text-xs font-medium border transition-[background-color,border-color,color] duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
                                 isPicked
-                                  ? 'bg-[var(--g-primary-solid)] text-white border-transparent'
-                                  : 'bg-[var(--g-surface-variant)] text-[var(--g-text)] border-[var(--g-border)]'
+                                  ? 'bg-primary-solid text-on-primary border-transparent font-semibold'
+                                  : 'bg-transparent text-ink border-line hover:border-line-strong'
                               }`}
                             >
                               <div>{day.label}</div>
-                              <div className="num-ltr text-[10px] opacity-85">
+                              <div className="num-ltr text-[11px] opacity-80">
                                 {formatShortDate(weekDates[day.code])}
-                                {isPast ? ' (ماضي)' : ''}
                               </div>
                             </button>
                           );
@@ -2546,61 +2353,28 @@ export default function ScheduleView({
                   </div>
                 )}
 
-                {/* Live Coverage Preview */}
                 {composerContext.preview && (
-                  <div
-                    className={`p-3 rounded-2xl border space-y-1.5 ${
-                      composerContext.preview.toLowAfter
-                        ? 'bg-[var(--g-yellow-bg)]/55 border-[var(--g-yellow-border)]/50'
-                        : 'bg-[var(--g-surface-variant)]/70 border-[var(--g-border)]'
-                    }`}
-                  >
-                    <div className="text-xs font-black text-[var(--g-text)] flex items-center gap-1.5">
-                      <span className="ms-icon text-base text-[var(--g-primary)]">analytics</span>
-                      <span>معاينة التغطية بعد التنفيذ:</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-[11px] font-bold">
-                      <div className="p-2 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)]">
-                        <div className="text-[var(--g-muted)]">
-                          يوم {composerContext.preview.fromLabel}:
-                        </div>
-                        <div className="num-ltr font-black text-[var(--g-text)] mt-0.5">
-                          متواجد: {composerContext.preview.fromOnDutyBefore} ←{' '}
-                          {composerContext.preview.fromOnDutyAfter}
-                        </div>
-                      </div>
-                      <div className="p-2 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)]">
-                        <div className="text-[var(--g-muted)]">
-                          يوم {composerContext.preview.toLabel}:
-                        </div>
-                        <div className="num-ltr font-black text-[var(--g-text)] mt-0.5">
-                          متواجد: {composerContext.preview.toOnDutyBefore} ←{' '}
-                          {composerContext.preview.toOnDutyAfter}
-                        </div>
-                      </div>
-                    </div>
-                    {composerContext.preview.mode === 'swap' ? (
-                      <div className="text-[11px] font-bold text-[var(--g-green)]">
-                        التبديل مع زميل يحافظ على توازن عدد المتواجدين في كلا اليومين.
-                      </div>
-                    ) : composerContext.preview.toLowAfter ? (
-                      <div className="text-[11px] font-extrabold text-[var(--g-yellow)] flex items-center gap-1">
-                        <span className="ms-icon text-sm">warning</span>
-                        <span>
-                          تنبيه: سيصبح عدد المتواجدين يوم {composerContext.preview.toLabel} أقل من
-                          الحد الأدنى (
-                          <span className="num-ltr">{composerContext.preview.minRequired}</span>)
-                          وسيظهر التنبيه للإدارة عند المراجعة.
-                        </span>
-                      </div>
-                    ) : null}
+                  <div className="py-2 border-y border-line flex items-center justify-between gap-2 text-xs text-ink-muted flex-wrap">
+                    <span className="num-ltr">
+                      {composerContext.preview.fromLabel}: {composerContext.preview.fromOnDutyBefore}→
+                      {composerContext.preview.fromOnDutyAfter}
+                    </span>
+                    <span
+                      className={`num-ltr ${
+                        composerContext.preview.toLowAfter
+                          ? 'text-warning font-semibold'
+                          : ''
+                      }`}
+                    >
+                      {composerContext.preview.toLabel}: {composerContext.preview.toOnDutyBefore}→
+                      {composerContext.preview.toOnDutyAfter}
+                    </span>
                   </div>
                 )}
 
-                {/* Reason Input */}
-                <div className="space-y-1">
-                  <label className="block text-xs font-black text-[var(--g-muted)]">
-                    سبب الطلب (اختياري):
+                <div>
+                  <label className="block text-xs font-medium text-ink-muted mb-1">
+                    السبب
                   </label>
                   <input
                     type="text"
@@ -2609,48 +2383,37 @@ export default function ScheduleView({
                     onChange={(e) =>
                       setSwapComposer((prev) => ({ ...prev, reason: e.target.value }))
                     }
-                    placeholder="مثال: ظرف عائلي أو تبديل وردية..."
-                    className="g-input text-xs sm:text-sm"
+                    placeholder="اختياري..."
+                    className="g-input"
                   />
-                </div>
-
-                {/* Clear Explanation */}
-                <div className="p-3 rounded-2xl bg-[var(--g-primary-container)]/30 text-[11px] font-bold text-[var(--g-on-primary-container)] flex items-start gap-2 leading-relaxed">
-                  <span className="ms-icon filled text-base shrink-0 mt-0.5">info</span>
-                  <span>
-                    {swapComposer.requestType === 'swap'
-                      ? scheduleData?.settings?.swapRequiresManagerApproval
-                        ? 'يتطلب هذا التبديل موافقة الزميل المختار معك أولاً، ثم اعتماد الإدارة النهائي قبل تطبيقه في الجدول.'
-                        : 'يتطلب هذا التبديل موافقتك وموافقة الزميل المختار معاً، وسيُطبق في الجدول فور موافقة الطرفين.'
-                      : 'ترحيل الإجازة ليوم آخر بدون تبديل مع زميل يتطلب مراجعة واعتماد الإدارة.'}
-                  </span>
-                </div>
-
-                <div className="flex items-center gap-2 pt-1">
-                  <Button
-                    type="submit"
-                    variant="primary"
-                    fullWidth
-                    loading={busyAction}
-                    disabled={!composerContext.canSubmit || isOfflineReadOnly}
-                    icon="send"
-                  >
-                    إرسال الطلب الآن
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    disabled={busyAction}
-                    onClick={() => setSwapComposer(null)}
-                  >
-                    إلغاء
-                  </Button>
                 </div>
               </>
             )}
           </form>
         )}
       </BottomSheet>
+
+      <ConfirmSheet
+        open={Boolean(confirmSwapAction)}
+        onClose={() => !busySwapId && setConfirmSwapAction(null)}
+        onConfirm={() => {
+          if (!confirmSwapAction?.swap) return;
+          if (confirmSwapAction.mode === 'revert') {
+            handleRevertSwap(confirmSwapAction.swap);
+          } else {
+            handleCancelSwap(confirmSwapAction.swap);
+          }
+        }}
+        title={confirmSwapAction?.mode === 'revert' ? 'التراجع عن التبديل' : 'إلغاء الطلب'}
+        description={
+          confirmSwapAction?.mode === 'revert'
+            ? 'استعادة أيام الإجازة الأصلية للطرفين في هذا الأسبوع؟'
+            : 'إلغاء طلب التبديل الحالي؟'
+        }
+        confirmLabel={confirmSwapAction?.mode === 'revert' ? 'تراجع' : 'إلغاء الطلب'}
+        tone={confirmSwapAction?.mode === 'revert' ? 'warning' : 'danger'}
+        loading={Boolean(confirmSwapAction?.swap && busySwapId === confirmSwapAction.swap.id)}
+      />
     </div>
   );
 }

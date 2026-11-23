@@ -3,10 +3,13 @@ package com.zayedmart.ops;
 import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Base64;
+import android.view.View;
+import android.view.Window;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
@@ -15,6 +18,8 @@ import android.webkit.WebView;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.getcapacitor.BridgeActivity;
 
@@ -95,6 +100,37 @@ public class MainActivity extends BridgeActivity {
                     getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 } else {
                     getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void setSystemBars(final String hexColor, final boolean isLightAppearance) {
+            runOnUiThread(() -> {
+                try {
+                    if (hexColor == null || !hexColor.matches("^#[0-9A-Fa-f]{6}$")) {
+                        return;
+                    }
+                    int parsedColor = Color.parseColor(hexColor);
+                    Window window = getWindow();
+                    if (window == null) {
+                        return;
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+                        window.setStatusBarColor(parsedColor);
+                        window.setNavigationBarColor(parsedColor);
+                    }
+                    View decorView = window.getDecorView();
+                    if (decorView != null) {
+                        WindowInsetsControllerCompat controller =
+                                WindowCompat.getInsetsController(window, decorView);
+                        if (controller != null) {
+                            controller.setAppearanceLightStatusBars(isLightAppearance);
+                            controller.setAppearanceLightNavigationBars(isLightAppearance);
+                        }
+                    }
+                } catch (Exception ignored) {
                 }
             });
         }

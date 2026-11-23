@@ -1,4 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  BottomSheet,
+  Button,
+  Card,
+  ConfirmSheet,
+  EmptyState,
+  FilterChipRail,
+  GroupedList,
+  Icon,
+  RoleAvatar,
+  SearchFilterBar,
+  SectionHeader,
+  SkeletonList,
+  StatusDot,
+  ToggleSwitch,
+} from './ui/index.js';
 import { apiRequest, clearMasterAuditLogs } from '../lib/api.js';
 import {
   buildAuditLogsWhatsAppText,
@@ -7,28 +23,32 @@ import {
   formatTimeWithSeconds,
   openWhatsAppShare,
 } from '../lib/exportUtils.js';
+import { ROLE_DEFAULT_COLORS } from '../lib/navigation.js';
 
-const AVATAR_COLORS = [
-  '#7627BB',
-  '#0B57D0',
-  '#185ABC',
-  '#146C2E',
-  '#E37400',
-  '#B3261E',
-  '#007B83',
-];
+const SWATCH_COLORS = Object.values(ROLE_DEFAULT_COLORS);
 
 const QUICK_ROLE_PRESETS = [
-  { role: 'cashier', label: 'الكاشير / الكاشيرية', color: '#E37400', icon: 'point_of_sale' },
-  { role: 'hall', label: 'عمال الصالة (النواقص)', color: '#007B83', icon: 'shopping_basket' },
-  { role: 'security', label: 'الأمن واستلام البضاعة', color: '#146C2E', icon: 'shield_person' },
-  { role: 'cctv', label: 'مراقب الكاميرات', color: '#185ABC', icon: 'desktop_windows' },
-  { role: 'supervisor', label: 'مشرف الصالة والفرع', color: '#0B57D0', icon: 'manage_accounts' },
-  { role: 'warehouse', label: 'أمين المخزن والاستلام', color: '#007B83', icon: 'warehouse' },
-  { role: 'delivery', label: 'الدليفري والتوصيل', color: '#146C2E', icon: 'two_wheeler' },
-  { role: 'kiosk', label: 'شاشة كشك العمال', color: '#E37400', icon: 'touch_app' },
+  { role: 'cashier', label: 'كاشير', color: ROLE_DEFAULT_COLORS.cashier },
+  { role: 'hall', label: 'صالة', color: ROLE_DEFAULT_COLORS.hall },
+  { role: 'security', label: 'أمن', color: ROLE_DEFAULT_COLORS.security },
+  { role: 'cctv', label: 'كاميرات', color: ROLE_DEFAULT_COLORS.cctv },
+  { role: 'supervisor', label: 'مشرف', color: ROLE_DEFAULT_COLORS.supervisor },
+  { role: 'warehouse', label: 'مخزن', color: ROLE_DEFAULT_COLORS.warehouse },
+  { role: 'delivery', label: 'دليفري', color: ROLE_DEFAULT_COLORS.delivery },
+  { role: 'kiosk', label: 'كشك', color: ROLE_DEFAULT_COLORS.kiosk },
 ];
 
+function arraysEqualAsSets(a = [], b = []) {
+  if (a.length !== b.length) return false;
+  const setB = new Set(b);
+  return a.every((item) => setB.has(item));
+}
+
+/**
+ * Detoxed Security, Accounts, Role Matrix & Audit Log Panel (`الأمان`).
+ * Zero tinted promo banners, zero verbose subtitles or toggle prose, zero boxes-inside-boxes,
+ * preserving 44x44px controls, dirty-state save guard, and `<ConfirmSheet />` protections.
+ */
 export default function RbacSecurityPanel({
   canManageUsers = false,
   canViewAudit = false,
@@ -50,44 +70,65 @@ export default function RbacSecurityPanel({
   const [section, setSection] = useState(canManageUsers ? 'users' : 'audit');
   const [revealedIds, setRevealedIds] = useState({});
 
-  // New Password + Role form
   const [newDisplayName, setNewDisplayName] = useState('كاشير الشفت');
   const [newRole, setNewRole] = useState('cashier');
   const [newPassword, setNewPassword] = useState('');
-  const [newColor, setNewColor] = useState('#E37400');
+  const [newColor, setNewColor] = useState(ROLE_DEFAULT_COLORS.cashier);
+  const [creatingUser, setCreatingUser] = useState(false);
 
-  // Edit Password / Role / Custom Permissions modal
   const [editingUser, setEditingUser] = useState(null);
   const [editName, setEditName] = useState('');
   const [editRole, setEditRole] = useState('cashier');
   const [editPassword, setEditPassword] = useState('');
   const [editActive, setEditActive] = useState(true);
   const [editCustomPerms, setEditCustomPerms] = useState([]);
+  const [savingUserEdit, setSavingUserEdit] = useState(false);
 
-  // Role Matrix editor
   const [selectedMatrixRole, setSelectedMatrixRole] = useState('cashier');
   const [draftPerms, setDraftPerms] = useState([]);
   const [savingPolicy, setSavingPolicy] = useState(false);
+  const [pendingRoleSwitch, setPendingRoleSwitch] = useState(null);
+  const [pendingSectionSwitch, setPendingSectionSwitch] = useState(null);
 
-  // Audit filter
+  const [deleteUserTarget, setDeleteUserTarget] = useState(null);
+  const [deletingUser, setDeletingUser] = useState(false);
+  const [confirmRevokeSessions, setConfirmRevokeSessions] = useState(false);
+  const [revokingSessions, setRevokingSessions] = useState(false);
+  const [confirmClearAudit, setConfirmClearAudit] = useState(false);
+  const [clearingAudit, setClearingAudit] = useState(false);
+
   const [auditRoleFilter, setAuditRoleFilter] = useState('all');
   const [auditSearch, setAuditSearch] = useState('');
+  const [showAllAudit, setShowAllAudit] = useState(false);
 
   const loadRbac = useCallback(async () => {
     try {
       const res = await apiRequest('/api/rbac/overview');
       setOverview(res);
-      setDraftPerms(res.policies?.[selectedMatrixRole] || []);
     } catch (err) {
-      onToast?.(err.message || 'تعذر تحميل إدارة كلمات المرور والصلاحيات', 'error');
+      onToast?.(err?.message || 'تعذر تحميل بيانات الأمان', 'error');
     } finally {
       setLoading(false);
     }
-  }, [onToast, selectedMatrixRole]);
+  }, [onToast]);
 
   useEffect(() => {
     loadRbac();
   }, [loadRbac]);
+
+  useEffect(() => {
+    setDraftPerms(overview.policies?.[selectedMatrixRole] || []);
+  }, [overview.policies, selectedMatrixRole]);
+
+  const savedRolePerms = useMemo(
+    () => overview.policies?.[selectedMatrixRole] || [],
+    [overview.policies, selectedMatrixRole]
+  );
+
+  const isMatrixDirty = useMemo(() => {
+    if (selectedMatrixRole === 'owner') return false;
+    return !arraysEqualAsSets(draftPerms, savedRolePerms);
+  }, [draftPerms, savedRolePerms, selectedMatrixRole]);
 
   function applyQuickPreset(preset) {
     setNewRole(preset.role);
@@ -99,9 +140,49 @@ export default function RbacSecurityPanel({
     setRevealedIds((prev) => ({ ...prev, [id]: !prev[id] }));
   }
 
-  function handleSelectMatrixRole(roleId) {
+  async function copyPasswordSafe(val) {
+    if (!val) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(val);
+        onToast?.('تم نسخ كلمة المرور');
+        return;
+      }
+    } catch {
+      // fallback
+    }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = val;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      onToast?.('تم نسخ كلمة المرور');
+    } catch {
+      onToast?.('تعذر نسخ كلمة المرور', 'error');
+    }
+  }
+
+  function requestSelectMatrixRole(roleId) {
+    if (roleId === selectedMatrixRole) return;
+    if (isMatrixDirty) {
+      setPendingRoleSwitch(roleId);
+      return;
+    }
     setSelectedMatrixRole(roleId);
-    setDraftPerms(overview.policies?.[roleId] || []);
+  }
+
+  function requestSwitchSection(nextSec) {
+    if (nextSec === section) return;
+    if (section === 'matrix' && isMatrixDirty) {
+      setPendingSectionSwitch(nextSec);
+      return;
+    }
+    setSection(nextSec);
   }
 
   function toggleDraftPerm(permId) {
@@ -118,11 +199,11 @@ export default function RbacSecurityPanel({
       await apiRequest(`/api/rbac/policies/${selectedMatrixRole}`, 'PUT', {
         permissions: draftPerms,
       });
-      onToast?.('تم حفظ صلاحيات هذا الدور بنجاح ✓');
+      onToast?.('تم حفظ الصلاحيات');
       await loadRbac();
       onRefreshParent?.();
     } catch (err) {
-      onToast?.(err.message, 'error');
+      onToast?.(err?.message || 'تعذر حفظ الصلاحيات', 'error');
     } finally {
       setSavingPolicy(false);
     }
@@ -132,15 +213,18 @@ export default function RbacSecurityPanel({
     if (selectedMatrixRole === 'owner' || savingPolicy) return;
     setSavingPolicy(true);
     try {
-      const res = await apiRequest(`/api/rbac/policies/${selectedMatrixRole}/reset`, 'POST');
+      const res = await apiRequest(
+        `/api/rbac/policies/${selectedMatrixRole}/reset`,
+        'POST'
+      );
       if (Array.isArray(res?.permissions)) {
         setDraftPerms(res.permissions);
       }
-      onToast?.('تم استعادة الصلاحيات الافتراضية لهذا الدور بنجاح ✓');
+      onToast?.('تمت الاستعادة للافتراضي');
       await loadRbac();
       onRefreshParent?.();
     } catch (err) {
-      onToast?.(err.message, 'error');
+      onToast?.(err?.message || 'تعذر استعادة الافتراضي', 'error');
     } finally {
       setSavingPolicy(false);
     }
@@ -157,8 +241,9 @@ export default function RbacSecurityPanel({
   }
 
   async function handleCreatePassword(e) {
-    e.preventDefault();
-    if (!newPassword.trim()) return;
+    e?.preventDefault?.();
+    if (!newPassword.trim() || creatingUser) return;
+    setCreatingUser(true);
     try {
       await apiRequest('/api/rbac/users', 'POST', {
         display_name: newDisplayName.trim(),
@@ -167,10 +252,12 @@ export default function RbacSecurityPanel({
         avatar_color: newColor,
       });
       setNewPassword('');
-      onToast?.(`تم إنشاء كلمة المرور لـ "${newDisplayName.trim()}" بنجاح ✓`);
+      onToast?.(`تم إنشاء حساب "${newDisplayName.trim()}"`);
       await loadRbac();
     } catch (err) {
-      onToast?.(err.message, 'error');
+      onToast?.(err?.message || 'تعذر إنشاء الحساب', 'error');
+    } finally {
+      setCreatingUser(false);
     }
   }
 
@@ -180,7 +267,9 @@ export default function RbacSecurityPanel({
     setEditRole(u.role);
     setEditPassword('');
     setEditActive(Boolean(u.is_active));
-    setEditCustomPerms(Array.isArray(u.custom_permissions) ? u.custom_permissions : []);
+    setEditCustomPerms(
+      Array.isArray(u.custom_permissions) ? u.custom_permissions : []
+    );
   }
 
   function toggleUserCustomPerm(permId) {
@@ -190,8 +279,9 @@ export default function RbacSecurityPanel({
   }
 
   async function handleSaveUserEdit(e) {
-    e.preventDefault();
-    if (!editingUser) return;
+    e?.preventDefault?.();
+    if (!editingUser || savingUserEdit) return;
+    setSavingUserEdit(true);
     try {
       await apiRequest(`/api/rbac/users/${editingUser.id}`, 'PUT', {
         display_name: editName.trim(),
@@ -202,48 +292,58 @@ export default function RbacSecurityPanel({
         custom_permissions: editCustomPerms,
       });
       setEditingUser(null);
-      onToast?.('تم تحديث كلمة المرور والصلاحيات المخصصة بنجاح ✓');
+      onToast?.('تم حفظ التعديلات');
       await loadRbac();
       onRefreshParent?.();
     } catch (err) {
-      onToast?.(err.message, 'error');
+      onToast?.(err?.message || 'تعذر حفظ التعديلات', 'error');
+    } finally {
+      setSavingUserEdit(false);
     }
   }
 
-  async function handleDeletePassword(u) {
-    if (!window.confirm(`هل أنت متأكد من حذف كلمة مرور "${u.display_name}" وإلغاء دخول أي جهاز يستخدمها؟`)) {
-      return;
-    }
+  async function handleConfirmDeletePassword() {
+    if (!deleteUserTarget || deletingUser) return;
+    setDeletingUser(true);
     try {
-      await apiRequest(`/api/rbac/users/${u.id}`, 'DELETE');
-      onToast?.('تم حذف كلمة المرور وإبطال جلساتها بنجاح ✓');
+      await apiRequest(`/api/rbac/users/${deleteUserTarget.id}`, 'DELETE');
+      setDeleteUserTarget(null);
+      onToast?.('تم حذف الحساب');
       await loadRbac();
     } catch (err) {
-      onToast?.(err.message, 'error');
+      onToast?.(err?.message || 'تعذر حذف الحساب', 'error');
+    } finally {
+      setDeletingUser(false);
     }
   }
 
-  async function handleRevokeAllOtherSessions() {
-    if (!window.confirm('هل تريد تسجيل خروج إجباري لجميع الأجهزة الأخرى المتصلة الآن؟')) {
-      return;
-    }
+  async function handleConfirmRevokeAllSessions() {
+    if (revokingSessions) return;
+    setRevokingSessions(true);
     try {
       const res = await apiRequest('/api/rbac/sessions/revoke-all', 'POST');
-      onToast?.(`تم تسجيل خروج (${res.revokedCount}) جهاز آخر بنجاح ✓`);
+      setConfirmRevokeSessions(false);
+      onToast?.(`تم إنهاء ${res.revokedCount} جلسة`);
       await loadRbac();
     } catch (err) {
-      onToast?.(err.message, 'error');
+      onToast?.(err?.message || 'تعذر إنهاء الجلسات', 'error');
+    } finally {
+      setRevokingSessions(false);
     }
   }
 
-  async function handleClearAuditLogs() {
-    if (!window.confirm('هل تريد أرشفة ومسح السجل الرقابي الحالي؟')) return;
+  async function handleConfirmClearAuditLogs() {
+    if (clearingAudit) return;
+    setClearingAudit(true);
     try {
       await clearMasterAuditLogs();
-      onToast?.('تم مسح السجل الرقابي بنجاح ✓');
+      setConfirmClearAudit(false);
+      onToast?.('تم مسح السجل');
       await loadRbac();
     } catch (err) {
-      onToast?.(err.message, 'error');
+      onToast?.(err?.message || 'تعذر مسح السجل', 'error');
+    } finally {
+      setClearingAudit(false);
     }
   }
 
@@ -269,624 +369,590 @@ export default function RbacSecurityPanel({
     });
   }, [overview.auditLogs, auditRoleFilter, auditSearch]);
 
+  const sectionTabs = useMemo(() => {
+    const items = [];
+    if (canManageUsers) {
+      items.push({
+        id: 'users',
+        label: 'الحسابات',
+        count: overview.users?.length || 0,
+      });
+      items.push({
+        id: 'matrix',
+        label: 'الصلاحيات',
+        count: overview.permissionsCatalog?.length || 0,
+      });
+    }
+    if (canViewAudit) {
+      items.push({
+        id: 'audit',
+        label: 'السجل',
+        count: overview.auditLogs?.length || 0,
+      });
+    }
+    return items;
+  }, [
+    canManageUsers,
+    canViewAudit,
+    overview.users?.length,
+    overview.permissionsCatalog?.length,
+    overview.auditLogs?.length,
+  ]);
+
   if (loading) {
-    return (
-      <div className="g-card p-8 text-center text-sm font-bold text-[var(--g-muted)]">
-        جاري تحميل لوحة إدارة كلمات المرور والصلاحيات والسجل الشامل...
-      </div>
-    );
+    return <SkeletonList rows={5} />;
   }
 
   return (
     <div className="space-y-5">
-      {/* Top Security Banner & Active Sessions Control */}
-      <div className="g-card p-4 sm:p-5 bg-[var(--g-surface-tint)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="flex items-start sm:items-center gap-3">
-          <div className="w-11 h-11 rounded-2xl bg-[#7627BB] text-white flex items-center justify-center shrink-0">
-            <span className="ms-icon filled text-2xl">vpn_key</span>
-          </div>
-          <div>
-            <h3 className="text-base sm:text-lg font-extrabold m-0">
-              إدارة كلمات المرور، الأدوار، والصلاحيات المخصصة (RBAC)
-            </h3>
-            <p className="text-xs text-[var(--g-muted)] m-0 mt-0.5">
-              تحكم كامل للأدمن في كل مستخدم، كل دور، وكل صلاحية • أجهزة متصلة حالياً:{' '}
-              <strong className="num-ltr text-[var(--g-primary)]">
-                {overview.activeSessionsCount}
-              </strong>
-            </p>
-          </div>
-        </div>
-
-        {canManageUsers && (
-          <button
-            type="button"
-            onClick={handleRevokeAllOtherSessions}
-            className="w-full sm:w-auto px-4 py-2.5 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] text-xs font-extrabold flex items-center justify-center gap-1.5 shrink-0 hover:opacity-90"
-          >
-            <span className="ms-icon filled text-base">phonelink_erase</span>
-            <span>تسجيل خروج باقي الأجهزة</span>
-          </button>
-        )}
-      </div>
-
-      {/* Section Switcher Pills */}
-      <div className="grid grid-cols-1 sm:flex sm:flex-wrap items-center gap-2">
-        {canManageUsers && (
-          <>
-            <button
-              type="button"
-              onClick={() => setSection('users')}
-              className={`min-h-[44px] px-4 py-2 rounded-2xl sm:rounded-full text-xs sm:text-sm flex items-center justify-center gap-1.5 border active:scale-95 ${
-                section === 'users'
-                  ? 'g-pill-active border-transparent shadow-2xs'
-                  : 'bg-[var(--g-surface)] border-[var(--g-border)] font-bold'
-              }`}
+      <SectionHeader
+        title="الأمان"
+        subtitle={`أجهزة متصلة: ${overview.activeSessionsCount}`}
+        actions={
+          canManageUsers && (
+            <Button
+              variant="dangerTonal"
+              size="sm"
+              icon="phonelink_erase"
+              onClick={() => setConfirmRevokeSessions(true)}
             >
-              <span className="ms-icon text-base">key</span>
-              <span>كلمات المرور والمستخدمون ({overview.users?.length || 0})</span>
-            </button>
+              إنهاء باقي الأجهزة
+            </Button>
+          )
+        }
+      />
 
-            <button
-              type="button"
-              onClick={() => setSection('matrix')}
-              className={`min-h-[44px] px-4 py-2 rounded-2xl sm:rounded-full text-xs sm:text-sm flex items-center justify-center gap-1.5 border active:scale-95 ${
-                section === 'matrix'
-                  ? 'g-pill-active border-transparent shadow-2xs'
-                  : 'bg-[var(--g-surface)] border-[var(--g-border)] font-bold'
-              }`}
-            >
-              <span className="ms-icon text-base">tune</span>
-              <span>تخصيص صلاحيات كل دور ({overview.permissionsCatalog?.length || 0} صلاحية)</span>
-            </button>
-          </>
-        )}
+      <FilterChipRail
+        items={sectionTabs}
+        activeId={section}
+        onSelect={requestSwitchSection}
+      />
 
-        {canViewAudit && (
-          <button
-            type="button"
-            onClick={() => setSection('audit')}
-            className={`min-h-[44px] px-4 py-2 rounded-2xl sm:rounded-full text-xs sm:text-sm flex items-center justify-center gap-1.5 border active:scale-95 ${
-              section === 'audit'
-                ? 'g-pill-active border-transparent shadow-2xs'
-                : 'bg-[var(--g-surface)] border-[var(--g-border)] font-bold'
-            }`}
-          >
-            <span className="ms-icon text-base">policy</span>
-            <span>السجل الرقابي الشامل للنظام ({overview.auditLogs?.length || 0})</span>
-          </button>
-        )}
-      </div>
-
-      {/* SECTION 1: CREATE & MANAGE ALL PASSWORDS */}
+      {/* SECTION 1: ACCOUNTS & PASSWORDS */}
       {canManageUsers && section === 'users' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-          {/* Create Password Form */}
-          <form
-            onSubmit={handleCreatePassword}
-            className="lg:col-span-5 g-card p-4 sm:p-5 space-y-3.5 h-fit"
-          >
-            <h4 className="text-sm sm:text-base font-extrabold m-0 flex items-center gap-2">
-              <span className="ms-icon filled text-[var(--g-primary)]">add_moderator</span>
-              <span>إنشاء حساب / كلمة مرور جديدة بصلاحية محددة</span>
-            </h4>
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <Card padding="md" className="lg:col-span-5 space-y-4">
+            <SectionHeader title="حساب جديد" />
 
-            {/* 1-Tap Role Presets */}
-            <div>
-              <span className="block text-[11px] font-bold text-[var(--g-muted)] mb-1.5">
-                اختيار سريع لنوع الوظيفة (بما فيها الكاشير والمخزن والدليفري):
-              </span>
+            <form onSubmit={handleCreatePassword} className="space-y-3.5">
               <div className="flex flex-wrap gap-1.5">
                 {QUICK_ROLE_PRESETS.map((p) => (
                   <button
                     key={p.role}
                     type="button"
                     onClick={() => applyQuickPreset(p)}
-                    className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1 border transition-all ${
+                    className={`min-h-[40px] sm:min-h-[34px] px-3 py-1 rounded-[var(--g-radius-btn)] text-xs font-medium border transition-[background-color,color,border-color] duration-150 cursor-pointer ${
                       newRole === p.role
-                        ? 'g-pill-active border-transparent'
-                        : 'bg-[var(--g-surface-variant)] border-[var(--g-border)]'
+                        ? 'bg-primary-solid text-on-primary border-transparent'
+                        : 'bg-transparent border-line text-ink hover:border-line-strong'
                     }`}
                   >
-                    <span className="ms-icon text-sm">{p.icon}</span>
-                    <span>{p.label}</span>
+                    {p.label}
                   </button>
                 ))}
               </div>
-            </div>
 
-            <div>
-              <label className="block text-xs font-bold mb-1">
-                الدور الوظيفي (Role) الذي يفتحه النظام تلقائياً *
-              </label>
-              <select
-                value={newRole}
-                onChange={(e) => setNewRole(e.target.value)}
-                className="g-input w-full font-bold"
-              >
-                {Object.values(overview.rolesMeta || {}).map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold mb-1">
-                الاسم الظاهر في السجلات والبروفايل *
-              </label>
-              <input
-                type="text"
-                required
-                value={newDisplayName}
-                onChange={(e) => setNewDisplayName(e.target.value)}
-                placeholder="مثال: كاشير شيفت صباحي - أحمد"
-                className="g-input w-full"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold mb-1">
-                كلمة المرور الخاصة به (يرى كل موظف باسورده فقط في بروفايله) *
-              </label>
-              <input
-                type="text"
-                required
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="مثال: 205 أو cash1"
-                className="g-input w-full num-ltr text-lg font-extrabold"
-              />
-            </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-2.5 pt-1">
-              <div className="flex flex-wrap items-center gap-1.5">
-                {AVATAR_COLORS.map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => setNewColor(c)}
-                    style={{ backgroundColor: c }}
-                    className={`w-6 h-6 rounded-full ${
-                      newColor === c ? 'ring-2 ring-offset-2 ring-[#0B57D0]' : ''
-                    }`}
-                  />
-                ))}
+              <div>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  الدور *
+                </label>
+                <select
+                  value={newRole}
+                  onChange={(e) => setNewRole(e.target.value)}
+                  className="g-input"
+                >
+                  {Object.values(overview.rolesMeta || {}).map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.label}
+                    </option>
+                  ))}
+                </select>
               </div>
-              <button
+
+              <div>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  الاسم *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={newDisplayName}
+                  onChange={(e) => setNewDisplayName(e.target.value)}
+                  placeholder="كاشير صباحي"
+                  className="g-input"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  كلمة المرور *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="205"
+                  className="g-input num-ltr"
+                />
+              </div>
+
+              <div>
+                <span className="block text-xs font-medium text-ink-muted mb-1">
+                  اللون
+                </span>
+                <div className="flex flex-wrap items-center gap-1">
+                  {SWATCH_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      type="button"
+                      onClick={() => setNewColor(c)}
+                      aria-label={`اللون ${c}`}
+                      className="w-11 h-11 rounded-full flex items-center justify-center bg-transparent hover:bg-surface-2 cursor-pointer"
+                    >
+                      <span
+                        style={{ backgroundColor: c }}
+                        className={`w-6 h-6 rounded-full ${
+                          newColor === c
+                            ? 'ring-2 ring-offset-2 ring-[var(--g-primary)]'
+                            : ''
+                        }`}
+                      />
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <Button
                 type="submit"
-                className="w-full sm:w-auto px-5 py-2.5 rounded-full bg-[var(--g-primary)] text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5"
+                variant="primary"
+                size="md"
+                fullWidth
+                loading={creatingUser}
               >
-                <span className="ms-icon text-base">add</span>
-                <span>إنشاء الحساب وكلمة المرور</span>
-              </button>
-            </div>
-          </form>
+                إنشاء الحساب
+              </Button>
+            </form>
+          </Card>
 
-          {/* All Created Passwords List */}
-          <div className="lg:col-span-7 g-card p-4 sm:p-5 space-y-3">
-            <h4 className="text-sm sm:text-base font-extrabold m-0">
-              جميع الحسابات وكلمات المرور الفعالة في زايد مارت ({overview.users?.length || 0})
-            </h4>
-
-            <div className="space-y-2.5">
+          <div className="lg:col-span-7">
+            <GroupedList label="الحسابات" count={overview.users?.length || 0}>
               {(overview.users || []).map((u) => {
-                const roleMeta = overview.rolesMeta?.[u.role] || { label: u.role, icon: 'person' };
+                const roleMeta = overview.rolesMeta?.[u.role] || { label: u.role };
                 const isRevealed = Boolean(revealedIds[u.id]);
                 const customCount = Array.isArray(u.custom_permissions)
                   ? u.custom_permissions.length
                   : 0;
+                const metaParts = [
+                  roleMeta.shortLabel || roleMeta.label,
+                  customCount > 0 ? `+${customCount} صلاحية` : '',
+                  u.id === currentUserId ? 'أنت' : '',
+                  !u.is_active ? 'موقوف' : '',
+                ].filter(Boolean);
 
                 return (
                   <div
                     key={u.id}
-                    className={`p-3.5 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
-                      u.is_active
-                        ? 'bg-[var(--g-surface-variant)]/45 border-[var(--g-border)]'
-                        : 'opacity-60 bg-[var(--g-red-bg)]/20 border-[var(--g-border)]'
+                    className={`min-h-[60px] px-3.5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                      u.is_active ? '' : 'opacity-60'
                     }`}
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      <div
-                        style={{ backgroundColor: u.avatar_color || '#0B57D0' }}
-                        className="w-11 h-11 rounded-2xl text-white flex items-center justify-center shrink-0"
-                      >
-                        <span className="ms-icon filled text-xl">{roleMeta.icon || 'key'}</span>
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="font-extrabold text-sm sm:text-base truncate">
-                            {u.display_name}
-                          </span>
-                          <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] font-extrabold">
-                            {roleMeta.shortLabel || roleMeta.label}
-                          </span>
-                          {customCount > 0 && (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--g-purple-bg)] text-[var(--g-purple)] font-extrabold">
-                              +{customCount} صلاحية إضافية
-                            </span>
-                          )}
-                          {u.id === currentUserId && (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--g-green-bg)] text-[var(--g-green)] font-extrabold">
-                              أنت الآن
-                            </span>
-                          )}
-                          {!u.is_active && (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] font-extrabold">
-                              موقوفة
-                            </span>
-                          )}
+                      <RoleAvatar
+                        src={u.avatar_url || ''}
+                        name={u.display_name}
+                        role={u.role}
+                        color={u.avatar_color || ''}
+                        size="sm"
+                        shape="circle"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-semibold text-ink truncate">
+                          {u.display_name}
                         </div>
-
-                        <div className="flex flex-wrap items-center gap-2 mt-1 text-xs">
-                          <span className="text-[var(--g-muted)]">كلمة المرور:</span>
-                          <span className="px-2.5 py-0.5 rounded-lg bg-[var(--g-surface)] border border-[var(--g-border)] font-extrabold num-ltr">
-                            {isRevealed ? u.password_value || 'غير متاح' : '••••••'}
-                          </span>
-                          {u.password_value && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => toggleReveal(u.id)}
-                                className="text-[var(--g-primary)] font-bold flex items-center"
-                                title={isRevealed ? 'إخفاء' : 'إظهار كلمة المرور'}
-                              >
-                                <span className="ms-icon text-base">
-                                  {isRevealed ? 'visibility_off' : 'visibility'}
-                                </span>
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  navigator.clipboard?.writeText(u.password_value);
-                                  onToast?.('تم نسخ كلمة المرور ✓');
-                                }}
-                                className="text-[var(--g-muted)] hover:text-[var(--g-primary)] flex items-center"
-                                title="نسخ كلمة المرور"
-                              >
-                                <span className="ms-icon text-base">content_copy</span>
-                              </button>
-                            </>
-                          )}
+                        <div className="text-xs text-ink-muted truncate">
+                          {metaParts.join(' · ')}
                         </div>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5 self-end sm:self-auto shrink-0 flex-wrap">
+                    <div className="w-full sm:w-auto flex items-center justify-between sm:justify-end gap-1 flex-wrap shrink-0">
+                      <span className="num-ltr text-xs font-semibold text-ink px-2">
+                        {isRevealed ? u.password_value || '—' : '••••'}
+                      </span>
+
+                      {u.password_value && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => toggleReveal(u.id)}
+                            aria-label={isRevealed ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}
+                            className="w-11 h-11 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink inline-flex items-center justify-center cursor-pointer transition-[background-color,color] duration-150"
+                          >
+                            <Icon
+                              name={isRevealed ? 'visibility_off' : 'visibility'}
+                              size={18}
+                            />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => copyPasswordSafe(u.password_value)}
+                            aria-label="نسخ كلمة المرور"
+                            className="w-11 h-11 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-primary inline-flex items-center justify-center cursor-pointer transition-[background-color,color] duration-150"
+                          >
+                            <Icon name="content_copy" size={18} />
+                          </button>
+                        </>
+                      )}
+
                       {onOpenPersonLog && (
-                        <button
-                          type="button"
+                        <Button
+                          variant="ghost"
+                          size="sm"
                           onClick={() => onOpenPersonLog(u.id, u.display_name)}
-                          className="px-3 py-1.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] hover:border-[var(--g-primary)] text-xs font-extrabold flex items-center gap-1"
-                          title="عرض السجل الفردي الكامل"
                         >
-                          <span className="ms-icon text-sm text-[var(--g-primary)]">assignment_ind</span>
-                          <span>سجله</span>
-                        </button>
+                          سجل
+                        </Button>
                       )}
 
                       <button
                         type="button"
                         onClick={() => openEditUserModal(u)}
-                        className="px-3 py-1.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] hover:border-[var(--g-primary)] text-xs font-extrabold flex items-center gap-1"
+                        aria-label={`تعديل ${u.display_name}`}
+                        className="w-11 h-11 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink inline-flex items-center justify-center cursor-pointer transition-[background-color,color] duration-150"
                       >
-                        <span className="ms-icon text-base text-[var(--g-primary)]">edit</span>
-                        <span>تعديل وصلاحيات</span>
+                        <Icon name="edit" size={18} />
                       </button>
 
                       {u.id !== currentUserId && (
                         <button
                           type="button"
-                          onClick={() => handleDeletePassword(u)}
-                          title="حذف كلمة المرور"
-                          className="w-8 h-8 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] flex items-center justify-center hover:opacity-90"
+                          onClick={() => setDeleteUserTarget(u)}
+                          aria-label={`حذف ${u.display_name}`}
+                          className="w-11 h-11 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-danger-bg text-ink-muted hover:text-danger inline-flex items-center justify-center cursor-pointer transition-[background-color,color] duration-150"
                         >
-                          <span className="ms-icon text-base">delete</span>
+                          <Icon name="delete" size={18} />
                         </button>
                       )}
                     </div>
                   </div>
                 );
               })}
-            </div>
+            </GroupedList>
           </div>
         </div>
       )}
 
-      {/* SECTION 2: DYNAMIC ROLE PERMISSIONS MATRIX */}
+      {/* SECTION 2: ROLE PERMISSIONS MATRIX */}
       {canManageUsers && section === 'matrix' && (
-        <section className="g-card p-4 sm:p-5 space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[var(--g-border)] pb-3">
-            <div>
-              <h4 className="text-base font-extrabold m-0">
-                تخصيص صلاحيات كل دور وظيفي (Dynamic RBAC Policy Matrix)
-              </h4>
-              <p className="text-xs text-[var(--g-muted)] m-0 mt-0.5">
-                تحكّم بدقة في الأزرار والبيانات المسموحة لكل وظيفة (الكاشير، الأمن، المراقب، المشرف، المخزن، الصالة)
-              </p>
-            </div>
+        <div className="space-y-4">
+          <SectionHeader
+            title="الصلاحيات"
+            badge={
+              isMatrixDirty ? (
+                <StatusDot tone="warning" label="غير محفوظ" tintedText pulse />
+              ) : null
+            }
+            actions={
+              selectedMatrixRole !== 'owner' && (
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={savingPolicy}
+                    onClick={handleSelectAllRolePerms}
+                  >
+                    تحديد الكل
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={savingPolicy}
+                    onClick={handleClearAllRolePerms}
+                  >
+                    إلغاء الكل
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={savingPolicy}
+                    onClick={handleResetRolePolicy}
+                  >
+                    افتراضي
+                  </Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    loading={savingPolicy}
+                    onClick={handleSaveRolePolicy}
+                  >
+                    حفظ
+                  </Button>
+                </div>
+              )
+            }
+          />
 
-            {selectedMatrixRole !== 'owner' && (
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <button
-                  type="button"
-                  disabled={savingPolicy}
-                  onClick={handleSelectAllRolePerms}
-                  className="px-3 py-2 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-xs font-extrabold hover:border-[var(--g-primary)]"
-                >
-                  تحديد الكل
-                </button>
-                <button
-                  type="button"
-                  disabled={savingPolicy}
-                  onClick={handleClearAllRolePerms}
-                  className="px-3 py-2 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-xs font-extrabold hover:border-[var(--g-red)]"
-                >
-                  إلغاء الكل
-                </button>
-                <button
-                  type="button"
-                  disabled={savingPolicy}
-                  onClick={handleResetRolePolicy}
-                  className="px-3.5 py-2 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-extrabold flex items-center gap-1"
-                >
-                  <span className="ms-icon text-sm">restart_alt</span>
-                  <span>استعادة الافتراضي</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={savingPolicy}
-                  onClick={handleSaveRolePolicy}
-                  className="px-5 py-2.5 rounded-full bg-[var(--g-primary)] text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 shrink-0 shadow-xs"
-                >
-                  <span className="ms-icon filled text-lg">save</span>
-                  <span>{savingPolicy ? 'جاري الحفظ...' : 'حفظ صلاحيات الدور ✓'}</span>
-                </button>
-              </div>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
-            {Object.values(overview.rolesMeta || {}).map((r) => (
-              <button
-                key={r.id}
-                type="button"
-                onClick={() => handleSelectMatrixRole(r.id)}
-                className={`px-4 py-2 rounded-full text-xs font-extrabold flex items-center gap-1.5 whitespace-nowrap border transition-all ${
-                  selectedMatrixRole === r.id
-                    ? 'bg-[var(--g-primary)] text-white border-[var(--g-primary)]'
-                    : 'bg-[var(--g-surface-variant)] border-[var(--g-border)] text-[var(--g-text)]'
-                }`}
-              >
-                <span className="ms-icon text-base">{r.icon}</span>
-                <span>{r.label}</span>
-              </button>
-            ))}
-          </div>
+          <FilterChipRail
+            activeId={selectedMatrixRole}
+            onSelect={requestSelectMatrixRole}
+            items={Object.values(overview.rolesMeta || {}).map((r) => ({
+              id: r.id,
+              label: r.shortLabel || r.label,
+              count: (overview.policies?.[r.id] || []).length,
+            }))}
+          />
 
           {selectedMatrixRole === 'owner' && (
-            <div className="p-3 rounded-2xl bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-extrabold">
-              🔒 دور (المالك / المدير العام) يمتلك دائماً كافة الصلاحيات ({overview.permissionsCatalog?.length || 0} صلاحية) للتحكم الكامل بالنظام.
-            </div>
+            <p className="text-xs font-medium text-ink-muted m-0">
+              المالك يمتلك كافة الصلاحيات تلقائياً
+            </p>
           )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {Object.entries(groupedPermissions).map(([groupName, perms]) => (
-              <div
-                key={groupName}
-                className="p-4 rounded-2xl bg-[var(--g-surface-variant)]/45 border border-[var(--g-border)] space-y-2.5"
-              >
-                <div className="text-xs font-extrabold text-[var(--g-primary)] border-b border-[var(--g-border)] pb-1.5">
-                  {groupName}
-                </div>
+              <GroupedList key={groupName} label={groupName}>
                 {perms.map((perm) => {
                   const checked =
                     selectedMatrixRole === 'owner' || draftPerms.includes(perm.id);
                   return (
                     <label
                       key={perm.id}
-                      className={`flex items-center justify-between gap-2 p-2 rounded-xl text-xs font-bold ${
+                      className={`min-h-[46px] px-3.5 py-2 flex items-center justify-between gap-3 text-xs sm:text-sm font-medium transition-[background-color] duration-150 ${
                         selectedMatrixRole === 'owner'
-                          ? 'opacity-80 cursor-not-allowed'
-                          : 'cursor-pointer hover:bg-[var(--g-surface)]'
+                          ? 'opacity-75 cursor-not-allowed text-ink-muted'
+                          : checked
+                          ? 'text-ink cursor-pointer hover:bg-surface-tint'
+                          : 'text-ink-muted cursor-pointer hover:bg-surface-tint'
                       }`}
                     >
-                      <span>{perm.label}</span>
+                      <span className="truncate">{perm.label}</span>
                       <input
                         type="checkbox"
                         disabled={selectedMatrixRole === 'owner'}
                         checked={checked}
                         onChange={() => toggleDraftPerm(perm.id)}
-                        className="w-4 h-4 accent-[#0B57D0] shrink-0"
+                        className="w-5 h-5 accent-[var(--g-primary-solid)] shrink-0"
                       />
                     </label>
                   );
                 })}
-              </div>
+              </GroupedList>
             ))}
           </div>
-        </section>
+
+          {isMatrixDirty && (
+            <div className="sticky bottom-[calc(var(--bottom-nav-h)+0.75rem)] md:bottom-4 z-20 px-4 py-3 rounded-[var(--g-radius-md)] bg-surface-elevated border border-line-strong shadow-[var(--g-shadow-elevated)] flex items-center justify-between gap-3 flex-wrap">
+              <StatusDot tone="warning" label="تعديلات غير محفوظة" tintedText />
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={savingPolicy}
+                  onClick={() => setDraftPerms(savedRolePerms)}
+                >
+                  تراجع
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={savingPolicy}
+                  onClick={handleSaveRolePolicy}
+                >
+                  حفظ
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
-      {/* SECTION 3: MASTER SYSTEM AUDIT LOG + MULTI-FORMAT EXPORT */}
+      {/* SECTION 3: AUDIT LOG */}
       {canViewAudit && section === 'audit' && (
-        <section className="g-card p-4 sm:p-5 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--g-border)] pb-3">
-            <div>
-              <h4 className="text-base font-extrabold m-0">
-                السجل الرقابي الشامل لكل حركات النظام ({filteredAuditLogs.length})
-              </h4>
-              <p className="text-xs text-[var(--g-muted)] m-0">
-                يسجل كل حضور، انصراف، استراحة، نقص، ملاحظة، تعديل أو دخول في النظام مع التصدير لـ Excel و Word وواتساب
-              </p>
-            </div>
-
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <button
-                type="button"
-                onClick={() => exportAuditLogsCsv(filteredAuditLogs)}
-                className="px-3.5 py-2 rounded-full bg-[var(--g-green-bg)] text-[var(--g-green)] text-xs font-extrabold flex items-center gap-1"
-              >
-                <span className="ms-icon text-sm">table_view</span>
-                <span>تصدير Excel</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => exportAuditLogsWord(filteredAuditLogs)}
-                className="px-3.5 py-2 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-extrabold flex items-center gap-1"
-              >
-                <span className="ms-icon text-sm">description</span>
-                <span>تصدير Word</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => openWhatsAppShare(buildAuditLogsWhatsAppText(filteredAuditLogs))}
-                className="px-3.5 py-2 rounded-full bg-[#25D366]/15 text-[#128C7E] dark:text-[#4ADE80] text-xs font-extrabold flex items-center gap-1"
-              >
-                <span className="ms-icon text-sm">share</span>
-                <span>واتساب</span>
-              </button>
-              {canManageUsers && filteredAuditLogs.length > 0 && (
-                <button
-                  type="button"
-                  onClick={handleClearAuditLogs}
-                  className="px-3 py-2 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] text-xs font-extrabold flex items-center gap-1"
+        <div className="space-y-4">
+          <SectionHeader
+            title="السجل"
+            count={filteredAuditLogs.length}
+            actions={
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => exportAuditLogsCsv(filteredAuditLogs)}
                 >
-                  <span className="ms-icon text-sm">delete_sweep</span>
-                  <span>مسح السجل</span>
-                </button>
-              )}
-            </div>
-          </div>
+                  Excel
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => exportAuditLogsWord(filteredAuditLogs)}
+                >
+                  Word
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() =>
+                    openWhatsAppShare(buildAuditLogsWhatsAppText(filteredAuditLogs))
+                  }
+                >
+                  واتساب
+                </Button>
+                {canManageUsers && filteredAuditLogs.length > 0 && (
+                  <Button
+                    variant="dangerTonal"
+                    size="sm"
+                    onClick={() => setConfirmClearAudit(true)}
+                  >
+                    مسح
+                  </Button>
+                )}
+              </div>
+            }
+          />
 
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="g-search-bar flex-1 flex items-center gap-2 px-3.5 py-2">
-              <span className="ms-icon text-[var(--g-muted)] text-lg">search</span>
-              <input
-                type="text"
-                value={auditSearch}
-                onChange={(e) => setAuditSearch(e.target.value)}
-                placeholder="ابحث في السجل بالاسم أو نوع العملية أو التفاصيل..."
-                className="bg-transparent border-none outline-none w-full text-xs sm:text-sm"
-              />
-            </div>
+          <div className="space-y-2.5">
+            <SearchFilterBar
+              value={auditSearch}
+              onChange={setAuditSearch}
+              placeholder="بحث في السجل..."
+            />
 
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
-              {[
-                { id: 'all', label: 'كل الأدوار' },
+            <FilterChipRail
+              activeId={auditRoleFilter}
+              onSelect={setAuditRoleFilter}
+              items={[
+                { id: 'all', label: 'الكل' },
                 { id: 'owner', label: 'الإدارة' },
-                { id: 'cashier', label: 'الكاشيرية' },
+                { id: 'cashier', label: 'الكاشير' },
                 { id: 'security', label: 'الأمن' },
-                { id: 'supervisor', label: 'المشرفين' },
+                { id: 'supervisor', label: 'المشرفون' },
                 { id: 'cctv', label: 'الكاميرات' },
-              ].map((f) => (
-                <button
-                  key={f.id}
-                  type="button"
-                  onClick={() => setAuditRoleFilter(f.id)}
-                  className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap border ${
-                    auditRoleFilter === f.id
-                      ? 'g-pill-active border-transparent'
-                      : 'bg-[var(--g-surface)] border-[var(--g-border)]'
-                  }`}
-                >
-                  {f.label}
-                </button>
-              ))}
-            </div>
+              ]}
+            />
           </div>
 
           {filteredAuditLogs.length === 0 ? (
-            <p className="text-center py-8 text-xs text-[var(--g-muted)]">
-              لا توجد أحداث مطابقة في السجل الرقابي الشامل.
-            </p>
+            <EmptyState compact title="لا توجد أحداث مطابقة" />
           ) : (
-            <div className="space-y-2 max-h-[55vh] overflow-y-auto">
-              {filteredAuditLogs.map((log) => {
-                const actorName = log.actor_name || log.user_name || 'النظام';
-                const actorRole = log.actor_role || log.role || '';
-                return (
-                  <div
-                    key={log.id}
-                    className="p-3 rounded-2xl bg-[var(--g-surface-variant)]/50 border border-[var(--g-border)] flex flex-col sm:flex-row sm:items-center justify-between gap-2"
-                  >
-                    <div className="space-y-0.5 min-w-0">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-[11px] px-2.5 py-0.5 rounded-full font-extrabold bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]">
-                          {log.action}
-                        </span>
-                        <span className="text-xs font-extrabold">{actorName}</span>
-                        {actorRole && (
-                          <span className="text-[11px] text-[var(--g-muted)]">
-                            ({overview.rolesMeta?.[actorRole]?.shortLabel || actorRole})
-                          </span>
-                        )}
-                        {log.target_label && (
-                          <span className="text-xs font-bold text-[var(--g-primary)]">
-                            ← {log.target_label}
-                          </span>
+            <>
+              <GroupedList>
+                {(showAllAudit
+                  ? filteredAuditLogs
+                  : filteredAuditLogs.slice(0, 25)
+                ).map((log) => {
+                  const actorName = log.actor_name || log.user_name || 'النظام';
+                  const actorRole = log.actor_role || log.role || '';
+                  const roleShort = actorRole
+                    ? overview.rolesMeta?.[actorRole]?.shortLabel || actorRole
+                    : '';
+                  const headlineParts = [
+                    log.action,
+                    actorName,
+                    roleShort,
+                    log.target_label,
+                  ].filter(Boolean);
+
+                  return (
+                    <div
+                      key={log.id}
+                      className="min-h-[52px] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs sm:text-sm font-medium text-ink truncate">
+                          {headlineParts.join(' · ')}
+                        </div>
+                        {log.details && (
+                          <div className="text-xs text-ink-muted truncate mt-0.5">
+                            {log.details}
+                          </div>
                         )}
                       </div>
-                      {log.details && (
-                        <div className="text-xs text-[var(--g-muted)]">{log.details}</div>
-                      )}
-                    </div>
 
-                    <div className="text-[11px] text-[var(--g-muted)] flex items-center gap-2 self-end sm:self-auto shrink-0 num-ltr">
-                      {log.ip_address && <span>IP: {log.ip_address}</span>}
-                      <strong className="text-[var(--g-text)]">
-                        {log.timestamp ? new Date(log.timestamp).toLocaleString('ar-EG') : formatTimeWithSeconds(log.timestamp)}
-                      </strong>
+                      <div className="text-xs text-ink-muted flex items-center gap-2 shrink-0 num-ltr">
+                        {log.ip_address && (
+                          <span className="hidden sm:inline">{log.ip_address}</span>
+                        )}
+                        <span className="font-medium text-ink">
+                          {log.timestamp
+                            ? new Date(log.timestamp).toLocaleString('ar-EG')
+                            : formatTimeWithSeconds(log.timestamp)}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </GroupedList>
+
+              {filteredAuditLogs.length > 25 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  fullWidth
+                  onClick={() => setShowAllAudit((v) => !v)}
+                >
+                  {showAllAudit
+                    ? 'عرض أقل'
+                    : `عرض الكل (${filteredAuditLogs.length})`}
+                </Button>
+              )}
+            </>
           )}
-        </section>
+        </div>
       )}
 
-      {/* Edit Password / Role / Custom Per-User Permissions Modal */}
-      {editingUser && (
-        <div onClick={() => setEditingUser(null)} className="g-modal-overlay">
-          <form
-            onClick={(e) => e.stopPropagation()}
-            onSubmit={handleSaveUserEdit}
-            className="g-dialog-sheet max-w-xl space-y-4 animate-pop"
-          >
-            <div className="g-sheet-handle" />
-            <div className="flex items-center justify-between border-b border-[var(--g-border)] pb-3">
-              <h3 className="text-base font-extrabold m-0">
-                تعديل الحساب والصلاحيات المخصصة: {editingUser.display_name}
-              </h3>
-              <button
-                type="button"
-                onClick={() => setEditingUser(null)}
-                className="w-8 h-8 rounded-full bg-[var(--g-surface-variant)] flex items-center justify-center"
-              >
-                <span className="ms-icon">close</span>
-              </button>
-            </div>
-
+      {/* Edit User / Custom Permissions BottomSheet */}
+      <BottomSheet
+        open={Boolean(editingUser)}
+        onClose={() => !savingUserEdit && setEditingUser(null)}
+        title="تعديل الحساب"
+        subtitle={editingUser?.display_name || ''}
+        maxWidth="max-w-xl"
+        footer={
+          <div className="flex items-center gap-2.5">
+            <Button
+              variant="secondary"
+              fullWidth
+              disabled={savingUserEdit}
+              onClick={() => setEditingUser(null)}
+            >
+              إلغاء
+            </Button>
+            <Button
+              variant="primary"
+              fullWidth
+              loading={savingUserEdit}
+              onClick={handleSaveUserEdit}
+            >
+              حفظ
+            </Button>
+          </div>
+        }
+      >
+        {editingUser && (
+          <form onSubmit={handleSaveUserEdit} className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-bold mb-1">الاسم الظاهر في السجلات</label>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  الاسم *
+                </label>
                 <input
                   type="text"
                   required
                   value={editName}
                   onChange={(e) => setEditName(e.target.value)}
-                  className="g-input w-full"
+                  className="g-input"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-bold mb-1">الدور الوظيفي الأساسي (Role)</label>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  الدور
+                </label>
                 <select
                   value={editRole}
                   onChange={(e) => setEditRole(e.target.value)}
-                  className="g-input w-full font-bold"
+                  className="g-input"
                 >
                   {Object.values(overview.rolesMeta || {}).map((r) => (
                     <option key={r.id} value={r.id}>
@@ -898,80 +964,119 @@ export default function RbacSecurityPanel({
             </div>
 
             <div>
-              <label className="block text-xs font-bold mb-1">
-                تغيير كلمة المرور (اتركها فارغة للإبقاء على الحالية: {editingUser.password_value || '•••'})
+              <label className="block text-xs font-medium text-ink-muted mb-1">
+                كلمة مرور جديدة
               </label>
               <input
                 type="text"
                 value={editPassword}
                 onChange={(e) => setEditPassword(e.target.value)}
-                placeholder="اكتب كلمة المرور الجديدة هنا..."
-                className="g-input w-full num-ltr text-lg font-extrabold"
+                placeholder={editingUser.password_value || 'اتركها فارغة بدون تغيير'}
+                className="g-input num-ltr"
               />
             </div>
 
-            {/* Per-User Custom Extra Permissions */}
-            {editRole !== 'owner' && (
-              <div className="p-3.5 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-extrabold text-[var(--g-primary)]">
-                    ⚡ صلاحيات إضافية خاصة بهذا المستخدم فقط (فوق صلاحيات دوره):
-                  </span>
-                  <span className="text-[11px] font-bold text-[var(--g-muted)]">
-                    محدد: {editCustomPerms.length}
-                  </span>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-44 overflow-y-auto p-1">
-                  {(overview.permissionsCatalog || []).map((perm) => {
-                    const roleHasIt = (overview.policies?.[editRole] || []).includes(perm.id);
-                    const userHasExtra = editCustomPerms.includes(perm.id);
-                    return (
-                      <label
-                        key={perm.id}
-                        className={`flex items-center justify-between gap-2 p-2 rounded-xl text-xs font-bold cursor-pointer ${
-                          roleHasIt
-                            ? 'bg-[var(--g-surface)]/60 opacity-75'
-                            : userHasExtra
-                              ? 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]'
-                              : 'bg-[var(--g-surface)]'
-                        }`}
-                      >
-                        <span className="truncate">
-                          {perm.label} {roleHasIt ? '(ضمن الدور)' : ''}
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={roleHasIt || userHasExtra}
-                          disabled={roleHasIt}
-                          onChange={() => toggleUserCustomPerm(perm.id)}
-                          className="w-4 h-4 accent-[#0B57D0] shrink-0"
-                        />
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            <label className="flex items-center gap-2 p-3 rounded-2xl bg-[var(--g-surface-variant)] text-xs font-extrabold cursor-pointer">
-              <input
-                type="checkbox"
+            <div className="border-y border-line">
+              <ToggleSwitch
                 checked={editActive}
-                onChange={(e) => setEditActive(e.target.checked)}
-                className="w-4 h-4 accent-[#0B57D0]"
+                onChange={setEditActive}
+                label="تفعيل الحساب"
               />
-              <span>الحساب مفعل ومسموح بالدخول به</span>
-            </label>
+            </div>
 
-            <button
-              type="submit"
-              className="w-full py-3.5 rounded-full bg-[var(--g-primary)] text-white font-extrabold text-sm"
-            >
-              حفظ التعديلات والصلاحيات ✓
-            </button>
+            {editRole !== 'owner' && (
+              <GroupedList label="صلاحيات إضافية" count={editCustomPerms.length}>
+                {(overview.permissionsCatalog || []).map((perm) => {
+                  const roleHasIt = (overview.policies?.[editRole] || []).includes(
+                    perm.id
+                  );
+                  const userHasExtra = editCustomPerms.includes(perm.id);
+                  return (
+                    <label
+                      key={perm.id}
+                      className={`min-h-[44px] px-3.5 py-2 flex items-center justify-between gap-2 text-xs font-medium ${
+                        roleHasIt
+                          ? 'opacity-65 cursor-not-allowed text-ink-muted'
+                          : 'text-ink cursor-pointer hover:bg-surface-tint'
+                      }`}
+                    >
+                      <span className="truncate">
+                        {perm.label}
+                        {roleHasIt ? ' · ضمن الدور' : ''}
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={roleHasIt || userHasExtra}
+                        disabled={roleHasIt}
+                        onChange={() => toggleUserCustomPerm(perm.id)}
+                        className="w-5 h-5 accent-[var(--g-primary-solid)] shrink-0"
+                      />
+                    </label>
+                  );
+                })}
+              </GroupedList>
+            )}
           </form>
-        </div>
-      )}
+        )}
+      </BottomSheet>
+
+      <ConfirmSheet
+        open={Boolean(pendingRoleSwitch || pendingSectionSwitch)}
+        onClose={() => {
+          setPendingRoleSwitch(null);
+          setPendingSectionSwitch(null);
+        }}
+        onConfirm={() => {
+          if (pendingRoleSwitch) {
+            setSelectedMatrixRole(pendingRoleSwitch);
+            setPendingRoleSwitch(null);
+          } else if (pendingSectionSwitch) {
+            setDraftPerms(savedRolePerms);
+            setSection(pendingSectionSwitch);
+            setPendingSectionSwitch(null);
+          }
+        }}
+        tone="warning"
+        title="تجاهل التعديلات؟"
+        description="توجد تعديلات غير محفوظة على صلاحيات الدور الحالي."
+        confirmLabel="تجاهل"
+        cancelLabel="البقاء"
+      />
+
+      <ConfirmSheet
+        open={Boolean(deleteUserTarget)}
+        onClose={() => !deletingUser && setDeleteUserTarget(null)}
+        onConfirm={handleConfirmDeletePassword}
+        loading={deletingUser}
+        tone="danger"
+        title="حذف الحساب"
+        description={
+          deleteUserTarget ? `حذف "${deleteUserTarget.display_name}" وإنهاء جلساته؟` : ''
+        }
+        confirmLabel="حذف"
+      />
+
+      <ConfirmSheet
+        open={confirmRevokeSessions}
+        onClose={() => !revokingSessions && setConfirmRevokeSessions(false)}
+        onConfirm={handleConfirmRevokeAllSessions}
+        loading={revokingSessions}
+        tone="danger"
+        title="إنهاء باقي الأجهزة"
+        description="تسجيل خروج جميع الأجهزة الأخرى مع بقاء جهازك الحالي متصلاً؟"
+        confirmLabel="إنهاء الجلسات"
+      />
+
+      <ConfirmSheet
+        open={confirmClearAudit}
+        onClose={() => !clearingAudit && setConfirmClearAudit(false)}
+        onConfirm={handleConfirmClearAuditLogs}
+        loading={clearingAudit}
+        tone="danger"
+        title="مسح السجل"
+        description="أرشفة ومسح السجل الرقابي الحالي؟"
+        confirmLabel="مسح"
+      />
     </div>
   );
 }

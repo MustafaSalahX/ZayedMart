@@ -12,6 +12,7 @@ import { NotesModule } from './notes/notes.module';
 import { RbacModule } from './rbac/rbac.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { SchedulesModule } from './schedules/schedules.module';
+import { SettingsModule } from './settings/settings.module';
 import { ShortagesModule } from './shortages/shortages.module';
 import { TrucksModule } from './trucks/trucks.module';
 import { WalkieModule } from './walkie/walkie.module';
@@ -31,6 +32,7 @@ import { WalkieModule } from './walkie/walkie.module';
     ChatModule,
     WalkieModule,
     SchedulesModule,
+    SettingsModule,
   ],
   providers: [
     {

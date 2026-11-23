@@ -5,312 +5,340 @@ import {
   buildPersonLogWhatsAppText,
   exportPersonLogCsv,
   exportPersonLogWord,
+  formatCctvStatusArabic,
   formatQtyForExport,
   formatTimeArabic,
+  getCctvStatusType,
   openWhatsAppShare,
 } from '../lib/exportUtils.js';
+import {
+  BottomSheet,
+  Button,
+  CockpitMetricStrip,
+  EmptyState,
+  FilterChipRail,
+  GroupedList,
+  SkeletonKpiStrip,
+  SkeletonList,
+  StatusDot,
+} from './ui/index.js';
 
-export default function PersonLogModal({ open, personId, personName, onClose, onToast }) {
+export default function PersonLogModal({
+  open,
+  personId,
+  personName,
+  onClose,
+  onToast,
+}) {
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
   const [data, setData] = useState(null);
   const [tab, setTab] = useState('attendance');
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const [reloadTick, setReloadTick] = useState(0);
 
   useEffect(() => {
-    if (!open || !personId) return;
+    setData(null);
+    setError('');
+    setTab('attendance');
+  }, [personId, open]);
+
+  useEffect(() => {
+    if (!open || !personId) return undefined;
     let cancelled = false;
+
     async function load() {
       setLoading(true);
+      setError('');
       try {
         const res = await fetchPersonLog(personId);
         if (!cancelled) setData(res);
       } catch (err) {
-        if (!cancelled) onToast?.(err.message || 'تعذر تحميل سجل الموظف', 'error');
+        if (!cancelled) {
+          const msg = err.message || 'تعذر تحميل السجل';
+          setError(msg);
+          onToast?.(msg, 'error');
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
+
     load();
     return () => {
       cancelled = true;
     };
-  }, [open, personId]);
-
-  if (!open) return null;
+  }, [open, personId, reloadTick, onToast]);
 
   const p = data?.person || { name: personName || 'الموظف' };
-  const stats = data?.stats || {};
   const attLogs = data?.attendanceLogs || [];
   const shortages = data?.shortages || [];
   const notes = data?.notes || [];
   const auditLogs = data?.auditLogs || [];
+  const rawStats = data?.stats || {};
+  const rawSum = data?.summary || {};
+
+  const stats = {
+    totalCheckIns:
+      rawStats.totalCheckIns ??
+      (attLogs.length > 0
+        ? attLogs.filter((a) => a.action_type === 'check_in').length
+        : rawSum.daysPresent || 0),
+    totalCheckOuts:
+      rawStats.totalCheckOuts ?? attLogs.filter((a) => a.action_type === 'check_out').length,
+    totalBreaks:
+      rawStats.totalBreaks ??
+      rawSum.totalBreakCount ??
+      attLogs.filter((a) => a.action_type === 'break_start').length,
+    totalBreakMinutes:
+      rawStats.totalBreakMinutes ??
+      rawSum.totalBreakMinutes ??
+      attLogs
+        .filter((a) => a.action_type === 'break_end')
+        .reduce((acc, a) => acc + (Number(a.break_duration_minutes) || 0), 0),
+    shortagesReported: rawStats.shortagesReported ?? rawSum.shortagesCount ?? shortages.length,
+    suggestionsReported:
+      rawStats.suggestionsReported ?? shortages.filter((s) => Boolean(s.is_suggestion)).length,
+    notesRecorded: rawStats.notesRecorded ?? rawSum.notesCount ?? notes.length,
+    auditActionsCount: rawStats.auditActionsCount ?? rawSum.auditCount ?? auditLogs.length,
+  };
+
+  const shiftStart = p.shift_start || '08:00';
+  const shiftEnd = p.shift_end || '20:00';
+
+  const tabItems = [
+    { id: 'attendance', label: 'الحضور', count: attLogs.length },
+    { id: 'shortages', label: 'النواقص', count: shortages.length },
+    { id: 'notes', label: 'الملاحظات', count: notes.length },
+    { id: 'audit', label: 'الحركات', count: auditLogs.length },
+  ];
 
   return (
-    <div onClick={onClose} className="g-modal-overlay">
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="g-dialog-sheet max-w-3xl animate-pop space-y-4"
-      >
-        <div className="g-sheet-handle" />
-
-        {/* Header */}
-        <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[var(--g-border)]">
-          <div className="flex items-center gap-2.5">
-            <div
-              className="w-11 h-11 rounded-2xl text-white font-extrabold flex items-center justify-center shrink-0"
-              style={{ backgroundColor: p.avatar_color || '#0B57D0' }}
+    <BottomSheet
+      open={Boolean(open)}
+      onClose={onClose}
+      title={p.name}
+      subtitle={`${p.department || p.role_label || 'موظف'} · ${shiftStart}–${shiftEnd}`}
+      maxWidth="max-w-3xl"
+    >
+      <div className="space-y-4">
+        {data && !loading && (
+          <div className="flex flex-wrap items-center justify-end gap-1.5">
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={exportingExcel}
+              onClick={async () => {
+                if (exportingExcel) return;
+                setExportingExcel(true);
+                try {
+                  await exportPersonLogCsv(data);
+                  onToast?.('تم التصدير إلى Excel');
+                } catch (err) {
+                  onToast?.(err.message || 'تعذر التصدير', 'error');
+                } finally {
+                  setExportingExcel(false);
+                }
+              }}
             >
-              {(p.name || 'م').slice(0, 1)}
-            </div>
-            <div>
-              <h3 className="text-base sm:text-lg font-extrabold m-0">
-                السجل الفردي الكامل — {p.name}
-              </h3>
-              <p className="text-xs text-[var(--g-muted)] m-0">
-                {p.department || p.role_label || 'موظف'} • شفت 12 ساعة:{' '}
-                <span className="num-ltr font-bold">
-                  {p.shift_start || '08:00'} → {p.shift_end || '20:00'}
-                </span>
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {data && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => {
-                    exportPersonLogCsv(data);
-                    onToast?.('تم تصدير سجل الموظف لملف Excel ✓');
-                  }}
-                  className="px-3 py-1.5 rounded-full bg-[var(--g-green-bg)] text-[var(--g-green)] text-xs font-extrabold flex items-center gap-1"
-                >
-                  <span className="ms-icon text-sm">table_view</span>
-                  <span>Excel</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    exportPersonLogWord(data);
-                    onToast?.('تم تصدير سجل الموظف لملف Word ✓');
-                  }}
-                  className="px-3 py-1.5 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-extrabold flex items-center gap-1"
-                >
-                  <span className="ms-icon text-sm">description</span>
-                  <span>Word</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => openWhatsAppShare(buildPersonLogWhatsAppText(data))}
-                  className="px-3 py-1.5 rounded-full bg-[#25D366]/15 text-[#128C7E] dark:text-[#4ADE80] text-xs font-extrabold flex items-center gap-1"
-                >
-                  <span className="ms-icon text-sm">share</span>
-                  <span>واتساب</span>
-                </button>
-              </>
-            )}
-            <button
-              type="button"
-              onClick={onClose}
-              className="w-9 h-9 rounded-full bg-[var(--g-surface-variant)] flex items-center justify-center"
+              Excel
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                exportPersonLogWord(data);
+                onToast?.('تم التصدير إلى Word');
+              }}
             >
-              <span className="ms-icon">close</span>
-            </button>
+              Word
+            </Button>
+            <Button
+              variant="whatsapp"
+              size="sm"
+              onClick={() => openWhatsAppShare(buildPersonLogWhatsAppText(data))}
+            >
+              واتساب
+            </Button>
           </div>
-        </div>
+        )}
 
         {loading ? (
-          <div className="p-8 text-center text-xs font-bold text-[var(--g-muted)]">
-            جاري تحميل السجل الكامل لـ {p.name}...
+          <div className="space-y-3">
+            <SkeletonKpiStrip count={4} />
+            <SkeletonList rows={4} />
           </div>
+        ) : error ? (
+          <EmptyState
+            icon="error_outline"
+            title="تعذر تحميل السجل"
+            actionLabel="إعادة المحاولة"
+            onAction={() => setReloadTick((t) => t + 1)}
+            compact
+          />
         ) : (
           <>
-            {/* Summary Cards */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <div className="p-3 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)]">
-                <div className="text-[11px] text-[var(--g-muted)] font-bold">مرات الحضور / الانصراف</div>
-                <div className="text-base font-black mt-0.5 num-ltr">
-                  {stats.totalCheckIns || 0} حضور / {stats.totalCheckOuts || 0} انصراف
-                </div>
-              </div>
-              <div className="p-3 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)]">
-                <div className="text-[11px] text-[var(--g-muted)] font-bold">الاستراحات والوقت المستغرق</div>
-                <div className="text-base font-black mt-0.5 text-[var(--g-yellow)]">
-                  {stats.totalBreaks || 0} ({stats.totalBreakMinutes || 0} دقيقة)
-                </div>
-              </div>
-              <div className="p-3 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)]">
-                <div className="text-[11px] text-[var(--g-muted)] font-bold">النواقص والمقترحات</div>
-                <div className="text-base font-black mt-0.5 text-[var(--g-primary)]">
-                  {stats.shortagesReported || 0} ({stats.suggestionsReported || 0} مقترح)
-                </div>
-              </div>
-              <div className="p-3 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)]">
-                <div className="text-[11px] text-[var(--g-muted)] font-bold">الملاحظات والحركات</div>
-                <div className="text-base font-black mt-0.5">
-                  {stats.notesRecorded || 0} ملاحظة • {stats.auditActionsCount || 0} حركة
-                </div>
-              </div>
-            </div>
+            <CockpitMetricStrip
+              columns={4}
+              items={[
+                {
+                  id: 'ci',
+                  label: 'الحضور',
+                  value: stats.totalCheckIns || 0,
+                  secondary: `انصراف ${stats.totalCheckOuts || 0}`,
+                },
+                {
+                  id: 'br',
+                  label: 'البريك',
+                  value: stats.totalBreaks || 0,
+                  secondary: `${stats.totalBreakMinutes || 0} د`,
+                },
+                {
+                  id: 'sh',
+                  label: 'النواقص',
+                  value: stats.shortagesReported || 0,
+                  secondary:
+                    stats.suggestionsReported > 0 ? `${stats.suggestionsReported} مقترح` : '',
+                },
+                {
+                  id: 'nt',
+                  label: 'الملاحظات',
+                  value: stats.notesRecorded || 0,
+                  secondary: `${stats.auditActionsCount || 0} حركة`,
+                },
+              ]}
+            />
 
-            {/* Tabs */}
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
-              {[
-                { id: 'attendance', label: `الحضور والاستراحات (${attLogs.length})`, icon: 'schedule' },
-                { id: 'shortages', label: `النواقص والمقترحات (${shortages.length})`, icon: 'inventory_2' },
-                { id: 'notes', label: `الملاحظات (${notes.length})`, icon: 'sticky_note_2' },
-                { id: 'audit', label: `سجل الحركات (${auditLogs.length})`, icon: 'history' },
-              ].map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => setTab(t.id)}
-                  className={`px-3.5 py-2 rounded-full text-xs font-extrabold flex items-center gap-1.5 whitespace-nowrap transition-all ${
-                    tab === t.id
-                      ? 'bg-[var(--g-primary)] text-white shadow-xs'
-                      : 'bg-[var(--g-surface-variant)] text-[var(--g-muted)]'
-                  }`}
-                >
-                  <span className="ms-icon text-sm">{t.icon}</span>
-                  <span>{t.label}</span>
-                </button>
-              ))}
-            </div>
+            <FilterChipRail items={tabItems} activeId={tab} onSelect={setTab} />
 
-            {/* Tab Content */}
-            <div className="max-h-[48vh] overflow-y-auto space-y-2 pr-0.5">
-              {tab === 'attendance' &&
-                (attLogs.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-[var(--g-muted)] bg-[var(--g-surface-variant)] rounded-2xl">
-                    لا توجد حركات حضور أو انصراف مسجلة لهذا الموظف بعد.
-                  </div>
-                ) : (
-                  attLogs.map((l) => (
-                    <div
-                      key={l.id}
-                      className="p-3 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] flex flex-wrap items-center justify-between gap-2"
-                    >
-                      <div className="space-y-0.5">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs font-extrabold text-[var(--g-text)]">
-                            {ACTION_LABELS[l.action_type] || l.action_type}
+            {tab === 'attendance' &&
+              (attLogs.length === 0 ? (
+                <EmptyState title="لا توجد حركات حضور" compact />
+              ) : (
+                <GroupedList>
+                  {attLogs.map((l) => {
+                    const cctvType = getCctvStatusType(l);
+                    const cctvTone =
+                      cctvType === 'confirmed'
+                        ? 'success'
+                        : cctvType === 'mismatch'
+                        ? 'danger'
+                        : 'warning';
+                    const metaParts = [
+                      l.late_minutes > 0 ? `تأخير ${l.late_minutes}د` : '',
+                      l.break_duration_minutes > 0 ? `بريك ${l.break_duration_minutes}د` : '',
+                      l.shift_date_key && l.shift_date_key !== l.date_key
+                        ? `شفت ${l.shift_date_key}`
+                        : '',
+                      formatCctvStatusArabic(l, { includeMeta: false }),
+                      l.recorded_by,
+                    ].filter(Boolean);
+
+                    return (
+                      <div key={l.id} className="px-3.5 py-2.5 space-y-1">
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <StatusDot tone={cctvTone} />
+                            <span className="font-medium text-ink truncate">
+                              {ACTION_LABELS[l.action_type] || l.action_type}
+                            </span>
+                          </div>
+                          <span className="text-ink-muted num-ltr shrink-0">
+                            {l.date_key} · {formatTimeArabic(l.timestamp)}
                           </span>
-                          <span className="px-2 py-0.5 rounded-full bg-[var(--g-surface)] text-[11px] font-bold num-ltr">
-                            {l.date_key} • {formatTimeArabic(l.timestamp)}
-                          </span>
-                          {l.shift_date_key && l.shift_date_key !== l.date_key && (
-                            <span className="px-2 py-0.5 rounded-full bg-[var(--g-purple-bg)] text-[var(--g-purple)] text-[10px] font-extrabold">
-                              🌙 تابع لشفت {l.shift_date_key}
-                            </span>
-                          )}
-                          {l.late_minutes > 0 && (
-                            <span className="px-2 py-0.5 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] text-[10px] font-extrabold">
-                              تأخير {l.late_minutes} د
-                            </span>
-                          )}
-                          {l.allowed_break_minutes > 0 && l.action_type === 'break_start' && (
-                            <span className="px-2 py-0.5 rounded-full bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] text-[10px] font-extrabold">
-                              مسموح {l.allowed_break_minutes} د
-                            </span>
-                          )}
-                          {l.break_duration_minutes > 0 && (
-                            <span className="px-2 py-0.5 rounded-full bg-[var(--g-green-bg)] text-[var(--g-green)] text-[10px] font-extrabold">
-                              مدة الاستراحة: {l.break_duration_minutes} د
-                            </span>
-                          )}
                         </div>
-                        {(l.note || l.break_reason) && (
-                          <div className="text-xs text-[var(--g-muted)]">
-                            📝 {l.break_reason ? `السبب: ${l.break_reason} ` : ''}
-                            {l.note}
+                        <div className="text-[11px] text-ink-muted ps-4 truncate">
+                          {metaParts.join(' · ')}
+                        </div>
+                        {(l.note || l.break_reason || l.cctv_note) && (
+                          <div className="text-xs text-ink-muted ps-4">
+                            {[l.break_reason, l.note, l.cctv_note].filter(Boolean).join(' · ')}
                           </div>
                         )}
                       </div>
-                      <div className="text-[11px] text-[var(--g-muted)]">بواسطة: {l.recorded_by}</div>
-                    </div>
-                  ))
-                ))}
+                    );
+                  })}
+                </GroupedList>
+              ))}
 
-              {tab === 'shortages' &&
-                (shortages.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-[var(--g-muted)] bg-[var(--g-surface-variant)] rounded-2xl">
-                    لم يسجل هذا الموظف أي نواقص أو مقترحات أصناف بعد.
-                  </div>
-                ) : (
-                  shortages.map((s) => (
+            {tab === 'shortages' &&
+              (shortages.length === 0 ? (
+                <EmptyState title="لا توجد نواقص" compact />
+              ) : (
+                <GroupedList>
+                  {shortages.map((s) => (
                     <div
                       key={s.id}
-                      className="p-3 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] flex flex-wrap items-center justify-between gap-2"
+                      className="px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs"
                     >
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]">
-                            {s.is_suggestion ? '💡 اقتراح صنف جديد' : '🛒 صنف ناقص'}
-                          </span>
-                          <span className="text-xs font-extrabold">{s.item_name}</span>
-                          <span className="text-[11px] text-[var(--g-muted)]">({s.category})</span>
+                      <div className="min-w-0 space-y-0.5">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <StatusDot tone={s.is_suggestion ? 'purple' : 'primary'} />
+                          <span className="font-medium text-ink truncate">{s.item_name}</span>
                         </div>
-                        <div className="text-xs text-[var(--g-muted)] mt-0.5">
-                          الكمية: {formatQtyForExport(s.requested_qty, s.unit)}
-                          {s.notes ? ` • ${s.notes}` : ''}
+                        <div className="text-[11px] text-ink-muted ps-4 truncate">
+                          {[s.category, formatQtyForExport(s.requested_qty, s.unit), s.notes]
+                            .filter(Boolean)
+                            .join(' · ')}
                         </div>
                       </div>
-                      <div className="text-[11px] text-[var(--g-muted)] num-ltr">{s.date_key}</div>
+                      <span className="text-[11px] text-ink-muted num-ltr shrink-0">
+                        {s.date_key}
+                      </span>
                     </div>
-                  ))
-                ))}
+                  ))}
+                </GroupedList>
+              ))}
 
-              {tab === 'notes' &&
-                (notes.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-[var(--g-muted)] bg-[var(--g-surface-variant)] rounded-2xl">
-                    لا توجد ملاحظات مسجلة بواسطة هذا الموظف.
-                  </div>
-                ) : (
-                  notes.map((n) => (
-                    <div
-                      key={n.id}
-                      className="p-3 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] space-y-1"
-                    >
-                      <div className="flex items-center justify-between text-xs font-bold">
-                        <span>
-                          {n.location_tag} • {n.category_tag}
+            {tab === 'notes' &&
+              (notes.length === 0 ? (
+                <EmptyState title="لا توجد ملاحظات" compact />
+              ) : (
+                <GroupedList>
+                  {notes.map((n) => (
+                    <div key={n.id} className="px-3.5 py-2.5 space-y-1">
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="font-medium text-ink truncate">
+                          {n.location_tag} · {n.category_tag}
                         </span>
-                        <span className="text-[11px] text-[var(--g-muted)] num-ltr">
+                        <span className="text-[11px] text-ink-muted num-ltr shrink-0">
                           {n.date_key} {n.dvr_timestamp}
                         </span>
                       </div>
-                      <p className="text-xs m-0 text-[var(--g-text)]">{n.content}</p>
+                      <p className="text-xs m-0 text-ink-muted leading-relaxed">{n.content}</p>
                     </div>
-                  ))
-                ))}
+                  ))}
+                </GroupedList>
+              ))}
 
-              {tab === 'audit' &&
-                (auditLogs.length === 0 ? (
-                  <div className="p-6 text-center text-xs text-[var(--g-muted)] bg-[var(--g-surface-variant)] rounded-2xl">
-                    لا توجد حركات رقابية مسجلة.
-                  </div>
-                ) : (
-                  auditLogs.map((al) => (
+            {tab === 'audit' &&
+              (auditLogs.length === 0 ? (
+                <EmptyState title="لا توجد حركات رقابية" compact />
+              ) : (
+                <GroupedList>
+                  {auditLogs.map((al) => (
                     <div
                       key={al.id}
-                      className="p-3 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] flex flex-wrap items-center justify-between gap-2"
+                      className="px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs"
                     >
-                      <div>
-                        <div className="text-xs font-extrabold">
-                          {al.action} — <span className="text-[var(--g-primary)]">{al.target_label}</span>
+                      <div className="min-w-0">
+                        <div className="font-medium text-ink truncate">
+                          {al.action} · {al.target_label}
                         </div>
-                        {al.details && <div className="text-[11px] text-[var(--g-muted)]">{al.details}</div>}
+                        {al.details && (
+                          <div className="text-[11px] text-ink-muted truncate">{al.details}</div>
+                        )}
                       </div>
-                      <div className="text-[11px] text-[var(--g-muted)] num-ltr">
+                      <span className="text-[11px] text-ink-muted num-ltr shrink-0">
                         {al.timestamp ? new Date(al.timestamp).toLocaleString('ar-EG') : ''}
-                      </div>
+                      </span>
                     </div>
-                  ))
-                ))}
-            </div>
+                  ))}
+                </GroupedList>
+              ))}
           </>
         )}
       </div>
-    </div>
+    </BottomSheet>
   );
 }

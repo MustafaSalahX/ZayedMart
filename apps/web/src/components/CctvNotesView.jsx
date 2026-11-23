@@ -1,55 +1,63 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import NoteComposerForm from './notes/NoteComposerForm.jsx';
-import { BottomSheet } from './ui/index.js';
+import {
+  BottomSheet,
+  Button,
+  ConfirmSheet,
+  EmptyState,
+  FilterChipRail,
+  GroupedList,
+  Icon,
+  SearchFilterBar,
+  SectionHeader,
+  StatusDot,
+} from './ui/index.js';
 import { postActionWithOfflineSupport, apiRequest } from '../lib/api.js';
 import { playSuccessChime } from '../lib/audio.js';
-import { formatTimeArabic, formatTimeWithSeconds } from '../lib/exportUtils.js';
+import { formatTimeArabic } from '../lib/exportUtils.js';
 
 const LOCATION_TAGS = [
   'منطقة الكاشير',
   'البوابة الرئيسية',
-  'رصيف استلام البضاعة',
+  'رصيف البضاعة',
   'الممرات والصالة',
   'الثلاجات والأجبان',
   'المخزن',
-  'محيط الماركت الخارجي',
+  'المحيط الخارجي',
 ];
 
 const CATEGORY_TAGS = [
-  'ملاحظات ومشاكل الكاشيرية',
-  'زحام على الكاشير',
-  'فرق حساب أو عهدة درج',
-  'عطل باركود أو سيستم كاشير',
-  'مرتجع أو موقف مع عميل',
+  'ملاحظات الكاشيرية',
+  'زحام كاشير',
+  'فرق درج',
+  'عطل باركود',
+  'موقف عميل',
   'ملاحظة عامة',
-  'تأخير أو ترك مكان العمل',
-  'عجز أو تالف بضاعة',
-  'ثلاجة مفتوحة أو عطل',
-  'اشتباه أو ملاحظة أمنية',
-  'نظافة وترتيب ممر',
+  'تأخير أو ترك عمل',
+  'عجز أو تالف',
+  'ثلاجة مفتوحة',
+  'ملاحظة أمنية',
+  'نظافة ممر',
 ];
 
 const SEVERITIES = [
   {
     id: 'normal',
     label: 'عادي',
-    icon: 'info',
-    activeStyle: 'g-pill-active border-transparent',
-    badge: 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]',
+    tone: 'primary',
+    activeStyle: 'bg-primary-solid text-on-primary border-[var(--g-primary-solid)]',
   },
   {
     id: 'warning',
-    label: 'يحتاج متابعة',
-    icon: 'warning',
-    activeStyle: 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] border-[#E37400]',
-    badge: 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]',
+    label: 'متابعة',
+    tone: 'warning',
+    activeStyle: 'bg-warning-solid text-on-warning border-[var(--g-warning-solid)]',
   },
   {
     id: 'urgent',
-    label: 'طارئ للإدارة',
-    icon: 'emergency_home',
-    activeStyle: 'bg-[var(--g-red-bg)] text-[var(--g-red)] border-[#B3261E]',
-    badge: 'bg-[var(--g-red-bg)] text-[var(--g-red)]',
+    label: 'طارئ',
+    tone: 'danger',
+    activeStyle: 'bg-danger-solid text-on-danger border-[var(--g-danger-solid)]',
   },
 ];
 
@@ -75,48 +83,37 @@ export default function CctvNotesView({
   onToast,
   onPreviewImage,
 }) {
-  const handoverCardTitle =
-    actorRole === 'cashier'
-      ? 'تسليم واستلام وردية الكاشيرية'
-      : actorRole === 'security'
-      ? 'تسليم واستلام وردية الأمن'
-      : actorRole === 'supervisor'
-      ? 'تسليم واستلام وردية مشرف الصالة'
-      : actorRole === 'manager' || actorRole === 'owner'
-      ? 'تسليم واستلام الوردية الإدارية'
-      : 'تسليم واستلام وردية مراقب الكاميرات';
-
-  const handoverButtonLabel =
-    actorRole === 'cashier'
-      ? 'تسليم وردية الكاشير للكاشير التالي'
-      : actorRole === 'security'
-      ? 'تسليم الوردية لفرد الأمن التالي'
-      : actorRole === 'supervisor'
-      ? 'تسليم الوردية للمشرف التالي'
-      : actorRole === 'manager' || actorRole === 'owner'
-      ? 'تسليم الوردية للمسؤول التالي'
-      : 'تسليم الوردية لمراقب الكاميرات التالي';
   const [locationTag, setLocationTag] = useState(
     actorRole === 'cashier' ? 'منطقة الكاشير' : LOCATION_TAGS[0]
   );
   const [categoryTag, setCategoryTag] = useState(
-    actorRole === 'cashier' ? 'ملاحظات ومشاكل الكاشيرية' : CATEGORY_TAGS[0]
+    actorRole === 'cashier' ? 'ملاحظات الكاشيرية' : CATEGORY_TAGS[0]
   );
   const [notesFilter, setNotesFilter] = useState('all');
+  const [noteSearch, setNoteSearch] = useState('');
   const [severity, setSeverity] = useState('normal');
   const [dvrTimestamp, setDvrTimestamp] = useState(() => nowHMS());
   const [content, setContent] = useState('');
   const [keepOpenForHandover, setKeepOpenForHandover] = useState(false);
   const [proofDataUrl, setProofDataUrl] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [resolvingId, setResolvingId] = useState('');
   const [editingNote, setEditingNote] = useState(null);
+  const [editSubmitting, setEditSubmitting] = useState(false);
+  const [deletingNote, setDeletingNote] = useState(null);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const [composerSheetOpen, setComposerSheetOpen] = useState(false);
 
-  // SmartFab hook: open mobile composer BottomSheet when 'note_add' action fires
+  const composerRef = useRef(null);
+
   useEffect(() => {
     function handleOpenComposer(ev) {
       if (ev?.detail?.action === 'note_add' && canWrite) {
-        setComposerSheetOpen(true);
+        if (typeof window !== 'undefined' && window.innerWidth >= 1024) {
+          composerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } else {
+          setComposerSheetOpen(true);
+        }
       }
     }
     window.addEventListener('zayed:open-composer', handleOpenComposer);
@@ -124,8 +121,8 @@ export default function CctvNotesView({
   }, [canWrite]);
 
   async function handleSaveNote(e) {
-    e.preventDefault();
-    if (submitting) return;
+    e?.preventDefault();
+    if (submitting || !canWrite) return;
     setSubmitting(true);
     try {
       const res = await postActionWithOfflineSupport(
@@ -146,11 +143,7 @@ export default function CctvNotesView({
       );
 
       playSuccessChime(severity === 'urgent' ? 'alert' : 'in');
-      onToast?.(
-        res.queuedOffline
-          ? 'تم حفظ الملاحظة محلياً وسيتم رفعها تلقائياً'
-          : 'تم تسجيل الملاحظة في سجل زايد مارت بنجاح ✓'
-      );
+      onToast?.(res.queuedOffline ? 'تم الحفظ محلياً' : 'تم تسجيل الملاحظة');
       setContent('');
       setProofDataUrl('');
       setDvrTimestamp(nowHMS());
@@ -166,21 +159,26 @@ export default function CctvNotesView({
   }
 
   async function handleResolveNote(noteId) {
+    if (resolvingId) return;
+    setResolvingId(noteId);
     try {
       await apiRequest(`/api/notes/${noteId}/resolve`, 'POST', {
         resolved_by: actorName,
       });
       playSuccessChime('in');
-      onToast?.('تم إغلاق المتابعة على الملاحظة ✓');
+      onToast?.('تم إغلاق الملاحظة');
       onRefresh?.();
     } catch (err) {
       onToast?.(err.message, 'error');
+    } finally {
+      setResolvingId('');
     }
   }
 
   async function handleSaveEditedNote(e) {
-    e.preventDefault();
-    if (!editingNote) return;
+    e?.preventDefault();
+    if (!editingNote || editSubmitting) return;
+    setEditSubmitting(true);
     try {
       await apiRequest(`/api/notes/${editingNote.id}`, 'PUT', {
         location_tag: editingNote.location_tag,
@@ -191,303 +189,281 @@ export default function CctvNotesView({
         is_open_handover: Boolean(editingNote.is_open_handover),
       });
       setEditingNote(null);
-      onToast?.('تم تعديل الملاحظة بنجاح ✓');
+      onToast?.('تم حفظ التعديل');
       onRefresh?.();
     } catch (err) {
       onToast?.(err.message, 'error');
+    } finally {
+      setEditSubmitting(false);
     }
   }
 
-  async function handleDeleteNote(note) {
-    if (!window.confirm('حذف هذه الملاحظة نهائياً من السجل؟')) return;
+  async function executeDeleteNote() {
+    if (!deletingNote || deleteSubmitting) return;
+    setDeleteSubmitting(true);
     try {
-      await apiRequest(`/api/notes/${note.id}`, 'DELETE');
-      onToast?.('تم حذف الملاحظة');
+      await apiRequest(`/api/notes/${deletingNote.id}`, 'DELETE');
+      onToast?.('تم الحذف');
+      setDeletingNote(null);
       onRefresh?.();
     } catch (err) {
       onToast?.(err.message, 'error');
+    } finally {
+      setDeleteSubmitting(false);
     }
   }
 
-  const openHandoverNotes = notes.filter((n) => n.is_open_handover === 1);
+  const openHandoverNotes = useMemo(
+    () => notes.filter((n) => Number(n.is_open_handover) === 1),
+    [notes]
+  );
 
-  const filteredNotes = notes.filter((n) => {
-    if (notesFilter === 'cashier') {
-      return (
-        (n.location_tag || '').includes('الكاشير') ||
-        (n.category_tag || '').includes('الكاشير') ||
-        (n.category_tag || '').includes('درج') ||
-        (n.category_tag || '').includes('باركود')
-      );
-    }
-    if (notesFilter === 'open') {
-      return Number(n.is_open_handover) === 1;
-    }
-    return true;
-  });
+  const cashierNotesCount = useMemo(
+    () =>
+      notes.filter(
+        (n) =>
+          (n.location_tag || '').includes('الكاشير') ||
+          (n.category_tag || '').includes('الكاشير') ||
+          (n.category_tag || '').includes('درج') ||
+          (n.category_tag || '').includes('باركود')
+      ).length,
+    [notes]
+  );
+
+  const filterChips = useMemo(
+    () => [
+      { id: 'all', label: 'الكل', count: notes.length },
+      { id: 'cashier', label: 'الكاشيرية', count: cashierNotesCount },
+      { id: 'open', label: 'للمتابعة', count: openHandoverNotes.length },
+    ],
+    [notes.length, cashierNotesCount, openHandoverNotes.length]
+  );
+
+  const filteredNotes = useMemo(() => {
+    const q = noteSearch.trim().toLowerCase();
+    return notes.filter((n) => {
+      if (notesFilter === 'cashier') {
+        const isCashier =
+          (n.location_tag || '').includes('الكاشير') ||
+          (n.category_tag || '').includes('الكاشير') ||
+          (n.category_tag || '').includes('درج') ||
+          (n.category_tag || '').includes('باركود');
+        if (!isCashier) return false;
+      } else if (notesFilter === 'open') {
+        if (Number(n.is_open_handover) !== 1) return false;
+      }
+
+      if (
+        q &&
+        !(n.content || '').toLowerCase().includes(q) &&
+        !(n.location_tag || '').toLowerCase().includes(q) &&
+        !(n.category_tag || '').toLowerCase().includes(q) &&
+        !(n.recorded_by || '').toLowerCase().includes(q)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [notes, notesFilter, noteSearch]);
+
+  const sharedComposerProps = {
+    locationTags: LOCATION_TAGS,
+    categoryTags: CATEGORY_TAGS,
+    severities: SEVERITIES,
+    locationTag,
+    setLocationTag,
+    categoryTag,
+    setCategoryTag,
+    severity,
+    setSeverity,
+    dvrTimestamp,
+    setDvrTimestamp,
+    onResetTimestamp: () => setDvrTimestamp(nowHMS()),
+    keepOpenForHandover,
+    setKeepOpenForHandover,
+    content,
+    setContent,
+    proofDataUrl,
+    setProofDataUrl,
+    submitting,
+    canWrite,
+    onSubmit: handleSaveNote,
+    onToast,
+  };
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-      {/* Right Column: Inline Note Composer on Desktop */}
-      <div className="hidden lg:block lg:col-span-5 space-y-4">
-        <NoteComposerForm
-          locationTags={LOCATION_TAGS}
-          categoryTags={CATEGORY_TAGS}
-          severities={SEVERITIES}
-          locationTag={locationTag}
-          setLocationTag={setLocationTag}
-          categoryTag={categoryTag}
-          setCategoryTag={setCategoryTag}
-          severity={severity}
-          setSeverity={setSeverity}
-          dvrTimestamp={dvrTimestamp}
-          setDvrTimestamp={setDvrTimestamp}
-          onResetTimestamp={() => setDvrTimestamp(nowHMS())}
-          keepOpenForHandover={keepOpenForHandover}
-          setKeepOpenForHandover={setKeepOpenForHandover}
-          content={content}
-          setContent={setContent}
-          proofDataUrl={proofDataUrl}
-          setProofDataUrl={setProofDataUrl}
-          submitting={submitting}
-          canWrite={canWrite}
-          onSubmit={handleSaveNote}
-          onToast={onToast}
-        />
-      </div>
+      {/* Desktop Inline Note Composer */}
+      {canWrite && (
+        <div ref={composerRef} className="hidden lg:block lg:col-span-5">
+          <NoteComposerForm {...sharedComposerProps} />
+        </div>
+      )}
 
-      {/* Mobile Composer Snap BottomSheet */}
-      <BottomSheet
-        open={composerSheetOpen}
-        onClose={() => setComposerSheetOpen(false)}
-        title="تسجيل ملاحظة جديدة"
-        subtitle="اختر المكان ونوع الملاحظة أو استخدم الإملاء الصوتي"
-        icon="edit_note"
-        maxWidth="max-w-xl"
-      >
-        <NoteComposerForm
-          inSheet
-          locationTags={LOCATION_TAGS}
-          categoryTags={CATEGORY_TAGS}
-          severities={SEVERITIES}
-          locationTag={locationTag}
-          setLocationTag={setLocationTag}
-          categoryTag={categoryTag}
-          setCategoryTag={setCategoryTag}
-          severity={severity}
-          setSeverity={setSeverity}
-          dvrTimestamp={dvrTimestamp}
-          setDvrTimestamp={setDvrTimestamp}
-          onResetTimestamp={() => setDvrTimestamp(nowHMS())}
-          keepOpenForHandover={keepOpenForHandover}
-          setKeepOpenForHandover={setKeepOpenForHandover}
-          content={content}
-          setContent={setContent}
-          proofDataUrl={proofDataUrl}
-          setProofDataUrl={setProofDataUrl}
-          submitting={submitting}
-          canWrite={canWrite}
-          onSubmit={handleSaveNote}
-          onToast={onToast}
-        />
-      </BottomSheet>
+      {/* Mobile Composer BottomSheet */}
+      {canWrite && (
+        <BottomSheet
+          open={composerSheetOpen}
+          onClose={() => setComposerSheetOpen(false)}
+          title="ملاحظة جديدة"
+          maxWidth="max-w-xl"
+        >
+          <NoteComposerForm inSheet {...sharedComposerProps} />
+        </BottomSheet>
+      )}
 
-      {/* Left Column: Mobile Quick Action Bar + Shift Handover Card + Notes Stream */}
-      <div className="lg:col-span-7 space-y-5">
+      {/* Main Column */}
+      <div className={`${canWrite ? 'lg:col-span-7' : 'lg:col-span-12'} space-y-4`}>
         {canWrite && (
-          <div className="lg:hidden g-card p-3.5 flex items-center justify-between gap-2.5 bg-[var(--g-surface)]">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-10 h-10 rounded-2xl bg-[var(--g-primary-container)] text-[var(--g-primary)] flex items-center justify-center shrink-0">
-                <span className="ms-icon filled text-xl">edit_note</span>
-              </div>
-              <div className="min-w-0">
-                <div className="text-sm font-black text-[var(--g-text)] truncate">
-                  تسجيل ملاحظة سريعة
-                </div>
-                <div className="text-[11px] text-[var(--g-muted)] truncate">
-                  لمس سريع أو إملاء صوتي بالعامية
-                </div>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setComposerSheetOpen(true)}
-              className="min-h-[44px] px-4 py-2 rounded-full bg-[var(--g-primary)] text-white text-xs sm:text-sm font-extrabold flex items-center gap-1.5 shadow-sm shrink-0 active:scale-[0.98]"
-            >
-              <span className="ms-icon text-lg">add</span>
-              <span>إضافة ملاحظة</span>
-            </button>
-          </div>
+          <Button
+            type="button"
+            variant="primary"
+            size="lg"
+            fullWidth
+            icon="add"
+            onClick={() => setComposerSheetOpen(true)}
+            className="lg:hidden"
+          >
+            ملاحظة جديدة
+          </Button>
         )}
-        {/* Feature #1: Shift Handover Control Card */}
-        <section className="g-card p-4 sm:p-5 bg-[var(--g-surface-tint)]">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="w-11 h-11 rounded-2xl bg-[var(--g-primary)] text-white flex items-center justify-center shrink-0">
-                <span className="ms-icon filled text-2xl">swap_horiz</span>
-              </div>
-              <div>
-                <h3 className="text-base font-extrabold m-0">
-                  {handoverCardTitle}
-                </h3>
-                <p className="text-xs text-[var(--g-muted)] m-0 mt-0.5">
-                  مهام مفتوحة الآن: <strong>{openHandoverNotes.length}</strong> ملاحظة •{' '}
-                  <strong>{summary.unloadingTrucksCount || 0}</strong> عربية قيد التنزيل
-                </p>
-              </div>
-            </div>
 
-            {canHandover && (
-              <button
-                type="button"
-                onClick={onOpenHandoverModal}
-                className="w-full sm:w-auto px-5 py-2.5 rounded-full bg-[var(--g-primary)] text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 shadow-xs shrink-0"
-              >
-                <span className="ms-icon filled text-lg">send_and_archive</span>
-                <span>{handoverButtonLabel}</span>
-              </button>
+        {/* Compact 1-Line Hairline Handover Bar */}
+        <div className="py-2.5 border-y border-line flex flex-wrap items-center justify-between gap-2">
+          <div className="text-xs sm:text-sm min-w-0">
+            <span className="font-semibold text-ink">تسليم الوردية</span>
+            <span className="text-ink-muted num-ltr">
+              {' · '}
+              {openHandoverNotes.length} مفتوحة · {summary.unloadingTrucksCount || 0} عربية
+            </span>
+            {handovers.length > 0 && (
+              <span className="text-xs text-ink-muted">
+                {' · '}
+                {handovers[0].from_operator} → {handovers[0].to_operator}
+              </span>
             )}
           </div>
 
-          {handovers.length > 0 && (
-            <div className="mt-3 pt-3 border-t border-[var(--g-border)] text-xs text-[var(--g-muted)] flex flex-wrap items-center justify-between gap-2">
-              <span>
-                آخر تسليم: من <strong>{handovers[0].from_operator}</strong> إلى{' '}
-                <strong>{handovers[0].to_operator}</strong> (
-                {handovers[0].acknowledged ? 'تم الاستلام ✓' : 'بانتظار استلام الوردية'})
-              </span>
-              <span className="num-ltr font-bold">
-                {formatTimeArabic(handovers[0].timestamp)}
-              </span>
-            </div>
+          {canHandover && onOpenHandoverModal && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={onOpenHandoverModal}
+            >
+              تسليم
+            </Button>
           )}
-        </section>
+        </div>
 
-        {/* Notes Feed */}
-        <section className="g-card p-4 sm:p-5">
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-            <div className="flex items-center gap-2">
-              <span className="ms-icon filled text-[var(--g-primary)]">feed</span>
-              <h3 className="text-base sm:text-lg font-extrabold m-0">
-                سجل ملاحظات الكاشيرية والأمن والكاميرات ({filteredNotes.length})
-              </h3>
-            </div>
+        {/* Notes Stream */}
+        <section className="space-y-3">
+          <SectionHeader
+            title="الملاحظات"
+            count={filteredNotes.length}
+            actions={
+              <div className="w-full sm:w-56">
+                <SearchFilterBar
+                  value={noteSearch}
+                  onChange={setNoteSearch}
+                  placeholder="بحث..."
+                />
+              </div>
+            }
+          />
 
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
-              {[
-                { id: 'all', label: `الكل (${notes.length})` },
-                { id: 'cashier', icon: 'point_of_sale', label: 'ملاحظات الكاشيرية' },
-                { id: 'open', icon: 'pending_actions', label: `للمتابعة (${openHandoverNotes.length})` },
-              ].map((f) => (
-                <button
-                  key={f.id}
-                  type="button"
-                  onClick={() => setNotesFilter(f.id)}
-                  className={`min-h-[36px] px-3 py-1 rounded-full text-xs font-extrabold whitespace-nowrap transition-all inline-flex items-center gap-1 ${
-                    notesFilter === f.id
-                      ? 'bg-[var(--g-primary)] text-white'
-                      : 'bg-[var(--g-surface-variant)] text-[var(--g-muted)]'
-                  }`}
-                >
-                  {f.icon && <span className="ms-icon text-sm">{f.icon}</span>}
-                  <span>{f.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+          <FilterChipRail
+            items={filterChips}
+            activeId={notesFilter}
+            onSelect={setNotesFilter}
+          />
 
           {filteredNotes.length === 0 ? (
-            <div className="text-center py-10 text-[var(--g-muted)] text-sm">
-              لا توجد ملاحظات مسجلة في هذا التصنيف حتى الآن.
-            </div>
+            <EmptyState
+              compact
+              title="لا توجد ملاحظات"
+              actionLabel={canWrite ? 'ملاحظة جديدة' : undefined}
+              onAction={
+                canWrite
+                  ? () => {
+                      if (typeof window !== 'undefined' && window.innerWidth >= 1024) {
+                        composerRef.current?.scrollIntoView({
+                          behavior: 'smooth',
+                          block: 'center',
+                        });
+                      } else {
+                        setComposerSheetOpen(true);
+                      }
+                    }
+                  : undefined
+              }
+            />
           ) : (
-            <div className="space-y-3">
+            <GroupedList>
               {filteredNotes.map((n) => {
                 const sev = SEVERITIES.find((s) => s.id === n.severity) || SEVERITIES[0];
+                const isOpenHandover = Number(n.is_open_handover) === 1;
                 return (
-                  <div
-                    key={n.id}
-                    className={`p-4 rounded-2xl border transition-all ${
-                      n.severity === 'urgent'
-                        ? 'border-[#B3261E]/60 bg-[var(--g-red-bg)]/30'
-                        : n.is_open_handover
-                        ? 'g-smart-timer-orange'
-                        : 'border-[var(--g-border)] bg-[var(--g-surface-variant)]/50'
-                    }`}
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-2">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className={`px-2.5 py-0.5 rounded-full text-xs font-extrabold ${sev.badge}`}>
-                          {sev.label}
+                  <div key={n.id} className="px-3.5 py-3 space-y-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2 flex-wrap min-w-0">
+                        <StatusDot tone={sev.tone} />
+                        <span className="text-xs sm:text-sm font-semibold text-ink">
+                          {n.location_tag}
                         </span>
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-[var(--g-surface)] border border-[var(--g-border)]">
-                          <span className="ms-icon text-sm text-[var(--g-primary)]">location_on</span>
-                          <span>{n.location_tag}</span>
-                        </span>
-                        <span className="text-xs text-[var(--g-muted)] font-semibold">
-                          • {n.category_tag}
-                        </span>
+                        <span className="text-xs text-ink-muted">· {n.category_tag}</span>
+                        {n.severity === 'urgent' && (
+                          <span className="text-[11px] font-semibold text-danger">
+                            · طارئ
+                          </span>
+                        )}
                       </div>
 
-                      <span className="inline-flex items-center gap-1 num-ltr text-xs font-extrabold px-2.5 py-1 rounded-lg bg-[var(--g-surface)] border border-[var(--g-border)]">
-                        <span className="ms-icon text-sm text-[var(--g-muted)]">schedule</span>
-                        <span>{n.dvr_timestamp || formatTimeWithSeconds(n.timestamp)}</span>
+                      <span className="num-ltr text-xs text-ink-muted shrink-0">
+                        {n.dvr_timestamp || formatTimeArabic(n.timestamp)}
                       </span>
                     </div>
 
-                    <p className="text-sm sm:text-base font-medium my-2.5 whitespace-pre-wrap">
+                    <p className="text-sm text-ink m-0 whitespace-pre-wrap leading-relaxed">
                       {n.content}
                     </p>
 
                     {n.proof_url && (
-                      <div className="mb-3">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onPreviewImage?.(n.proof_url, `${n.location_tag} - ${n.dvr_timestamp}`)
-                          }
-                          className="group relative inline-block rounded-2xl overflow-hidden border border-[var(--g-border)]"
-                        >
-                          <img
-                            src={n.proof_url}
-                            alt="مرفق الملاحظة"
-                            className="h-28 w-auto max-w-full object-cover"
-                          />
-                          <span className="absolute bottom-1.5 right-1.5 px-2.5 py-0.5 rounded-full bg-black/75 text-white text-[11px] font-bold flex items-center gap-1">
-                            <span className="ms-icon text-sm">zoom_in</span>
-                            تكبير
-                          </span>
-                        </button>
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onPreviewImage?.(
+                            n.proof_url,
+                            `${n.location_tag} - ${n.dvr_timestamp}`
+                          )
+                        }
+                        className="inline-block rounded-xl overflow-hidden border border-line cursor-pointer"
+                      >
+                        <img
+                          src={n.proof_url}
+                          alt="مرفق"
+                          className="h-24 w-auto max-w-full object-cover"
+                        />
+                      </button>
                     )}
 
-                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--g-border)]/70 text-xs text-[var(--g-muted)]">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-ink-muted">
                       <span>
-                        بواسطة: <strong>{n.recorded_by}</strong> • {n.date_key}
+                        {n.recorded_by} · <span className="num-ltr">{n.date_key}</span>
+                        {!isOpenHandover && n.resolved_by ? ` · أغلقه ${n.resolved_by}` : ''}
                       </span>
 
-                      <div className="flex items-center gap-2 flex-wrap">
-                        {n.is_open_handover === 1 ? (
-                          canResolveNotes ? (
-                            <button
-                              type="button"
-                              onClick={() => handleResolveNote(n.id)}
-                              className="px-3.5 py-1.5 rounded-full bg-[#146C2E] text-white font-extrabold flex items-center gap-1"
-                            >
-                              <span className="ms-icon text-sm">check</span>
-                              <span>تمت المتابعة والإغلاق ✓</span>
-                            </button>
-                          ) : (
-                            <span className="text-[var(--g-yellow)] font-extrabold">
-                              مفتوحة للمتابعة
-                            </span>
-                          )
-                        ) : (
-                          n.resolved_by && (
-                            <span className="text-[var(--g-green)] font-bold">
-                              تمت المتابعة ({n.resolved_by})
-                            </span>
-                          )
+                      <div className="flex items-center gap-1">
+                        {isOpenHandover && canResolveNotes && (
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            loading={resolvingId === n.id}
+                            onClick={() => handleResolveNote(n.id)}
+                          >
+                            إغلاق
+                          </Button>
                         )}
 
                         {canManageRecords && (
@@ -500,18 +476,18 @@ export default function CctvNotesView({
                                   is_open_handover: Boolean(n.is_open_handover),
                                 })
                               }
-                              className="w-8 h-8 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] flex items-center justify-center text-[var(--g-primary)]"
-                              title="تعديل الملاحظة"
+                              aria-label="تعديل الملاحظة"
+                              className="w-11 h-11 rounded-full text-ink-muted hover:text-primary hover:bg-surface-2 flex items-center justify-center cursor-pointer"
                             >
-                              <span className="ms-icon text-base">edit</span>
+                              <Icon name="edit" size={18} />
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleDeleteNote(n)}
-                              className="w-8 h-8 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] flex items-center justify-center"
-                              title="حذف الملاحظة"
+                              onClick={() => setDeletingNote(n)}
+                              aria-label="حذف الملاحظة"
+                              className="w-11 h-11 rounded-full text-danger hover:bg-danger-bg flex items-center justify-center cursor-pointer"
                             >
-                              <span className="ms-icon text-base">delete</span>
+                              <Icon name="delete" size={18} />
                             </button>
                           </>
                         )}
@@ -520,64 +496,113 @@ export default function CctvNotesView({
                   </div>
                 );
               })}
-            </div>
+            </GroupedList>
           )}
         </section>
       </div>
 
-      {/* Admin Edit Note Modal */}
-      {editingNote && canManageRecords && (
-        <div onClick={() => setEditingNote(null)} className="g-modal-overlay">
-          <form
-            onClick={(e) => e.stopPropagation()}
-            onSubmit={handleSaveEditedNote}
-            className="g-dialog-sheet max-w-md space-y-4 animate-pop"
-          >
-            <div className="g-sheet-handle" />
-            <div className="flex items-center justify-between border-b border-[var(--g-border)] pb-3">
-              <h3 className="text-base font-extrabold m-0">تعديل الملاحظة</h3>
-              <button
-                type="button"
-                onClick={() => setEditingNote(null)}
-                className="w-9 h-9 rounded-full bg-[var(--g-surface-variant)] flex items-center justify-center"
-              >
-                <span className="ms-icon">close</span>
-              </button>
-            </div>
-
+      {/* Edit Note BottomSheet */}
+      <BottomSheet
+        open={Boolean(editingNote && canManageRecords)}
+        onClose={() => {
+          if (!editSubmitting) setEditingNote(null);
+        }}
+        title="تعديل الملاحظة"
+        subtitle={editingNote?.location_tag || ''}
+        maxWidth="max-w-md"
+        footer={
+          editingNote ? (
+            <Button
+              type="submit"
+              form="edit-note-form"
+              variant="primary"
+              size="lg"
+              fullWidth
+              loading={editSubmitting}
+            >
+              حفظ
+            </Button>
+          ) : null
+        }
+      >
+        {editingNote && (
+          <form id="edit-note-form" onSubmit={handleSaveEditedNote} className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-bold mb-1">المكان</label>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  المكان
+                </label>
                 <select
-                  value={editingNote.location_tag}
+                  value={editingNote.location_tag || LOCATION_TAGS[0]}
                   onChange={(e) =>
                     setEditingNote((x) => ({ ...x, location_tag: e.target.value }))
                   }
-                  className="g-input font-bold"
+                  className="g-input"
                 >
                   {LOCATION_TAGS.map((l) => (
-                    <option key={l}>{l}</option>
+                    <option key={l} value={l}>
+                      {l}
+                    </option>
                   ))}
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-bold mb-1">الأهمية</label>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  التصنيف
+                </label>
                 <select
-                  value={editingNote.severity}
+                  value={editingNote.category_tag || CATEGORY_TAGS[0]}
                   onChange={(e) =>
-                    setEditingNote((x) => ({ ...x, severity: e.target.value }))
+                    setEditingNote((x) => ({ ...x, category_tag: e.target.value }))
                   }
-                  className="g-input font-bold"
+                  className="g-input"
                 >
-                  <option value="normal">عادي</option>
-                  <option value="warning">يحتاج متابعة</option>
-                  <option value="urgent">طارئ للإدارة</option>
+                  {CATEGORY_TAGS.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
                 </select>
               </div>
             </div>
 
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  الأهمية
+                </label>
+                <select
+                  value={editingNote.severity || 'normal'}
+                  onChange={(e) =>
+                    setEditingNote((x) => ({ ...x, severity: e.target.value }))
+                  }
+                  className="g-input"
+                >
+                  <option value="normal">عادي</option>
+                  <option value="warning">متابعة</option>
+                  <option value="urgent">طارئ</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  وقت DVR
+                </label>
+                <input
+                  type="text"
+                  value={editingNote.dvr_timestamp || ''}
+                  onChange={(e) =>
+                    setEditingNote((x) => ({ ...x, dvr_timestamp: e.target.value }))
+                  }
+                  placeholder="HH:MM:SS"
+                  className="g-input num-ltr text-center"
+                />
+              </div>
+            </div>
+
             <div>
-              <label className="block text-xs font-bold mb-1">نص الملاحظة</label>
+              <label className="block text-xs font-medium text-ink-muted mb-1">
+                التفاصيل
+              </label>
               <textarea
                 rows={3}
                 value={editingNote.content || ''}
@@ -588,27 +613,37 @@ export default function CctvNotesView({
               />
             </div>
 
-            <label className="flex items-center gap-2 p-3 rounded-2xl bg-[var(--g-surface-variant)] text-xs font-extrabold cursor-pointer">
+            <label className="min-h-[44px] flex items-center gap-2 py-2 border-t border-line text-xs font-medium text-ink cursor-pointer">
               <input
                 type="checkbox"
                 checked={Boolean(editingNote.is_open_handover)}
                 onChange={(e) =>
                   setEditingNote((x) => ({ ...x, is_open_handover: e.target.checked }))
                 }
-                className="w-4 h-4 accent-[#0B57D0]"
+                className="w-4 h-4 accent-[var(--g-primary-solid)]"
               />
-              <span>مفتوحة للمتابعة في الوردية</span>
+              <span>متابعة في الوردية</span>
             </label>
-
-            <button
-              type="submit"
-              className="w-full py-3.5 rounded-full bg-[var(--g-primary)] text-white font-extrabold text-sm"
-            >
-              حفظ التعديل ✓
-            </button>
           </form>
-        </div>
-      )}
+        )}
+      </BottomSheet>
+
+      <ConfirmSheet
+        open={Boolean(deletingNote)}
+        onClose={() => {
+          if (!deleteSubmitting) setDeletingNote(null);
+        }}
+        onConfirm={executeDeleteNote}
+        title="حذف الملاحظة"
+        description={
+          deletingNote
+            ? `حذف ملاحظة ${deletingNote.location_tag} — ${deletingNote.category_tag}؟`
+            : ''
+        }
+        confirmLabel="حذف"
+        tone="danger"
+        loading={deleteSubmitting}
+      />
     </div>
   );
 }

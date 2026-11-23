@@ -19,6 +19,7 @@ import {
   encryptPasswordForAdmin,
   getClientIp,
   hashPin,
+  verifyPinHash,
 } from '../common/crypto.util';
 import {
   AuthContext,
@@ -134,6 +135,8 @@ export class BootstrapController {
         'branch_name',
         'max_break_minutes',
         'max_unload_minutes',
+        'login_show_role_cards',
+        'password_min_length',
         'supabase_url',
         'supabase_anon_key',
         'cloud_sync_enabled',
@@ -141,16 +144,44 @@ export class BootstrapController {
       for (const key of allowedKeys) {
         if (body && body[key] !== undefined) {
           if (key === 'supabase_anon_key' && body[key] === '***KEEP***') continue;
+          if (key === 'login_show_role_cards') {
+            await this.db.upsertSetting(
+              key,
+              body[key] === false || body[key] === 'false' ? 'false' : 'true'
+            );
+            continue;
+          }
+          if (key === 'password_min_length') {
+            const clamped = Math.min(16, Math.max(3, Number(body[key]) || 4));
+            await this.db.upsertSetting(key, String(clamped));
+            continue;
+          }
           await this.db.upsertSetting(key, String(body[key]));
         }
       }
 
+      let freshToken: string | undefined;
       if (body?.admin_pin && String(body.admin_pin).trim().length >= 1) {
+        const cleanCurrent = normalizeDigits(String(body?.current_password || '').trim());
+        const selfRow = await this.db.queryOne<any>(
+          'SELECT * FROM system_users WHERE id = ? LIMIT 1',
+          [auth.user.id]
+        );
+        if (
+          !cleanCurrent ||
+          !selfRow ||
+          !verifyPinHash(cleanCurrent, selfRow.pin_salt, selfRow.pin_hash)
+        ) {
+          return res.status(400).json({
+            error:
+              'لتغيير كلمة المرور يجب إدخال كلمة المرور الحالية أو استخدام قسم الأمان في صفحة الإعدادات',
+          });
+        }
         const cleanNewPass = normalizeDigits(String(body.admin_pin).trim());
         const conflict = await this.db.findPasswordConflict(cleanNewPass, auth.user.id);
         if (conflict) {
           return res.status(400).json({
-            error: `كلمة المرور هذه مستخدمة بالفعل لحساب "${conflict.display_name}" — يجب أن تكون لكل دور كلمة مرور مختلفة`,
+            error: 'كلمة المرور هذه مستخدمة بالفعل — يجب أن تكون لكل دور كلمة مرور مختلفة',
           });
         }
         const { saltHex, hashHex } = hashPin(cleanNewPass);
@@ -158,9 +189,23 @@ export class BootstrapController {
           cleanNewPass,
           await this.db.getSessionSecret()
         );
+        const nowIso = new Date().toISOString();
+        const nextSessionVersion = Number(selfRow.session_version || 1) + 1;
         await this.db.execute(
-          'UPDATE system_users SET pin_salt = ?, pin_hash = ?, pin_cipher = ?, updated_at = ? WHERE id = ?',
-          [saltHex, hashHex, cipher, new Date().toISOString(), auth.user.id]
+          `UPDATE system_users
+           SET pin_salt = ?, pin_hash = ?, pin_cipher = ?, session_version = ?, password_changed_at = ?, updated_at = ?
+           WHERE id = ?`,
+          [saltHex, hashHex, cipher, nextSessionVersion, nowIso, nowIso, auth.user.id]
+        );
+        await this.db.execute(
+          'UPDATE user_sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0',
+          [auth.user.id]
+        );
+        this.db.invalidateAuthCache();
+        freshToken = await this.db.issueSessionForUser(
+          { id: auth.user.id, session_version: nextSessionVersion },
+          getClientIp(req),
+          String(req.headers['user-agent'] || '')
         );
       }
 
@@ -174,7 +219,7 @@ export class BootstrapController {
       });
 
       await this.realtime.broadcastStoreUpdate('settings');
-      return res.json({ ok: true });
+      return res.json({ ok: true, ...(freshToken ? { token: freshToken } : {}) });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }
@@ -425,6 +470,8 @@ export class BootstrapController {
           emp_code: e.emp_code || '',
           name: e.name,
           department: e.department,
+          shift_start: e.shift_start || '08:00',
+          shift_end: e.shift_end || '20:00',
           daysSet: new Set<string>(),
           checkIns: 0,
           checkOuts: 0,
@@ -442,6 +489,8 @@ export class BootstrapController {
             emp_code: '',
             name: log.employee_name,
             department: log.department,
+            shift_start: '08:00',
+            shift_end: '20:00',
             daysSet: new Set<string>(),
             checkIns: 0,
             checkOuts: 0,
@@ -471,6 +520,9 @@ export class BootstrapController {
       const employeeStats = Array.from(empMap.values())
         .map(({ daysSet, ...rest }) => ({
           ...rest,
+          breaksCount: rest.breaks,
+          checkOutsCount: rest.checkOuts,
+          checkInsCount: rest.checkIns,
           daysPresent: daysSet.size,
         }))
         .sort((a, b) => b.daysPresent - a.daysPresent || b.totalLateMinutes - a.totalLateMinutes);
@@ -478,6 +530,7 @@ export class BootstrapController {
       const supMap = new Map<string, any>();
       for (const s of suppliers) {
         supMap.set(s.name, {
+          id: s.id,
           supplier_name: s.name,
           category: s.category,
           deliveriesCount: 0,
@@ -493,6 +546,7 @@ export class BootstrapController {
         const key = t.supplier_name;
         if (!supMap.has(key)) {
           supMap.set(key, {
+            id: t.supplier_id || '',
             supplier_name: key,
             category: t.category,
             deliveriesCount: 0,
@@ -517,6 +571,7 @@ export class BootstrapController {
       const supplierStats = Array.from(supMap.values())
         .map((s) => ({
           ...s,
+          name: s.supplier_name,
           avgDurationMinutes:
             s.completedCount > 0 ? Math.round(s.totalDuration / s.completedCount) : 0,
         }))
@@ -580,7 +635,13 @@ export class BootstrapController {
           totalBreakMinutes: attendanceLogs
             .filter((l) => l.action_type === 'break_end')
             .reduce((s, l) => s + (Number(l.break_duration_minutes) || 0), 0),
-          unverifiedCount: attendanceLogs.filter((l) => !Number(l.verified_by_cctv)).length,
+          unverifiedCount: attendanceLogs.filter(
+            (l) =>
+              l.cctv_status !== 'confirmed' &&
+              l.cctv_status !== 'mismatch' &&
+              !Number(l.verified_by_cctv)
+          ).length,
+          mismatchCount: attendanceLogs.filter((l) => l.cctv_status === 'mismatch').length,
           trucksTotal: truckLogs.length,
           trucksCompleted: completedTrucks.length,
           trucksUnloading: truckLogs.filter((t) => t.status === 'unloading').length,

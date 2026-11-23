@@ -1,9 +1,9 @@
 import React, { useRef, useState } from 'react';
 import { isSpeechRecognitionSupported, startArabicVoiceDictation } from '../lib/audio.js';
+import Icon from './ui/Icon.jsx';
 
 /**
- * زر المايكروفون الذكي لتحويل الصوت إلى نص بالعربية (Voice-to-Text)
- * يعمل في الملاحظات، استلام العربيات، الحضور، وتسليم الورديات بدون لمس الكيبورد
+ * Arabic Voice-to-Text dictation trigger (`VoiceMicButton`).
  */
 export default function VoiceMicButton({ onTranscript, onToast, small = false }) {
   const [listening, setListening] = useState(false);
@@ -24,7 +24,7 @@ export default function VoiceMicButton({ onTranscript, onToast, small = false })
     recRef.current = startArabicVoiceDictation({
       onResult: (text) => {
         onTranscript?.(text);
-        onToast?.('تم تحويل صوتك إلى نص مكتوب 🎤');
+        onToast?.('تم النسخ الصوتي');
       },
       onError: (errMsg) => {
         onToast?.(errMsg, 'error');
@@ -39,17 +39,18 @@ export default function VoiceMicButton({ onTranscript, onToast, small = false })
     <button
       type="button"
       onClick={handleToggle}
-      className={`inline-flex items-center gap-1.5 rounded-full font-bold transition-all shrink-0 ${
-        small ? 'px-3 py-1 text-xs' : 'px-3.5 py-1.5 text-xs sm:text-sm'
+      aria-pressed={listening}
+      aria-label={listening ? 'إيقاف الإملاء الصوتي' : 'إملاء صوتي'}
+      className={`inline-flex items-center justify-center gap-1.5 min-h-[44px] rounded-[var(--g-radius-btn)] font-semibold transition-[transform,background-color,color,opacity] duration-150 ease-[var(--g-ease-out)] shrink-0 active:scale-[0.97] ${
+        small ? 'px-2.5 py-1.5 text-xs' : 'px-3.5 py-2 text-xs sm:text-sm'
       } ${
         listening
-          ? 'bg-[#D93025] text-white shadow-sm animate-pulse'
-          : 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] hover:opacity-90'
+          ? 'bg-danger-solid text-on-danger animate-pulse'
+          : 'bg-surface-2 text-ink border border-line hover:border-line-strong'
       }`}
-      title="تحدث بصوتك ليتحول الكلام لنص مكتوب تلقائياً"
     >
-      <span className="ms-icon filled text-base">{listening ? 'graphic_eq' : 'mic'}</span>
-      <span>{listening ? 'تحدث الآن... (اضغط للإيقاف)' : 'إملاء صوتي 🎤'}</span>
+      <Icon name={listening ? 'graphic_eq' : 'mic'} size={16} filled />
+      <span>{listening ? 'إيقاف' : small ? 'صوتي' : 'إملاء صوتي'}</span>
     </button>
   );
 }

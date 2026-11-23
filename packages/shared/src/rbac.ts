@@ -188,7 +188,7 @@ export const ALL_PERMISSIONS: PermissionItem[] = [
   { id: 'attendance:kiosk', label: 'تسجيل حضور كشك العمال / QR', group: 'الحضور والانصراف' },
   { id: 'attendance:read', label: 'عرض سجل الحضور التفصيلي والبريك', group: 'الحضور والانصراف' },
   { id: 'attendance:write', label: 'تسجيل حضور وانصراف للجميع وتحديد مدة البريك', group: 'الحضور والانصراف' },
-  { id: 'attendance:verify', label: 'ختم مطابقة مراقب الكاميرات ✓', group: 'الحضور والانصراف' },
+  { id: 'attendance:verify', label: 'تأكيد ومطابقة حضور الموظفين بالكاميرات في الميعاد ✓', group: 'الحضور والانصراف' },
   { id: 'trucks:read', label: 'عرض سجل عربيات البضاعة', group: 'الموردون والطلبيات' },
   { id: 'trucks:write', label: 'تسجيل وصول وإنهاء استلام العربيات', group: 'الموردون والطلبيات' },
   { id: 'suppliers:clear_return', label: 'تسوية ومسح تنبيهات مرتجعات الموردين', group: 'الموردون والطلبيات' },
@@ -204,6 +204,7 @@ export const ALL_PERMISSIONS: PermissionItem[] = [
   { id: 'walkie:use', label: 'استخدام جهاز اللاسلكي الفوري (Push-To-Talk)', group: 'التواصل والبروفايل' },
   { id: 'walkie:all_channels', label: 'الدخول والاستماع والتحدث في جميع قنوات اللاسلكي', group: 'التواصل والبروفايل' },
   { id: 'profile:view', label: 'عرض البروفايل الشخصي والباسورد والسجل الفردي', group: 'التواصل والبروفايل' },
+  { id: 'profile:edit_self', label: 'تعديل الصورة الشخصية واسم المستخدم وكلمة المرور الخاصة بي', group: 'التواصل والبروفايل' },
   { id: 'reports:view', label: 'عرض لوحة التقارير الشاملة والسجل الزمني الموحد', group: 'الإدارة والأمان' },
   { id: 'reports:export', label: 'تصدير تقارير Excel و Word و WhatsApp', group: 'الإدارة والأمان' },
   { id: 'records:manage', label: 'تعديل وحذف أي سجل تشغيلي (حضور، عربيات، نواقص، ملاحظات)', group: 'الإدارة والأمان' },
@@ -218,11 +219,24 @@ export const ALL_PERMISSIONS: PermissionItem[] = [
   { id: 'schedule:swap_request', label: 'طلب تبديل/ترحيل الإجازة والموافقة على تبديل الزملاء', group: 'جدول الإجازات' },
 ];
 
+export const ATTENDANCE_AUTHORIZED_ROLES = [
+  'owner',
+  'manager',
+  'supervisor',
+  'security',
+  'cctv',
+] as const;
+
+export const CCTV_VERIFY_ROLES = [
+  'owner',
+  'manager',
+  'supervisor',
+  'cctv',
+] as const;
+
 export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
   owner: ALL_PERMISSIONS.map((p) => p.id),
   manager: [
-    'attendance:self',
-    'attendance:kiosk',
     'attendance:read',
     'attendance:write',
     'attendance:verify',
@@ -241,6 +255,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'walkie:use',
     'walkie:all_channels',
     'profile:view',
+    'profile:edit_self',
     'reports:view',
     'reports:export',
     'records:manage',
@@ -253,8 +268,6 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'schedule:swap_request',
   ],
   supervisor: [
-    'attendance:self',
-    'attendance:kiosk',
     'attendance:read',
     'attendance:write',
     'attendance:verify',
@@ -273,6 +286,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'walkie:use',
     'walkie:all_channels',
     'profile:view',
+    'profile:edit_self',
     'reports:view',
     'reports:export',
     'staff:manage',
@@ -283,7 +297,6 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'schedule:swap_request',
   ],
   cashier: [
-    'attendance:self',
     'attendance:read',
     'shortages:read',
     'shortages:write',
@@ -294,12 +307,11 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'chat:write',
     'walkie:use',
     'profile:view',
+    'profile:edit_self',
     'schedule:read',
     'schedule:swap_request',
   ],
   cctv: [
-    'attendance:self',
-    'attendance:kiosk',
     'attendance:read',
     'attendance:write',
     'attendance:verify',
@@ -315,13 +327,12 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'walkie:use',
     'walkie:all_channels',
     'profile:view',
+    'profile:edit_self',
     'reports:view',
     'reports:export',
     'schedule:read',
   ],
   security: [
-    'attendance:self',
-    'attendance:kiosk',
     'attendance:read',
     'attendance:write',
     'trucks:read',
@@ -336,10 +347,10 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'walkie:use',
     'walkie:all_channels',
     'profile:view',
+    'profile:edit_self',
     'schedule:read',
   ],
   hall: [
-    'attendance:self',
     'shortages:read',
     'shortages:write',
     'notes:read',
@@ -349,11 +360,10 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'chat:write',
     'walkie:use',
     'profile:view',
+    'profile:edit_self',
     'schedule:read',
   ],
   warehouse: [
-    'attendance:self',
-    'attendance:kiosk',
     'trucks:read',
     'trucks:write',
     'suppliers:clear_return',
@@ -367,11 +377,10 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'chat:write',
     'walkie:use',
     'profile:view',
+    'profile:edit_self',
     'schedule:read',
   ],
   delivery: [
-    'attendance:self',
-    'attendance:kiosk',
     'shortages:read',
     'notes:read',
     'notes:write',
@@ -379,6 +388,7 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
     'chat:write',
     'walkie:use',
     'profile:view',
+    'profile:edit_self',
     'schedule:read',
   ],
   kiosk: ['attendance:kiosk'],

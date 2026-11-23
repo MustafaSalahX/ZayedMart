@@ -1,8 +1,43 @@
-import React, { useEffect, useState } from 'react';
-import { hasAnyPermission, hasPermission } from '../lib/api.js';
-import PwaInstallBanner from './PwaInstallBanner.jsx';
-import { BottomSheet, Button } from './ui/index.js';
+import React, { useState } from 'react';
+import { buildNavTabs, getRoleCapabilities } from '../lib/navigation.js';
+import { MODE_OPTIONS, THEMES_REGISTRY } from '../lib/themeRegistry.js';
+import { useTheme } from '../lib/themeContext.jsx';
+import {
+  BottomSheet,
+  BrandLogo,
+  Button,
+  GroupedList,
+  GroupedRow,
+  Icon,
+  RoleAvatar,
+  SegmentedControl,
+} from './ui/index.js';
 
+function shiftIsoDate(dateStr, deltaDays) {
+  try {
+    const [y, m, d] = String(dateStr || '')
+      .split('-')
+      .map(Number);
+    if (!y || !m || !d) return dateStr;
+    const dt = new Date(y, m - 1, d + deltaDays);
+    return [
+      dt.getFullYear(),
+      String(dt.getMonth() + 1).padStart(2, '0'),
+      String(dt.getDate()).padStart(2, '0'),
+    ].join('-');
+  } catch {
+    return dateStr;
+  }
+}
+
+/**
+ * Adaptive 5-Architecture Top Navigation Chrome (`TopBar`):
+ * - minimal-slim: 52px single-row flat typographic bar, 1px hairline, underlined links (0 pills, 0 brand bar)
+ * - floating-glass-capsule: detached iOS 26 frosted glass capsule with Fresnel rim over <AmbientBackdrop />
+ * - editorial-rule: warm editorial bar + 1px champagne-gold bottom gradient rule
+ * - studio-segmented: crisp studio bar housing a recessed segmented nav pill track
+ * - classic-clean: clean detoxed ZayedMart bar with 2px Zayed Blue top hairline & M3 tonal pills
+ */
 export default function TopBar({
   storeName,
   branchName,
@@ -14,523 +49,596 @@ export default function TopBar({
   onSelectTab,
   summary,
   connectionMode,
-  offlineQueueCount,
+  offlineQueueCount = 0,
   isSyncing = false,
   onFlushOfflineQueue,
-  onToast,
-  darkMode,
-  onToggleDarkMode,
-  liteMode = false,
-  onToggleLiteMode,
-  fontScale,
-  onCycleFontScale,
-  fontFamily,
-  onToggleFontFamily,
+  darkMode: darkModeProp,
   selectedDate,
   onChangeDate,
   todayKey,
   onOpenQrModal,
   onOpenHandoverModal,
   onOpenProfileModal,
+  onOpenSettings,
   canUseWalkie = false,
   walkieActive = false,
   onOpenWalkieModal,
 }) {
-  const [clock, setClock] = useState(() => new Date());
   const [settingsSheetOpen, setSettingsSheetOpen] = useState(false);
+  const [dateSheetOpen, setDateSheetOpen] = useState(false);
 
-  useEffect(() => {
-    const timer = setInterval(() => setClock(new Date()), 1000);
-    return () => clearInterval(timer);
-  }, []);
+  const themeCtx = useTheme();
+  const arch = themeCtx.architecture;
+  const headerLayout = arch.shell.headerLayout;
+  const darkMode = darkModeProp !== undefined ? darkModeProp : themeCtx.darkMode;
+
+  const isMinimal = headerLayout === 'minimal-slim';
+  const isGlass = headerLayout === 'floating-glass-capsule';
+  const isElegant = headerLayout === 'editorial-rule';
+  const isModern = headerLayout === 'studio-segmented';
 
   const role = authUser?.role || '';
-  const canAttendance = hasAnyPermission(permissions, role, [
-    'attendance:self',
-    'attendance:read',
-    'attendance:write',
-    'attendance:kiosk',
-  ]);
-  const canVerify = hasPermission(permissions, role, 'attendance:verify');
-  const canQr = hasAnyPermission(permissions, role, ['attendance:kiosk', 'attendance:write']);
-  const canHandover = hasPermission(permissions, role, 'handover:manage');
-  const canShortages = hasAnyPermission(permissions, role, [
-    'shortages:read',
-    'shortages:write',
-    'shortages:manage',
-  ]);
-  const canSchedule = hasAnyPermission(permissions, role, [
-    'schedule:read',
-    'schedule:manage',
-    'schedule:swap_request',
-  ]);
-  const canTrucks = hasAnyPermission(permissions, role, ['trucks:read', 'trucks:write']);
-  const canNotes = hasAnyPermission(permissions, role, ['notes:read', 'notes:write']);
-  const canChat = hasAnyPermission(permissions, role, ['chat:read', 'chat:write']);
-  const canDashboard = hasAnyPermission(permissions, role, [
-    'reports:view',
-    'staff:manage',
-    'suppliers:manage',
-    'users:manage',
-    'audit:view',
-    'settings:manage',
-    'backup:manage',
-  ]);
-  const isAdminLevel = hasAnyPermission(permissions, role, [
-    'users:manage',
-    'settings:manage',
-    'staff:manage',
-    'records:manage',
-  ]);
+  const caps = getRoleCapabilities(permissions, role);
+  const navTabs = buildNavTabs({
+    role,
+    permissions,
+    summary,
+    includeSettings: true,
+  });
 
-  const navTabs = [];
+  const operationalTabsCount = navTabs.filter((t) => t.id !== 'settings').length;
+  const isSingleShortageRole =
+    operationalTabsCount === 1 && navTabs[0]?.id === 'shortages';
+  const showDateControl =
+    !isSingleShortageRole && activeTab !== 'schedule' && activeTab !== 'settings';
 
-  if (canAttendance) {
-    navTabs.push({
-      id: 'attendance',
-      label: 'الحضور والانصراف',
-      icon: 'badge',
-      count: (summary?.presentCount || 0) + (summary?.onBreakCount || 0),
-      alertCount: canVerify ? summary?.unverifiedAttendanceCount || 0 : 0,
-    });
-  }
+  const isToday = !selectedDate || selectedDate === todayKey;
+  const shortDateDisplay = isToday
+    ? 'اليوم'
+    : String(selectedDate || '').slice(5).replace('-', '/');
 
-  if (canShortages) {
-    navTabs.push({
-      id: 'shortages',
-      label: 'نواقص الصالة',
-      icon: 'shopping_basket',
-      alertCount: summary?.openShortagesCount || 0,
-    });
-  }
-
-  if (canSchedule) {
-    navTabs.push({
-      id: 'schedule',
-      label: 'جدول الإجازات',
-      icon: 'calendar_month',
-      alertCount: summary?.pendingDayOffSwapsCount || 0,
-    });
-  }
-
-  if (canTrucks) {
-    navTabs.push({
-      id: 'trucks',
-      label: 'عربيات البضاعة والطلبيات',
-      icon: 'local_shipping',
-      count: summary?.unloadingTrucksCount || 0,
-      isWarning: (summary?.unloadingTrucksCount || 0) > 0,
-    });
-  }
-
-  if (canNotes) {
-    navTabs.push({
-      id: 'notes',
-      label: 'الملاحظات والورديات',
-      icon: 'sticky_note_2',
-      count: summary?.openHandoverNotesCount || 0,
-      alertCount: summary?.urgentNotesCount || 0,
-    });
-  }
-
-  if (canChat) {
-    navTabs.push({
-      id: 'chat',
-      label: 'تواصل الكاشيرية والتيم',
-      icon: 'forum',
-      alertCount: summary?.urgentMessagesCount || 0,
-    });
-  }
-
-  if (canDashboard) {
-    navTabs.push({
-      id: 'dashboard',
-      label: isAdminLevel ? 'الإدارة والتقارير الشاملة' : 'السجل اليومي والتقارير',
-      icon: isAdminLevel ? 'admin_panel_settings' : 'space_dashboard',
-    });
-  }
-
-  const isSingleShortageRole = navTabs.length === 1 && navTabs[0]?.id === 'shortages';
-
-  const timeStr = [clock.getHours(), clock.getMinutes(), clock.getSeconds()]
-    .map((n) => String(n).padStart(2, '0'))
-    .join(':');
-
-  const scaleLabel =
-    fontScale === 'scale-normal' ? 'عادي' : fontScale === 'scale-large' ? 'كبير' : 'ضخم';
-
-  const roleIcon =
-    role === 'owner'
-      ? 'shield_person'
-      : role === 'manager'
-      ? 'workspace_premium'
-      : role === 'supervisor'
-      ? 'manage_accounts'
-      : role === 'cashier'
-      ? 'point_of_sale'
-      : role === 'cctv'
-      ? 'videocam'
-      : role === 'security'
-      ? 'local_police'
-      : role === 'hall'
-      ? 'shopping_basket'
-      : role === 'warehouse'
-      ? 'warehouse'
-      : role === 'delivery'
-      ? 'two_wheeler'
-      : 'person';
-
-  const syncToneClass = isSyncing
-    ? 'bg-[var(--g-primary-container)] text-[var(--g-primary)]'
+  // Quiet status dot when online; compact label ONLY when offline, syncing, or queued
+  const showSyncText =
+    isSyncing || connectionMode === 'offline_cached' || offlineQueueCount > 0;
+  const syncDotCls = isSyncing
+    ? 'bg-primary-solid animate-ping'
+    : connectionMode === 'offline_cached' || offlineQueueCount > 0
+    ? 'bg-warning-solid'
+    : 'bg-success-solid';
+  const syncText = isSyncing
+    ? `مزامنة (${offlineQueueCount})`
     : connectionMode === 'offline_cached'
-    ? 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]'
-    : connectionMode === 'direct_cloud'
-    ? 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]'
-    : 'bg-[var(--g-green-bg)] text-[var(--g-green)]';
-
-  const syncShortLabel = isSyncing
-    ? `رفع (${offlineQueueCount})`
+    ? offlineQueueCount > 0
+      ? `أوفلاين (${offlineQueueCount})`
+      : 'أوفلاين'
+    : `معلق (${offlineQueueCount})`;
+  const syncTitle = isSyncing
+    ? 'جاري المزامنة'
     : connectionMode === 'offline_cached'
-    ? `أوفلاين${offlineQueueCount > 0 ? ` (${offlineQueueCount})` : ''}`
+    ? 'وضع أوفلاين'
     : offlineQueueCount > 0
-    ? `معلق (${offlineQueueCount})`
-    : connectionMode === 'direct_cloud'
-    ? 'سحابي'
+    ? `معلق (${offlineQueueCount}) — اضغط للمزامنة`
     : 'متصل';
 
-  const syncFullLabel = isSyncing
-    ? `جاري الرفع (${offlineQueueCount})`
-    : connectionMode === 'offline_cached'
-    ? `أوفلاين • محفوظ بالهاتف${offlineQueueCount > 0 ? ` (${offlineQueueCount})` : ''}`
-    : offlineQueueCount > 0
-    ? `بانتظار المزامنة (${offlineQueueCount})`
-    : connectionMode === 'direct_cloud'
-    ? 'سحابي مباشر'
-    : 'متصل ومتزامن';
+  function handleOpenFullSettings(section = 'profile') {
+    setSettingsSheetOpen(false);
+    if (onOpenSettings) {
+      onOpenSettings(section);
+    } else if (onSelectTab) {
+      onSelectTab('settings');
+    } else {
+      onOpenProfileModal?.();
+    }
+  }
+
+  function handleTabClick(tabId) {
+    if (tabId === 'settings') {
+      handleOpenFullSettings('profile');
+    } else {
+      onSelectTab?.(tabId);
+    }
+  }
+
+  /* ── Desktop Inline Navigation (Rendered per Active Theme Architecture) ── */
+  const desktopNav =
+    navTabs.length > 1 ? (
+      <nav
+        aria-label="التنقل الرئيسي"
+        className={`hidden md:flex items-center min-w-0 overflow-x-auto no-scrollbar ${
+          isMinimal
+            ? 'gap-5 h-full'
+            : isElegant
+            ? 'gap-4 h-full'
+            : isModern
+            ? 'gap-0.5 p-1 rounded-xl bg-surface-2 border border-line'
+            : isGlass
+            ? 'gap-1'
+            : 'gap-1'
+        }`}
+      >
+        {navTabs.map((tab) => {
+          const isActive = activeTab === tab.id;
+          const badgeCount = tab.alertCount > 0 ? tab.alertCount : tab.count > 0 ? tab.count : 0;
+          const isAlert = tab.alertCount > 0;
+
+          if (isMinimal || isElegant) {
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                aria-current={isActive ? 'page' : undefined}
+                onClick={() => handleTabClick(tab.id)}
+                className={`relative h-[52px] px-0.5 text-xs sm:text-[13px] inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-[color] duration-150 cursor-pointer ${
+                  isActive
+                    ? isElegant
+                      ? 'text-primary font-semibold'
+                      : 'text-ink font-semibold'
+                    : 'text-ink-muted hover:text-ink font-medium'
+                }`}
+              >
+                <span>{tab.shortLabel || tab.label}</span>
+                {badgeCount > 0 && (
+                  <span
+                    className={`num-ltr text-[11px] leading-none ${
+                      isAlert
+                        ? 'text-danger font-semibold'
+                        : 'text-ink-muted font-medium'
+                    }`}
+                  >
+                    {badgeCount > 99 ? '99+' : badgeCount}
+                  </span>
+                )}
+                {isActive && (
+                  <span
+                    aria-hidden="true"
+                    className={`absolute inset-x-0 bottom-0 ${
+                      isElegant ? 'h-[2px] bg-accent' : 'h-[1.5px] bg-ink'
+                    }`}
+                  />
+                )}
+              </button>
+            );
+          }
+
+          if (isModern) {
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                aria-current={isActive ? 'page' : undefined}
+                onClick={() => handleTabClick(tab.id)}
+                className={`min-h-[34px] px-2.5 py-1 rounded-[9px] text-xs inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-[background-color,color,box-shadow] duration-150 cursor-pointer ${
+                  isActive
+                    ? 'bg-surface text-ink font-semibold border border-line-subtle shadow-2xs'
+                    : 'text-ink-muted hover:text-ink font-medium border border-transparent'
+                }`}
+              >
+                <span>{tab.shortLabel || tab.label}</span>
+                {badgeCount > 0 && (
+                  <span
+                    className={`num-ltr text-[10px] font-semibold leading-none ${
+                      isAlert ? 'text-danger' : 'text-ink-muted'
+                    }`}
+                  >
+                    {badgeCount > 99 ? '99+' : badgeCount}
+                  </span>
+                )}
+              </button>
+            );
+          }
+
+          if (isGlass) {
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                aria-current={isActive ? 'page' : undefined}
+                onClick={() => handleTabClick(tab.id)}
+                className={`min-h-[36px] px-3 py-1 rounded-full text-xs inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-[transform,background-color,color,box-shadow] duration-150 ease-[var(--g-ease-out)] active:scale-[0.97] cursor-pointer ${
+                  isActive
+                    ? 'bg-glass-pill text-ink font-semibold shadow-[var(--g-glass-pill-specular)]'
+                    : 'text-ink-muted hover:text-ink hover:bg-glass-control font-medium'
+                }`}
+              >
+                <span>{tab.shortLabel || tab.label}</span>
+                {badgeCount > 0 && (
+                  <span
+                    className={`num-ltr text-[10px] font-semibold leading-none ${
+                      isAlert ? 'text-danger' : 'text-ink-muted'
+                    }`}
+                  >
+                    {badgeCount > 99 ? '99+' : badgeCount}
+                  </span>
+                )}
+              </button>
+            );
+          }
+
+          /* Classic clean M3 pill */
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              aria-current={isActive ? 'page' : undefined}
+              onClick={() => handleTabClick(tab.id)}
+              className={`min-h-[36px] px-3 py-1 rounded-full text-xs inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-[transform,background-color,color] duration-150 ease-[var(--g-ease-out)] active:scale-[0.97] cursor-pointer ${
+                isActive
+                  ? 'g-pill-active'
+                  : 'text-ink-muted hover:bg-surface-2 hover:text-ink font-medium'
+              }`}
+            >
+              <Icon
+                name={tab.icon}
+                size={17}
+                filled={isActive}
+              />
+              <span>{tab.shortLabel || tab.label}</span>
+              {badgeCount > 0 && (
+                <span
+                  className={`num-ltr text-[10px] font-semibold leading-none ${
+                    isAlert ? 'text-danger' : 'opacity-80'
+                  }`}
+                >
+                  {badgeCount > 99 ? '99+' : badgeCount}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </nav>
+    ) : null;
+
+  /* ── Shared Single-Row Header Inner Content ── */
+  const controlBtnBaseCls = isMinimal
+    ? 'min-h-[40px] min-w-[40px] sm:min-h-[34px] sm:min-w-[34px] px-2 rounded-[6px] text-ink-muted hover:text-ink hover:bg-surface-2 items-center justify-center gap-1.5 text-xs font-medium transition-[background-color,color,transform] duration-150 active:scale-[0.97] cursor-pointer shrink-0'
+    : isGlass
+    ? 'min-h-[40px] min-w-[40px] sm:min-h-[36px] sm:min-w-[36px] px-2.5 rounded-full bg-glass-control border border-[var(--g-glass-border)] text-ink items-center justify-center gap-1.5 text-xs font-medium transition-[transform,background-color] duration-150 active:scale-[0.97] cursor-pointer shrink-0'
+    : 'min-h-[40px] min-w-[40px] sm:min-h-[36px] sm:min-w-[36px] px-2.5 rounded-[var(--g-radius-btn)] bg-surface-2/80 hover:bg-surface-2 border border-line text-ink items-center justify-center gap-1.5 text-xs font-medium transition-[background-color,border-color,transform] duration-150 active:scale-[0.97] cursor-pointer shrink-0';
+
+  const headerInner = (
+    <div
+      className={`flex items-center justify-between gap-2 sm:gap-3 min-w-0 ${
+        isMinimal || isElegant ? 'h-[52px]' : 'min-h-[48px]'
+      }`}
+    >
+      {/* Start: Store Mark + Concise Name + Minimal Sync Status Dot */}
+      <div className="flex items-center gap-2 min-w-0 shrink-0">
+        <BrandLogo alt={storeName || 'زايد مارت'} size="xs" />
+        <h1
+          className={`text-sm ${arch.surfaces.headingWeight} tracking-tight m-0 truncate text-ink max-w-[125px] sm:max-w-[160px]`}
+        >
+          {storeName || 'زايد مارت'}
+        </h1>
+
+        <button
+          type="button"
+          onClick={() => onFlushOfflineQueue?.()}
+          title={syncTitle}
+          aria-label={syncTitle}
+          className={`inline-flex items-center justify-center gap-1.5 shrink-0 transition-[background-color,transform] duration-150 active:scale-95 cursor-pointer ${
+            showSyncText
+              ? 'min-h-[28px] px-2 py-0.5 rounded-full bg-warning-bg text-warning text-[11px] font-semibold'
+              : 'w-7 h-7 rounded-full hover:bg-surface-2'
+          }`}
+        >
+          <span className={`w-2 h-2 rounded-full shrink-0 ${syncDotCls}`} aria-hidden="true" />
+          {showSyncText && <span>{syncText}</span>}
+        </button>
+      </div>
+
+      {/* Center: Single-Row Desktop Navigation */}
+      {desktopNav}
+
+      {/* End: Date + Compact Tools + Avatar Trigger */}
+      <div className="flex items-center gap-1.5 shrink-0">
+        {showDateControl && (
+          <>
+            <button
+              type="button"
+              onClick={() => setDateSheetOpen(true)}
+              aria-label="تاريخ التشغيل"
+              className={`inline-flex sm:hidden ${controlBtnBaseCls} ${
+                !isToday ? 'text-primary font-semibold' : ''
+              }`}
+            >
+              <Icon name="calendar_today" size={17} />
+              <span className="num-ltr">{shortDateDisplay}</span>
+            </button>
+
+            <div
+              className={`hidden sm:flex items-center gap-1 shrink-0 ${
+                isMinimal
+                  ? 'px-1.5 min-h-[34px] rounded-[6px] hover:bg-surface-2'
+                  : isGlass
+                  ? 'px-3 min-h-[36px] rounded-full bg-glass-control border border-[var(--g-glass-border)]'
+                  : 'px-2.5 min-h-[36px] rounded-[var(--g-radius-btn)] bg-surface-2/80 border border-line'
+              }`}
+            >
+              <input
+                type="date"
+                value={selectedDate}
+                max={todayKey}
+                aria-label="تاريخ التشغيل"
+                onChange={(e) => onChangeDate?.(e.target.value || todayKey)}
+                className="bg-transparent text-xs font-medium outline-none num-ltr text-ink cursor-pointer"
+              />
+              {!isToday && (
+                <button
+                  type="button"
+                  onClick={() => onChangeDate?.(todayKey)}
+                  className="text-[11px] font-semibold text-primary hover:underline px-1 cursor-pointer"
+                >
+                  اليوم
+                </button>
+              )}
+            </div>
+          </>
+        )}
+
+        {caps.canQr && (
+          <button
+            type="button"
+            onClick={onOpenQrModal}
+            aria-label="QR / كود"
+            title="QR / كود"
+            className={`hidden sm:inline-flex ${controlBtnBaseCls}`}
+          >
+            <Icon name="qr_code_scanner" size={18} />
+          </button>
+        )}
+
+        {canUseWalkie && (
+          <button
+            type="button"
+            onClick={onOpenWalkieModal}
+            aria-label="اللاسلكي"
+            title="اللاسلكي"
+            className={`hidden md:inline-flex relative ${controlBtnBaseCls}`}
+          >
+            <Icon name="podcasts" size={18} />
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                walkieActive ? 'bg-success-solid' : 'bg-ink-muted opacity-50'
+              }`}
+              aria-hidden="true"
+            />
+          </button>
+        )}
+
+        {caps.canHandover && (
+          <button
+            type="button"
+            onClick={onOpenHandoverModal}
+            aria-label="تسليم الوردية"
+            title="تسليم الوردية"
+            className={`hidden xl:inline-flex ${controlBtnBaseCls}`}
+          >
+            <Icon name="swap_horiz" size={18} />
+          </button>
+        )}
+
+        {/* Compact Account & Quick Menu Trigger (>= 44x44px hit target) */}
+        <button
+          type="button"
+          onClick={() => setSettingsSheetOpen(true)}
+          aria-label="القائمة والحساب"
+          title={authUser?.display_name || 'الحساب'}
+          className={`min-h-[44px] min-w-[44px] sm:min-h-[36px] sm:min-w-[36px] flex items-center justify-center gap-1.5 transition-[transform,background-color] duration-150 active:scale-[0.96] cursor-pointer shrink-0 ${
+            isMinimal
+              ? 'rounded-full hover:bg-surface-2 px-1'
+              : isGlass
+              ? 'rounded-full p-0.5 bg-glass-control border border-[var(--g-glass-border)]'
+              : 'rounded-full p-0.5 hover:bg-surface-2'
+          }`}
+        >
+          <RoleAvatar
+            src={authUser?.effective_avatar_url || authUser?.avatar_url}
+            name={authUser?.display_name}
+            role={role}
+            color={authUser?.avatar_color}
+            preset={authUser?.avatar_preset}
+            size="xs"
+          />
+        </button>
+      </div>
+    </div>
+  );
 
   return (
     <>
-      <header className="sticky top-0 z-30 w-full bg-[var(--g-surface)]/95 backdrop-blur-md border-b border-[var(--g-border)]">
-        {/* Authentic Google 4-color accent bar */}
-        <div className="google-brand-bar" />
+      {isGlass ? (
+        <header className="sticky top-0 z-30 w-full pointer-events-none pt-[calc(var(--safe-top)+0.5rem)] px-3 sm:px-5">
+          <div className="pointer-events-auto max-w-7xl mx-auto g-glass-capsule rounded-[22px] lg:rounded-full px-3 sm:px-4 py-1">
+            {headerInner}
+          </div>
+        </header>
+      ) : (
+        <header
+          className={`sticky top-0 z-30 w-full g-header ${
+            isElegant ? 'border-b-0' : ''
+          }`}
+        >
+          {arch.shell.showBrandBar && <div className="google-brand-bar" />}
+          <div className={`${arch.shell.maxContentWidth} mx-auto px-3 sm:px-6 ${isMinimal || isElegant ? '' : 'py-1'}`}>
+            {headerInner}
+          </div>
+          {isElegant && <div className="g-header-editorial-rule" />}
+        </header>
+      )}
 
-        <div className="max-w-7xl mx-auto px-3 sm:px-6 py-2 md:py-2.5 md:space-y-2">
-          {/* Slim Single-Row Mobile Header (~56px) + Full Desktop Top Row */}
-          <div className="flex items-center justify-between gap-2 min-w-0">
-            {/* Right side in RTL: Brand Logo + Name + Sync Pill + Clock */}
-            <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1">
-              <img
-                src="/Logo.png"
-                onError={(e) => {
-                  if (e.currentTarget.src.endsWith('/Logo.png')) {
-                    e.currentTarget.src = '/logo.jpeg';
-                  }
-                }}
-                alt={storeName || 'زايد مارت'}
-                className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl object-cover border border-[var(--g-border)] shadow-xs shrink-0 bg-white"
-              />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <h1 className="text-sm sm:text-base font-black tracking-tight m-0 truncate text-[var(--g-text)]">
-                    {storeName || 'زايد مارت'}
-                  </h1>
-                  <button
-                    type="button"
-                    onClick={() => onFlushOfflineQueue?.()}
-                    title={
-                      connectionMode === 'offline_cached'
-                        ? 'البيانات محفوظة محلياً على الهاتف وسيتم رفعها تلقائياً فور عودة الإنترنت'
-                        : offlineQueueCount > 0
-                        ? 'اضغط لمزامنة الحركات المحفوظة محلياً مع السيرفر الآن'
-                        : 'جميع البيانات متزامنة ومحفوظة رسمياً'
-                    }
-                    className={`inline-flex items-center gap-1 text-[10px] sm:text-[11px] px-2 py-0.5 rounded-full font-extrabold shrink-0 transition-all active:scale-95 ${syncToneClass}`}
-                  >
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full bg-current ${
-                        isSyncing ? 'animate-ping' : ''
-                      }`}
-                    />
-                    <span className="sm:hidden">{syncShortLabel}</span>
-                    <span className="hidden sm:inline">{syncFullLabel}</span>
-                  </button>
-                </div>
-
-                <div className="flex items-center gap-1.5 text-[10px] sm:text-xs text-[var(--g-muted)] min-w-0 mt-0.5">
-                  <span className="font-bold text-[var(--g-text)] truncate max-w-[100px] sm:max-w-[180px]">
-                    {authUser?.display_name || branchName || 'الفرع الرئيسي'}
-                  </span>
-                  <span className="hidden xs:inline">•</span>
-                  <span className="num-ltr font-bold text-[var(--g-primary)] shrink-0">
-                    {timeStr}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Left side in RTL: Mobile Compact Actions + Desktop Full Controls */}
-            <div className="flex items-center gap-1.5 shrink-0">
-              {/* Compact Date Pill (Always 1 tap on mobile & desktop; hidden on weekly schedule tab) */}
-              {!isSingleShortageRole && activeTab !== 'schedule' && (
-                <div className="flex items-center gap-1 bg-[var(--g-surface-variant)] px-2 sm:px-2.5 min-h-[40px] rounded-full border border-[var(--g-border)] shrink-0">
-                  <input
-                    type="date"
-                    value={selectedDate}
-                    max={todayKey}
-                    aria-label="تاريخ التشغيل"
-                    onChange={(e) => onChangeDate(e.target.value || todayKey)}
-                    className="bg-transparent text-[11px] sm:text-xs font-extrabold outline-none num-ltr text-[var(--g-text)] w-[104px] sm:w-auto cursor-pointer"
-                  />
-                  {selectedDate !== todayKey && (
-                    <button
-                      type="button"
-                      onClick={() => onChangeDate(todayKey)}
-                      className="text-[10px] sm:text-xs font-extrabold text-[var(--g-primary)] px-1.5 py-0.5 rounded-full bg-[var(--g-primary-container)]"
-                    >
-                      اليوم
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* Quick QR on Mobile & Desktop */}
-              {canQr && (
-                <button
-                  type="button"
-                  onClick={onOpenQrModal}
-                  aria-label="مسح QR أو إدخال الكود السريع"
-                  title="مسح كرت QR أو إدخال كود الموظف السريع"
-                  className="min-w-[40px] h-10 px-2.5 sm:px-3 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-extrabold flex items-center justify-center gap-1 hover:opacity-90 active:scale-95 shrink-0"
-                >
-                  <span className="ms-icon filled text-lg">qr_code_scanner</span>
-                  <span className="hidden lg:inline">QR / كود</span>
-                </button>
-              )}
-
-              {/* Desktop-only quick Walkie & Handover buttons */}
-              {canUseWalkie && (
-                <button
-                  type="button"
-                  onClick={onOpenWalkieModal}
-                  title="فتح جهاز اللاسلكي الفوري لقناة الأمن والتيم"
-                  className="hidden md:flex min-h-[40px] px-3 py-1 rounded-full bg-[#0D1117] text-white border border-[#00E676]/60 text-xs font-extrabold items-center justify-center gap-1.5 hover:border-[#00E676] active:scale-95 shrink-0"
-                >
-                  <span
-                    className={`w-2 h-2 rounded-full ${
-                      walkieActive ? 'bg-[#00E676]' : 'bg-[#64748B]'
-                    }`}
-                  />
-                  <span className="ms-icon filled text-base text-[#00E676]">podcasts</span>
-                  <span>اللاسلكي</span>
-                </button>
-              )}
-
-              {canHandover && (
-                <button
-                  type="button"
-                  onClick={onOpenHandoverModal}
-                  title="تسليم واستلام الوردية"
-                  className="hidden lg:flex min-h-[40px] px-3 py-1 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-xs font-extrabold items-center justify-center gap-1 hover:border-[var(--g-primary)] active:scale-95 shrink-0"
-                >
-                  <span className="ms-icon text-base text-[var(--g-primary)]">swap_horiz</span>
-                  <span>الوردية</span>
-                </button>
-              )}
-
-              {/* Avatar / Quick Settings Sheet Trigger (Replaces 8 crowded mobile buttons) */}
-              <button
-                type="button"
-                onClick={() => setSettingsSheetOpen(true)}
-                aria-label="القائمة السريعة وإعدادات العرض والحساب"
-                title="الإعدادات السريعة، الخطوط، البروفايل، والخروج"
-                className="min-h-[40px] px-2 sm:px-3 py-1 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] hover:border-[var(--g-primary)] flex items-center gap-1.5 active:scale-95 transition-all shrink-0"
-              >
-                <span
-                  style={{ backgroundColor: authUser?.avatar_color || '#0B57D0' }}
-                  className="w-7 h-7 rounded-full text-white flex items-center justify-center shrink-0 shadow-2xs"
-                >
-                  <span className="ms-icon filled text-sm">{roleIcon}</span>
-                </span>
-                <span className="hidden sm:inline-block text-xs font-extrabold truncate max-w-[110px]">
-                  {authUser?.display_name || 'الحساب'}
-                </span>
-                <span className="ms-icon text-base text-[var(--g-muted)]">tune</span>
-              </button>
-            </div>
+      {/* Mobile Compact Date Picker BottomSheet */}
+      <BottomSheet
+        open={dateSheetOpen}
+        onClose={() => setDateSheetOpen(false)}
+        title="تاريخ التشغيل"
+        maxWidth="max-w-sm"
+      >
+        <div className="space-y-3 py-1">
+          <div className="grid grid-cols-2 gap-2">
+            <Button
+              variant={isToday ? 'primary' : 'secondary'}
+              onClick={() => {
+                onChangeDate?.(todayKey);
+                setDateSheetOpen(false);
+              }}
+            >
+              اليوم
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                onChangeDate?.(shiftIsoDate(todayKey, -1));
+                setDateSheetOpen(false);
+              }}
+            >
+              أمس
+            </Button>
           </div>
 
-          {/* Desktop Navigation Pills — Hidden on Mobile (BottomNav handles Mobile) */}
-          {navTabs.length > 1 && (
-            <nav className="hidden md:flex items-center gap-2 pt-1 overflow-x-auto no-scrollbar">
-              {navTabs.map((tab) => {
-                const isActive = activeTab === tab.id;
-                return (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    onClick={() => onSelectTab(tab.id)}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm whitespace-nowrap transition-all ${
-                      isActive
-                        ? 'g-pill-active'
-                        : 'text-[var(--g-muted)] hover:bg-[var(--g-surface-variant)] font-semibold'
-                    }`}
-                  >
-                    <span className={`ms-icon ${isActive ? 'filled' : ''}`}>{tab.icon}</span>
-                    <span>{tab.label}</span>
-                    {tab.count > 0 && (
-                      <span
-                        className={`num-ltr text-xs px-2 py-0.5 rounded-full font-extrabold ${
-                          tab.isWarning
-                            ? 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]'
-                            : 'bg-[var(--g-surface)] text-[var(--g-text)]'
-                        }`}
-                      >
-                        {tab.count}
-                      </span>
-                    )}
-                    {tab.alertCount > 0 && (
-                      <span className="num-ltr text-xs px-2 py-0.5 rounded-full font-extrabold bg-[var(--g-red-bg)] text-[var(--g-red)]">
-                        {tab.alertCount}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </nav>
-          )}
+          <input
+            type="date"
+            value={selectedDate}
+            max={todayKey}
+            aria-label="تاريخ محدد"
+            onChange={(e) => {
+              onChangeDate?.(e.target.value || todayKey);
+              setDateSheetOpen(false);
+            }}
+            className="g-input num-ltr font-medium"
+          />
         </div>
-      </header>
+      </BottomSheet>
 
-      {/* Quick Settings, Account & Display Sheet (Declutters Mobile TopBar) */}
+      {/* Detoxed Quick Account & 5-Theme Sheet */}
       <BottomSheet
         open={settingsSheetOpen}
         onClose={() => setSettingsSheetOpen(false)}
-        title={authUser?.display_name || 'الحساب والإعدادات'}
-        subtitle={`${authUser?.role_label || role || 'مستخدم'} • ${branchName || 'الفرع الرئيسي'}`}
-        icon={roleIcon}
+        title={authUser?.display_name || 'الحساب'}
+        subtitle={`${authUser?.role_label || role || ''}${branchName ? ` · ${branchName}` : ''}`}
         maxWidth="max-w-md"
       >
         <div className="space-y-4">
-          {/* PWA Install CTA if available */}
-          <PwaInstallBanner compact={false} onToast={onToast} />
+          {/* Quick Mode & 5-Theme Switcher */}
+          <div className="space-y-2.5">
+            <SegmentedControl
+              fullWidth
+              ariaLabel="الإضاءة"
+              options={MODE_OPTIONS}
+              value={themeCtx.modePref}
+              onChange={(nextMode) => themeCtx.setModePref(nextMode)}
+            />
 
-          {/* Primary Account & Operational Shortcuts */}
-          <div className="grid grid-cols-2 gap-2">
-            <Button
-              variant="tonal"
-              icon="account_circle"
-              iconFilled
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+              {THEMES_REGISTRY.map((t) => {
+                const active = themeCtx.theme === t.id;
+                const swatch = (darkMode ? t.swatches.dark : t.swatches.light)[2];
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => themeCtx.setTheme(t.id)}
+                    className={`min-h-[38px] px-3 py-1.5 rounded-[var(--g-radius-pill)] text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 border transition-[transform,background-color,border-color,color] duration-150 ease-[var(--g-ease-out)] active:scale-[0.97] cursor-pointer ${
+                      active
+                        ? 'bg-primary-solid text-on-primary border-transparent'
+                        : 'bg-surface text-ink border-line hover:border-line-strong'
+                    }`}
+                  >
+                    <span
+                      style={{ backgroundColor: swatch }}
+                      className="w-2.5 h-2.5 rounded-full shrink-0 ring-1 ring-black/15"
+                      aria-hidden="true"
+                    />
+                    <span>{t.nameAr}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Grouped Clean Shortcuts */}
+          <GroupedList>
+            <GroupedRow onClick={() => handleOpenFullSettings('profile')}>
+              <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                <Icon name="settings" size={19} className="text-ink-muted" />
+                <span>الإعدادات والمظهر</span>
+              </span>
+              <Icon name="chevron_left" size={18} className="text-ink-muted ltr:rotate-180" />
+            </GroupedRow>
+
+            <GroupedRow
               onClick={() => {
                 setSettingsSheetOpen(false);
                 onOpenProfileModal?.();
               }}
             >
-              بروفايلي وكلمة المرور
-            </Button>
+              <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                <Icon name="qr_code_2" size={19} className="text-ink-muted" />
+                <span>بطاقة QR وسجلي</span>
+              </span>
+              <Icon name="chevron_left" size={18} className="text-ink-muted ltr:rotate-180" />
+            </GroupedRow>
 
-            {canHandover && (
-              <Button
-                variant="secondary"
-                icon="swap_horiz"
+            {caps.canHandover && (
+              <GroupedRow
                 onClick={() => {
                   setSettingsSheetOpen(false);
                   onOpenHandoverModal?.();
                 }}
               >
-                تسليم الوردية
-              </Button>
+                <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                  <Icon name="swap_horiz" size={19} className="text-ink-muted" />
+                  <span>تسليم الوردية</span>
+                </span>
+                <Icon name="chevron_left" size={18} className="text-ink-muted ltr:rotate-180" />
+              </GroupedRow>
             )}
 
-            {canQr && (
-              <Button
-                variant="secondary"
-                icon="qr_code_scanner"
+            {caps.canQr && (
+              <GroupedRow
                 onClick={() => {
                   setSettingsSheetOpen(false);
                   onOpenQrModal?.();
                 }}
               >
-                QR / كود سريع
-              </Button>
+                <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                  <Icon name="qr_code_scanner" size={19} className="text-ink-muted" />
+                  <span>QR / كود</span>
+                </span>
+                <Icon name="chevron_left" size={18} className="text-ink-muted ltr:rotate-180" />
+              </GroupedRow>
             )}
 
             {canUseWalkie && (
-              <Button
-                variant="dark"
-                icon="podcasts"
-                iconFilled
+              <GroupedRow
                 onClick={() => {
                   setSettingsSheetOpen(false);
                   onOpenWalkieModal?.();
                 }}
               >
-                جهاز اللاسلكي
-              </Button>
+                <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                  <Icon name="podcasts" size={19} className="text-ink-muted" />
+                  <span>اللاسلكي</span>
+                </span>
+                <Icon name="chevron_left" size={18} className="text-ink-muted ltr:rotate-180" />
+              </GroupedRow>
             )}
 
-            {isAdminLevel && (
-              <Button
-                variant="secondary"
-                icon="touch_app"
+            {caps.isAdminLevel && (
+              <GroupedRow
                 onClick={() => {
                   setSettingsSheetOpen(false);
                   onLockToKiosk?.();
                 }}
-                className="col-span-2"
               >
-                قفل الجهاز على وضع كشك حضور العمال
-              </Button>
+                <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                  <Icon name="touch_app" size={19} className="text-ink-muted" />
+                  <span>وضع الكشك</span>
+                </span>
+                <Icon name="chevron_left" size={18} className="text-ink-muted ltr:rotate-180" />
+              </GroupedRow>
             )}
-          </div>
+          </GroupedList>
 
-          {/* Display & Ergonomics Controls */}
-          <div className="p-3.5 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] space-y-2.5">
-            <div className="text-xs font-black text-[var(--g-muted)]">تخصيص العرض والراحة البصرية</div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <Button
-                variant={darkMode ? 'primary' : 'secondary'}
-                size="sm"
-                icon={darkMode ? 'light_mode' : 'dark_mode'}
-                iconFilled
-                onClick={onToggleDarkMode}
-              >
-                {darkMode ? 'الوضع النهاري' : 'الوضع الليلي'}
-              </Button>
-
-              {onToggleLiteMode && (
-                <Button
-                  variant={liteMode ? 'success' : 'secondary'}
-                  size="sm"
-                  icon="bolt"
-                  iconFilled={liteMode}
-                  onClick={onToggleLiteMode}
-                >
-                  {liteMode ? 'الأداء الخفيف: مفعّل' : 'الأداء الخفيف'}
-                </Button>
-              )}
-
-              <Button
-                variant="secondary"
-                size="sm"
-                icon="font_download"
-                onClick={onToggleFontFamily}
-              >
-                الخط: {fontFamily === 'tajawal' ? 'Tajawal' : fontFamily === 'readex' ? 'Readex' : 'Cairo'}
-              </Button>
-
-              <Button
-                variant="secondary"
-                size="sm"
-                icon="format_size"
-                onClick={onCycleFontScale}
-              >
-                الحجم: {scaleLabel}
-              </Button>
-            </div>
-          </div>
-
-          {/* Logout Action */}
           <Button
             variant="dangerTonal"
             fullWidth
@@ -540,7 +648,7 @@ export default function TopBar({
               onLogout?.();
             }}
           >
-            تسجيل الخروج أو تبديل الحساب
+            تسجيل الخروج
           </Button>
         </div>
       </BottomSheet>

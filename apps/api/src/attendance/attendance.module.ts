@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  HttpCode,
   Module,
   Param,
   Patch,
@@ -10,7 +11,7 @@ import {
   Req,
   Res,
 } from '@nestjs/common';
-import { getLocalDateKey, normalizeDigits } from '@zayed-mart/shared';
+import { getLocalDateKey, getLocalTimeHMS, normalizeDigits } from '@zayed-mart/shared';
 import type { Request, Response } from 'express';
 import { getClientIp } from '../common/crypto.util';
 import {
@@ -30,7 +31,7 @@ export class AttendanceController {
   ) {}
 
   @Post()
-  @RequireAnyPermission(['attendance:write', 'attendance:kiosk', 'attendance:self'])
+  @RequireAnyPermission(['attendance:write', 'attendance:kiosk'])
   async recordAttendance(
     @Body() body: any,
     @CurrentAuth() auth: AuthContext,
@@ -38,6 +39,15 @@ export class AttendanceController {
     @Res() res: Response
   ) {
     try {
+      const canRecord =
+        auth.has('attendance:write') ||
+        (auth.user.role === 'kiosk' && auth.has('attendance:kiosk'));
+      if (!canRecord) {
+        return res.status(403).json({
+          error: 'تسجيل الحضور والانصراف متاح فقط للأدمن والمدير والمشرف والأمن ومراقب الكاميرات',
+        });
+      }
+
       const {
         id: clientId,
         employee_id,
@@ -48,6 +58,9 @@ export class AttendanceController {
         allowed_break_minutes = 0,
         break_reason = '',
         allow_reopen_shift = false,
+        confirm_by_cctv,
+        cctv_observed_time = '',
+        cctv_note = '',
       } = body || {};
 
       const validActions = ['check_in', 'break_start', 'break_end', 'check_out'];
@@ -64,25 +77,12 @@ export class AttendanceController {
       }
 
       const isFullWrite = auth.has('attendance:write');
-      const isKiosk = auth.has('attendance:kiosk');
-
-      if (!isFullWrite && !isKiosk) {
-        // User only has attendance:self — verify they are acting on their own employee record
-        const userRow = await this.db.queryOne<any>(
-          'SELECT employee_id, display_name FROM system_users WHERE id = ? LIMIT 1',
-          [auth.user.id]
-        );
-        const isOwnEmployee =
-          (userRow?.employee_id && userRow.employee_id === emp.id) ||
-          String(emp.name || '').trim() === String(auth.user.display_name || '').trim();
-        if (!isOwnEmployee) {
-          return res.status(403).json({
-            error: 'صلاحيتك تسمح بتسجيل حضورك وبريكك الشخصي فقط وليس لباقي الموظفين',
-          });
-        }
-      }
-
-      const autoVerified = auth.has('attendance:verify');
+      const canVerify = auth.has('attendance:verify');
+      const autoVerified =
+        canVerify &&
+        confirm_by_cctv !== false &&
+        confirm_by_cctv !== 'false' &&
+        confirm_by_cctv !== 0;
       const canReopen = Boolean(allow_reopen_shift) && (auth.has('records:manage') || isFullWrite);
 
       const created = await this.db.insertAttendanceLog({
@@ -95,9 +95,13 @@ export class AttendanceController {
         proof_url: isFullWrite ? proof_url : '',
         recorded_by: auth.actorLabel,
         autoVerified,
+        verified_by: autoVerified ? auth.actorLabel : '',
+        cctv_status: autoVerified ? 'confirmed' : 'pending',
+        cctv_observed_time: autoVerified ? String(cctv_observed_time || '').trim() : '',
+        cctv_note: autoVerified ? String(cctv_note || '').trim().slice(0, 300) : '',
         timestamp: isFullWrite ? timestamp : undefined,
-        allowed_break_minutes: isFullWrite || auth.has('attendance:self') ? allowed_break_minutes : 0,
-        break_reason: isFullWrite || auth.has('attendance:self') ? break_reason : '',
+        allowed_break_minutes: isFullWrite ? allowed_break_minutes : 0,
+        break_reason: isFullWrite ? break_reason : '',
         allow_reopen_shift: canReopen,
         actorUser: auth.user,
         ip: getClientIp(req),
@@ -112,7 +116,7 @@ export class AttendanceController {
   }
 
   @Post('quick-scan')
-  @RequireAnyPermission(['attendance:kiosk', 'attendance:write', 'attendance:self'])
+  @RequireAnyPermission(['attendance:write', 'attendance:kiosk'])
   async quickScan(
     @Body() body: any,
     @CurrentAuth() auth: AuthContext,
@@ -120,12 +124,24 @@ export class AttendanceController {
     @Res() res: Response
   ) {
     try {
+      const canRecord =
+        auth.has('attendance:write') ||
+        (auth.user.role === 'kiosk' && auth.has('attendance:kiosk'));
+      if (!canRecord) {
+        return res.status(403).json({
+          error: 'تسجيل الحضور والانصراف متاح فقط للأدمن والمدير والمشرف والأمن ومراقب الكاميرات',
+        });
+      }
+
       const {
         code_or_qr = '',
         preferred_action = '',
         allowed_break_minutes = 0,
         break_reason = '',
         allow_reopen_shift = false,
+        confirm_by_cctv,
+        cctv_observed_time = '',
+        cctv_note = '',
       } = body || {};
 
       const raw = normalizeDigits(String(code_or_qr || '').trim());
@@ -159,21 +175,6 @@ export class AttendanceController {
         return res
           .status(404)
           .json({ error: `لم يتم العثور على موظف بالكود (${raw})` });
-      }
-
-      if (!auth.has('attendance:write') && !auth.has('attendance:kiosk')) {
-        const userRow = await this.db.queryOne<any>(
-          'SELECT employee_id, display_name FROM system_users WHERE id = ? LIMIT 1',
-          [auth.user.id]
-        );
-        const isOwnEmployee =
-          (userRow?.employee_id && userRow.employee_id === emp.id) ||
-          String(emp.name || '').trim() === String(auth.user.display_name || '').trim();
-        if (!isOwnEmployee) {
-          return res.status(403).json({
-            error: 'صلاحيتك تسمح بمسح الكود الخاص بك فقط',
-          });
-        }
       }
 
       const todayKey = getLocalDateKey();
@@ -212,13 +213,23 @@ export class AttendanceController {
 
       const canReopen =
         Boolean(allow_reopen_shift) && (auth.has('records:manage') || auth.has('attendance:write'));
+      const canVerify = auth.has('attendance:verify');
+      const autoVerified =
+        canVerify &&
+        confirm_by_cctv !== false &&
+        confirm_by_cctv !== 'false' &&
+        confirm_by_cctv !== 0;
 
       const created = await this.db.insertAttendanceLog({
         emp,
         action_type: actionType,
         note: 'تسجيل سريع عبر الكود / QR',
         recorded_by: `${auth.actorLabel} [QR]`,
-        autoVerified: auth.has('attendance:verify'),
+        autoVerified,
+        verified_by: autoVerified ? auth.actorLabel : '',
+        cctv_status: autoVerified ? 'confirmed' : 'pending',
+        cctv_observed_time: autoVerified ? String(cctv_observed_time || '').trim() : '',
+        cctv_note: autoVerified ? String(cctv_note || '').trim().slice(0, 300) : '',
         allowed_break_minutes,
         break_reason,
         allow_reopen_shift: canReopen,
@@ -241,6 +252,7 @@ export class AttendanceController {
   }
 
   @Post('verify-all')
+  @HttpCode(200)
   @RequirePermission('attendance:verify')
   async verifyAll(
     @Body() body: any,
@@ -252,8 +264,16 @@ export class AttendanceController {
       const dateKey = body?.date_key || getLocalDateKey();
       const now = new Date().toISOString();
       const result = await this.db.execute(
-        'UPDATE attendance_logs SET verified_by_cctv = 1, verified_at = ?, synced = 1 WHERE date_key = ? AND verified_by_cctv = 0',
-        [now, dateKey]
+        `UPDATE attendance_logs
+         SET verified_by_cctv = 1,
+             verified_at = ?,
+             verified_by = ?,
+             cctv_status = 'confirmed',
+             synced = 1
+         WHERE date_key = ?
+           AND verified_by_cctv = 0
+           AND COALESCE(cctv_status, 'pending') != 'mismatch'`,
+        [now, auth.actorLabel, dateKey]
       );
 
       await this.db.recordAuditLog({
@@ -266,26 +286,76 @@ export class AttendanceController {
       });
 
       await this.realtime.broadcastStoreUpdate('attendance_verify_all');
-      return res.json({ ok: true, count: result.changes });
+      return res.status(200).json({ ok: true, count: result.changes });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }
   }
 
   @Post(':id/verify')
+  @HttpCode(200)
   @RequirePermission('attendance:verify')
-  async verifyOne(@Param('id') id: string, @Res() res: Response) {
+  async verifyOne(
+    @Param('id') id: string,
+    @Body() body: any,
+    @CurrentAuth() auth: AuthContext,
+    @Req() req: Request,
+    @Res() res: Response
+  ) {
     try {
-      const now = new Date().toISOString();
-      const result = await this.db.execute(
-        'UPDATE attendance_logs SET verified_by_cctv = 1, verified_at = ?, synced = 1 WHERE id = ?',
-        [now, id]
+      const existing = await this.db.queryOne<any>(
+        'SELECT * FROM attendance_logs WHERE id = ?',
+        [id]
       );
-      if (result.changes === 0) {
+      if (!existing) {
         return res.status(404).json({ error: 'السجل غير موجود' });
       }
+
+      const status = body?.status === 'mismatch' ? 'mismatch' : 'confirmed';
+      const verifiedFlag = status === 'confirmed' ? 1 : 0;
+      const now = new Date().toISOString();
+      let observedTime = String(body?.observed_time ?? body?.cctv_observed_time ?? '')
+        .trim()
+        .slice(0, 20);
+      if (status === 'confirmed' && !observedTime) {
+        const tsDate = new Date(existing.timestamp);
+        if (!Number.isNaN(tsDate.getTime())) {
+          observedTime = getLocalTimeHMS(tsDate).slice(0, 5);
+        }
+      }
+      const cctvNote = String(body?.note ?? body?.cctv_note ?? '')
+        .trim()
+        .slice(0, 300);
+
+      await this.db.execute(
+        `UPDATE attendance_logs
+         SET verified_by_cctv = ?,
+             verified_at = ?,
+             verified_by = ?,
+             cctv_status = ?,
+             cctv_observed_time = ?,
+             cctv_note = ?,
+             synced = 1
+         WHERE id = ?`,
+        [verifiedFlag, now, auth.actorLabel, status, observedTime, cctvNote, existing.id]
+      );
+
+      await this.db.recordAuditLog({
+        userId: auth.user.id,
+        userName: auth.user.display_name,
+        role: auth.user.role,
+        action: status === 'mismatch' ? 'تنبيه تعارض حضور بالكاميرا' : 'تأكيد حضور بالكاميرا',
+        details: `الموظف "${existing.employee_name}" (${existing.action_type})${observedTime ? ` — وقت الكاميرا ${observedTime}` : ''}${cctvNote ? ` — ${cctvNote}` : ''}`,
+        ip: getClientIp(req),
+        severity: status === 'mismatch' ? 'warning' : 'info',
+      });
+
+      const updated = await this.db.queryOne(
+        'SELECT * FROM attendance_logs WHERE id = ?',
+        [existing.id]
+      );
       await this.realtime.broadcastStoreUpdate('attendance_verify');
-      return res.json({ ok: true });
+      return res.status(200).json({ ok: true, log: updated });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }
@@ -293,8 +363,14 @@ export class AttendanceController {
 
   @Patch(':id/verify')
   @RequirePermission('attendance:verify')
-  async verifyOnePatch(@Param('id') id: string, @Res() res: Response) {
-    return this.verifyOne(id, res);
+  async verifyOnePatch(
+    @Param('id') id: string,
+    @Body() body: any,
+    @CurrentAuth() auth: AuthContext,
+    @Req() req: Request,
+    @Res() res: Response
+  ) {
+    return this.verifyOne(id, body, auth, req, res);
   }
 
   @Put(':id')
@@ -360,18 +436,76 @@ export class AttendanceController {
           ? String(body.note || '').slice(0, 300)
           : existing.note;
 
-      const nextVerified =
-        body?.verified_by_cctv !== undefined
-          ? body.verified_by_cctv
-            ? 1
-            : 0
-          : Number(existing.verified_by_cctv || 0);
+      const existingCctvStatus =
+        existing.cctv_status || (Number(existing.verified_by_cctv) === 1 ? 'confirmed' : 'pending');
+      const requestedStatus =
+        body?.cctv_status === 'confirmed' ||
+        body?.cctv_status === 'mismatch' ||
+        body?.cctv_status === 'pending'
+          ? body.cctv_status
+          : null;
+
+      let nextVerified = Number(existing.verified_by_cctv || 0);
+      let nextCctvStatus: 'pending' | 'confirmed' | 'mismatch' = existingCctvStatus;
+
+      if (requestedStatus) {
+        nextCctvStatus = requestedStatus;
+        nextVerified = requestedStatus === 'confirmed' ? 1 : 0;
+      } else if (body?.verified_by_cctv !== undefined) {
+        nextVerified = body.verified_by_cctv ? 1 : 0;
+        nextCctvStatus =
+          nextVerified === 1
+            ? 'confirmed'
+            : existingCctvStatus === 'mismatch'
+            ? 'mismatch'
+            : 'pending';
+      }
+
+      const nowIso = new Date().toISOString();
+      const statusChanged = nextCctvStatus !== existingCctvStatus;
+      let nextVerifiedAt = existing.verified_at || '';
+      let nextVerifiedBy =
+        body?.verified_by !== undefined
+          ? String(body.verified_by || '').trim()
+          : existing.verified_by || '';
+
+      if (nextCctvStatus === 'pending') {
+        nextVerifiedAt = '';
+        nextVerifiedBy = '';
+      } else if (statusChanged || !nextVerifiedAt) {
+        nextVerifiedAt = nowIso;
+        if (!nextVerifiedBy) {
+          nextVerifiedBy = auth.actorLabel;
+        }
+      }
+
+      const rawObservedInput = body?.cctv_observed_time ?? body?.observed_time;
+      let nextObservedTime =
+        rawObservedInput !== undefined
+          ? String(rawObservedInput || '').trim().slice(0, 20)
+          : nextCctvStatus === 'pending'
+          ? ''
+          : existing.cctv_observed_time || '';
+      if (nextCctvStatus === 'confirmed' && !nextObservedTime) {
+        const parsedNext = new Date(nextIso);
+        if (!Number.isNaN(parsedNext.getTime())) {
+          nextObservedTime = getLocalTimeHMS(parsedNext).slice(0, 5);
+        }
+      }
+
+      const nextCctvNote =
+        body?.cctv_note !== undefined
+          ? String(body.cctv_note || '').trim().slice(0, 300)
+          : nextCctvStatus === 'pending'
+          ? ''
+          : existing.cctv_note || '';
 
       await this.db.execute(
         `UPDATE attendance_logs
          SET action_type = ?, timestamp = ?, date_key = ?, shift_date_key = ?,
              late_minutes = ?, allowed_break_minutes = ?, break_duration_minutes = ?, break_reason = ?,
-             note = ?, verified_by_cctv = ?, synced = 1
+             note = ?, verified_by_cctv = ?, verified_at = ?, verified_by = ?,
+             cctv_status = ?, cctv_observed_time = ?, cctv_note = ?, synced = 1
          WHERE id = ?`,
         [
           nextAction,
@@ -384,6 +518,11 @@ export class AttendanceController {
           nextBreakReason,
           nextNote,
           nextVerified,
+          nextVerifiedAt,
+          nextVerifiedBy,
+          nextCctvStatus,
+          nextObservedTime,
+          nextCctvNote,
           existing.id,
         ]
       );

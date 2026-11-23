@@ -34,6 +34,7 @@ const DEFAULT_RPC_BRIDGE_KEY =
 const AUTH_TOKEN_KEY = 'zayed_auth_token_v3';
 const AUTH_SESSION_KEY = 'zayed_auth_session_v3';
 const SNAPSHOT_CACHE_KEY = 'zayed_mart_last_snapshot';
+const LOGIN_PROFILES_CACHE_KEY = 'zayed_login_profiles_cache_v1';
 
 const authInvalidListeners = new Set();
 let activeFlushPromise = null;
@@ -119,6 +120,11 @@ export function isDirectCloudToken(token) {
   return token === 'DIRECT_CLOUD_OWNER' || String(token).startsWith('DIRECT_CLOUD_');
 }
 
+export function isApiConnectedMode(connectionMode) {
+  if (isDirectCloudToken(getAuthToken())) return false;
+  return connectionMode === 'local_server' || connectionMode === 'cloud_postgres';
+}
+
 export const ALL_PERMISSION_IDS = [
   'attendance:self',
   'attendance:kiosk',
@@ -140,6 +146,7 @@ export const ALL_PERMISSION_IDS = [
   'walkie:use',
   'walkie:all_channels',
   'profile:view',
+  'profile:edit_self',
   'reports:view',
   'reports:export',
   'staff:manage',
@@ -350,21 +357,100 @@ export async function fetchStorePublicInfo() {
         offlineMode: true,
         store_name: localSnap.settings.store_name || 'زايد مارت',
         branch_name: localSnap.settings.branch_name || 'نسخة الهاتف المحلية (أوفلاين)',
+        login_show_role_cards: localSnap.settings.login_show_role_cards !== false,
       };
     }
     throw err;
   }
 }
 
-export async function loginWithPassword(password) {
-  const normalizedPassword = normalizeDigitsClient(password).trim();
+export function getCachedLoginProfiles() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(LOGIN_PROFILES_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && Array.isArray(parsed.profiles)) {
+      return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function saveLoginProfilesCache(payload) {
+  if (typeof window === 'undefined' || !payload) return;
+  try {
+    localStorage.setItem(
+      LOGIN_PROFILES_CACHE_KEY,
+      JSON.stringify({
+        store_name: payload.store_name || 'زايد مارت',
+        branch_name: payload.branch_name || 'الفرع الرئيسي',
+        login_show_role_cards: payload.login_show_role_cards !== false,
+        profiles: Array.isArray(payload.profiles) ? payload.profiles : [],
+        cachedAt: new Date().toISOString(),
+      })
+    );
+  } catch {
+    // ignore quota errors
+  }
+}
+
+export async function fetchLoginProfiles() {
+  try {
+    const res = await fetchWithTimeout('/api/auth/profiles', {}, 4500);
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      const json = await res.json();
+      saveLoginProfilesCache(json);
+      return json;
+    }
+    throw new Error('Local server unavailable');
+  } catch (err) {
+    const cached = getCachedLoginProfiles();
+    if (cached) {
+      return { ok: true, offlineCached: true, ...cached };
+    }
+    const info = await fetchStorePublicInfo().catch(() => null);
+    if (info) {
+      return {
+        ok: true,
+        store_name: info.store_name || 'زايد مارت',
+        branch_name: info.branch_name || 'الفرع الرئيسي',
+        login_show_role_cards: info.login_show_role_cards !== false,
+        profiles: [],
+      };
+    }
+    throw err;
+  }
+}
+
+export async function loginWithPassword(passwordOrPayload, options = {}) {
+  const isObjectCall =
+    passwordOrPayload && typeof passwordOrPayload === 'object' && !Array.isArray(passwordOrPayload);
+  const rawPassword = isObjectCall ? passwordOrPayload.password ?? passwordOrPayload.pin ?? '' : passwordOrPayload;
+  const rawUsername = String(
+    (isObjectCall ? passwordOrPayload.username : options?.username) || ''
+  )
+    .trim()
+    .toLowerCase();
+  const rawUserId = String(
+    (isObjectCall ? passwordOrPayload.user_id ?? passwordOrPayload.userId : options?.user_id ?? options?.userId) || ''
+  ).trim();
+
+  const normalizedPassword = normalizeDigitsClient(rawPassword).trim();
+  const reqBody = { password: normalizedPassword };
+  if (rawUsername) reqBody.username = rawUsername;
+  if (rawUserId) reqBody.user_id = rawUserId;
+
   try {
     const res = await fetchWithTimeout(
       '/api/auth/login',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: normalizedPassword }),
+        body: JSON.stringify(reqBody),
       },
       6000
     );
@@ -372,7 +458,10 @@ export async function loginWithPassword(password) {
     if (contentType.includes('application/json')) {
       const json = await res.json();
       if (!res.ok || !json.ok) {
-        const serverErr = new Error(json.error || 'كلمة المرور غير صحيحة');
+        const serverErr = new Error(
+          json.error ||
+            (rawUsername ? 'اسم المستخدم أو كلمة المرور غير صحيحة' : 'كلمة المرور غير صحيحة')
+        );
         serverErr.status = res.status;
         throw serverErr;
       }
@@ -384,7 +473,7 @@ export async function loginWithPassword(password) {
     if (err.status) throw err;
     // Direct Cloud fallback when phone or browser operates without local Node server
     if (getDirectCloudCredentials()) {
-      if (normalizedPassword === '123') {
+      if (normalizedPassword === '123' && (!rawUsername || rawUsername === 'admin')) {
         const cloudUser = {
           id: 'cloud_owner',
           username: 'admin',
@@ -392,6 +481,8 @@ export async function loginWithPassword(password) {
           role: 'owner',
           role_label: 'المالك / المدير العام',
           avatar_color: '#7627BB',
+          avatar_url: '',
+          avatar_preset: '',
         };
         setAuthSession('DIRECT_CLOUD_OWNER', cloudUser, ALL_PERMISSION_IDS);
         return { ok: true, token: 'DIRECT_CLOUD_OWNER', user: cloudUser, permissions: ALL_PERMISSION_IDS };
@@ -728,6 +819,9 @@ async function fetchBootstrapFromDirectCloud(dateKey) {
     }
     const lateMinutes = firstCheckIn ? firstCheckIn.late_minutes || 0 : 0;
     if (lateMinutes > 0) lateCount += 1;
+    const latestCctvStatus = !latestLog
+      ? 'none'
+      : latestLog.cctv_status || (Number(latestLog.verified_by_cctv) ? 'confirmed' : 'pending');
 
     return {
       ...emp,
@@ -736,7 +830,11 @@ async function fetchBootstrapFromDirectCloud(dateKey) {
       checkInTime: firstCheckIn ? firstCheckIn.timestamp : null,
       latestActionTime: latestLog ? latestLog.timestamp : null,
       latestLogId: latestLog ? latestLog.id : null,
-      latestVerified: latestLog ? Boolean(latestLog.verified_by_cctv) : false,
+      latestVerified: latestLog ? Boolean(Number(latestLog.verified_by_cctv)) : false,
+      latestCctvStatus,
+      latestVerifiedBy: latestLog?.verified_by || '',
+      latestCctvObservedTime: latestLog?.cctv_observed_time || '',
+      latestCctvNote: latestLog?.cctv_note || '',
       lateMinutes,
       todayLogsCount: empLogs.length,
     };
@@ -792,7 +890,11 @@ async function fetchBootstrapFromDirectCloud(dateKey) {
       pendingDayOffSwapsCount: 0,
       totalPendingSwapsCount: 0,
       lateCount,
-      unverifiedAttendanceCount: attendanceLogs.filter((l) => !l.verified_by_cctv).length,
+      unverifiedAttendanceCount: attendanceLogs.filter(
+        (l) =>
+          (l.cctv_status || (Number(l.verified_by_cctv) ? 'confirmed' : 'pending')) === 'pending'
+      ).length,
+      mismatchAttendanceCount: attendanceLogs.filter((l) => l.cctv_status === 'mismatch').length,
       unloadingTrucksCount: truckLogs.filter((t) => t.status === 'unloading').length,
       completedTrucksCount: truckLogs.filter(
         (t) => t.status === 'completed' && t.date_key === targetDate
@@ -1107,8 +1209,29 @@ export async function uploadProofImage(dataUrl, prefix = 'proof') {
   return dataUrl;
 }
 
+const ATTENDANCE_PERMISSION_ERR_MSG =
+  'تسجيل الحضور والانصراف متاح فقط للأدمن والمدير والمشرف والأمن ومراقب الكاميرات';
+
+function canSessionRecordAttendance(session) {
+  const role = session?.user?.role || '';
+  const perms = session?.permissions || [];
+  return (
+    role === 'owner' ||
+    role === 'kiosk' ||
+    hasPermission(perms, role, 'attendance:write')
+  );
+}
+
 // Resolve QR / Employee Quick-Scan offline using IndexedDB cached employees!
 async function enqueueOfflineQuickScan(body, actorSession) {
+  const effectiveSession = actorSession || getCachedAuthSession();
+  if (!canSessionRecordAttendance(effectiveSession)) {
+    const err = new Error(ATTENDANCE_PERMISSION_ERR_MSG);
+    err.status = 403;
+    err.isServerResponse = true;
+    throw err;
+  }
+
   const localSnap = await loadSnapshotFromLocalDb();
   const employees = localSnap?.employees || [];
   const raw = normalizeDigitsClient(String(body?.code_or_qr || '').trim());
@@ -1269,7 +1392,10 @@ export async function postActionWithOfflineSupport(endpoint, body, options = {})
         const directRes = await executeDirectCloudMutation(endpoint, { ...body, id: recordId });
         broadcastGlobalStoreChange(endpoint);
         return directRes;
-      } catch {
+      } catch (directErr) {
+        if (directErr?.isServerResponse || directErr?.status === 403) {
+          throw directErr;
+        }
         // Fall through to offline outbox queue
       }
     }
@@ -1277,6 +1403,14 @@ export async function postActionWithOfflineSupport(endpoint, body, options = {})
     // Special local resolution for QR / Quick-Scan while offline!
     if (endpoint === '/api/attendance/quick-scan') {
       return await enqueueOfflineQuickScan(body, session);
+    }
+
+    // Never allow unauthorized roles to enqueue attendance offline
+    if (endpoint === '/api/attendance' && !canSessionRecordAttendance(session)) {
+      const permErr = new Error(ATTENDANCE_PERMISSION_ERR_MSG);
+      permErr.status = 403;
+      permErr.isServerResponse = true;
+      throw permErr;
     }
 
     // Queue any operational mutation into IndexedDB outbox when internet is down!
@@ -1312,6 +1446,36 @@ async function executeDirectCloudMutation(endpoint, body) {
   const id = body.id || makeClientUuid();
 
   if (endpoint === '/api/attendance') {
+    if (!canSessionRecordAttendance(session)) {
+      const permErr = new Error(ATTENDANCE_PERMISSION_ERR_MSG);
+      permErr.status = 403;
+      permErr.isServerResponse = true;
+      throw permErr;
+    }
+
+    const sessionRole = session?.user?.role || '';
+    const sessionPerms = session?.permissions || [];
+    const canVerifyActor =
+      sessionRole === 'owner' || hasPermission(sessionPerms, sessionRole, 'attendance:verify');
+    const shouldConfirmCctv =
+      canVerifyActor &&
+      body.confirm_by_cctv !== false &&
+      body.cctv_status !== 'pending';
+    const localDt = new Date(iso);
+    const defaultHHMM = !Number.isNaN(localDt.getTime())
+      ? `${String(localDt.getHours()).padStart(2, '0')}:${String(localDt.getMinutes()).padStart(2, '0')}`
+      : '';
+    const cctvStatus = shouldConfirmCctv
+      ? body.cctv_status === 'mismatch'
+        ? 'mismatch'
+        : 'confirmed'
+      : 'pending';
+    const verifiedByCctv = cctvStatus === 'confirmed' ? 1 : 0;
+    const verifiedAt = shouldConfirmCctv ? iso : '';
+    const verifiedBy = shouldConfirmCctv ? body.verified_by || actorName : '';
+    const cctvObservedTime = shouldConfirmCctv ? body.cctv_observed_time || defaultHHMM : '';
+    const cctvNote = shouldConfirmCctv ? body.cctv_note || '' : '';
+
     const row = {
       id,
       employee_id: body.employee_id,
@@ -1328,7 +1492,12 @@ async function executeDirectCloudMutation(endpoint, body) {
       note: body.note || '',
       proof_url: body.proof_url || '',
       recorded_by: actorName,
-      verified_by_cctv: 0,
+      verified_by_cctv: verifiedByCctv,
+      verified_at: verifiedAt,
+      verified_by: verifiedBy,
+      cctv_status: cctvStatus,
+      cctv_observed_time: cctvObservedTime,
+      cctv_note: cctvNote,
       synced: 1,
     };
     try {
@@ -1336,8 +1505,8 @@ async function executeDirectCloudMutation(endpoint, body) {
         `INSERT INTO attendance_logs (
           id, employee_id, employee_name, department, action_type, timestamp, date_key, shift_date_key,
           late_minutes, allowed_break_minutes, break_duration_minutes, break_reason, note, proof_url,
-          recorded_by, verified_by_cctv, synced
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+          recorded_by, verified_by_cctv, verified_at, verified_by, cctv_status, cctv_observed_time, cctv_note, synced
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         ON CONFLICT (id) DO NOTHING`,
         [
           row.id,
@@ -1356,6 +1525,11 @@ async function executeDirectCloudMutation(endpoint, body) {
           row.proof_url,
           row.recorded_by,
           row.verified_by_cctv,
+          row.verified_at,
+          row.verified_by,
+          row.cctv_status,
+          row.cctv_observed_time,
+          row.cctv_note,
         ]
       );
     } catch {
@@ -1663,6 +1837,10 @@ export async function apiRequest(endpoint, method = 'GET', body) {
     }
     throw err;
   }
+}
+
+export async function verifyAttendanceLog(logId, payload = {}) {
+  return apiRequest(`/api/attendance/${encodeURIComponent(logId)}/verify`, 'POST', payload);
 }
 
 export async function fetchMyProfile() {
@@ -2049,4 +2227,165 @@ export async function cancelDayOffSwap(id) {
 
 export async function revertDayOffSwap(id, payload = {}) {
   return apiRequest(`/api/schedules/swaps/${encodeURIComponent(id)}/revert`, 'POST', payload);
+}
+
+// ============================================================================
+// SETTINGS, ROLE PROFILE PHOTOS & ACCOUNT SECURITY CLIENT API
+// ============================================================================
+
+export async function loginWithCredentials(payload) {
+  return loginWithPassword(payload);
+}
+
+function mergeSessionUser(updatedUser, nextToken) {
+  const cached = getCachedAuthSession();
+  if (!cached && !nextToken) return;
+  const token = nextToken || cached?.token || '';
+  const mergedUser = {
+    ...(cached?.user || {}),
+    ...(updatedUser || {}),
+  };
+  const perms = cached?.permissions || [];
+  if (token && mergedUser.id) {
+    setAuthSession(token, mergedUser, perms);
+  }
+}
+
+export async function updateMyProfile(payload = {}) {
+  const res = await apiRequest('/api/profile/me', 'PUT', payload);
+  if (res?.user) {
+    mergeSessionUser(res.user);
+  }
+  return res;
+}
+
+export async function uploadMyAvatar(dataUrl, options = {}) {
+  const res = await apiRequest('/api/profile/me/avatar', 'POST', {
+    dataUrl,
+    apply_to_role_default: Boolean(options?.applyToRoleDefault ?? options?.apply_to_role_default),
+  });
+  if (res?.user) {
+    mergeSessionUser(res.user);
+  }
+  return res;
+}
+
+export async function deleteMyAvatar() {
+  const res = await apiRequest('/api/profile/me/avatar', 'DELETE');
+  if (res?.user) {
+    mergeSessionUser(res.user);
+  }
+  return res;
+}
+
+export async function checkUsernameAvailable(username, excludeUserId = '') {
+  const params = new URLSearchParams();
+  params.set('username', String(username || '').trim());
+  if (excludeUserId) {
+    params.set('exclude_user_id', String(excludeUserId).trim());
+  }
+  return apiRequest(`/api/profile/username-available?${params.toString()}`, 'GET');
+}
+
+export async function changeMyUsername({ new_username, current_password }) {
+  const res = await apiRequest('/api/profile/me/username', 'PUT', {
+    new_username: String(new_username || '').trim(),
+    current_password: normalizeDigitsClient(current_password).trim(),
+  });
+  if (res?.user) {
+    mergeSessionUser(res.user);
+  }
+  return res;
+}
+
+export async function changeMyPassword({
+  current_password,
+  new_password,
+  confirm_password,
+  revoke_other_sessions = true,
+}) {
+  const res = await apiRequest('/api/profile/me/password', 'PUT', {
+    current_password: normalizeDigitsClient(current_password).trim(),
+    new_password: normalizeDigitsClient(new_password).trim(),
+    confirm_password:
+      confirm_password !== undefined
+        ? normalizeDigitsClient(confirm_password).trim()
+        : undefined,
+    revoke_other_sessions: Boolean(revoke_other_sessions),
+  });
+  if (res?.token || res?.user) {
+    mergeSessionUser(res.user, res.token);
+  }
+  return res;
+}
+
+export async function updateMyPreferences(prefs = {}) {
+  const res = await apiRequest('/api/profile/me/preferences', 'PUT', prefs);
+  if (res?.preferences) {
+    const cached = getCachedAuthSession();
+    if (cached?.user) {
+      mergeSessionUser({ ...cached.user, preferences: res.preferences });
+    }
+  }
+  return res;
+}
+
+export async function fetchMySessions() {
+  return apiRequest('/api/profile/me/sessions', 'GET');
+}
+
+export async function revokeMyOtherSessions() {
+  return apiRequest('/api/profile/me/sessions/revoke-others', 'POST', {});
+}
+
+export async function fetchSettingsRoleAccounts() {
+  return apiRequest('/api/settings/role-accounts', 'GET');
+}
+
+export async function uploadRoleDefaultAvatar(role, dataUrl) {
+  return apiRequest(`/api/settings/roles/${encodeURIComponent(role)}/avatar`, 'POST', {
+    dataUrl,
+  });
+}
+
+export async function deleteRoleDefaultAvatar(role) {
+  return apiRequest(`/api/settings/roles/${encodeURIComponent(role)}/avatar`, 'DELETE');
+}
+
+export async function uploadAccountAvatar(userId, dataUrl) {
+  const res = await apiRequest(
+    `/api/settings/role-accounts/${encodeURIComponent(userId)}/avatar`,
+    'POST',
+    { dataUrl }
+  );
+  const cached = getCachedAuthSession();
+  if (cached?.user?.id === userId && res?.avatar_url !== undefined) {
+    mergeSessionUser({ ...cached.user, avatar_url: res.avatar_url, avatar_preset: '' });
+  }
+  return res;
+}
+
+export async function deleteAccountAvatar(userId) {
+  const res = await apiRequest(
+    `/api/settings/role-accounts/${encodeURIComponent(userId)}/avatar`,
+    'DELETE'
+  );
+  const cached = getCachedAuthSession();
+  if (cached?.user?.id === userId) {
+    mergeSessionUser({ ...cached.user, avatar_url: '' });
+  }
+  return res;
+}
+
+export async function updateAccountCredentials(userId, payload = {}) {
+  const res = await apiRequest(
+    `/api/settings/role-accounts/${encodeURIComponent(userId)}/credentials`,
+    'PUT',
+    payload
+  );
+  const cached = getCachedAuthSession();
+  if (cached?.user?.id === userId && (res?.account || res?.token)) {
+    mergeSessionUser(res.account || cached.user, res.token);
+  }
+  return res;
 }

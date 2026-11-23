@@ -12,8 +12,22 @@ import {
   exportShortagesWord,
   formatTimeArabic,
 } from '../lib/exportUtils.js';
+import { useThemeArchitecture } from '../lib/themeContext.jsx';
 import ShortageComposerForm from './shortages/ShortageComposerForm.jsx';
-import { Badge, BottomSheet, Button, EmptyState } from './ui/index.js';
+import {
+  BottomSheet,
+  Button,
+  CockpitMetricStrip,
+  ConfirmSheet,
+  EmptyState,
+  FilterChipRail,
+  GroupedList,
+  GroupedRow,
+  Icon,
+  SearchFilterBar,
+  SectionHeader,
+  StatusDot,
+} from './ui/index.js';
 
 export const SHORTAGE_CATEGORIES = [
   { id: 'ألبان وجبن', label: 'ألبان وجبن', icon: 'kitchen' },
@@ -30,7 +44,7 @@ export const SHORTAGE_CATEGORIES = [
 
 const UNIT_OPTIONS = ['', 'كرتونة', 'باكت', 'علبة', 'قطعة', 'كيلو', 'شكارة'];
 const QTY_PRESETS = [
-  { label: 'فاضي (بدون كمية)', value: '' },
+  { label: 'بدون كمية', value: '' },
   { label: '0', value: '0' },
   { label: '1', value: '1' },
   { label: '2', value: '2' },
@@ -39,13 +53,15 @@ const QTY_PRESETS = [
   { label: '10', value: '10' },
 ];
 
+const CATALOG_INITIAL_LIMIT = 48;
+
 function parseQtyInputForPayload(rawStr) {
   if (rawStr === null || rawStr === undefined) return { ok: true, value: null };
   const cleaned = normalizeDigitsClient(rawStr).trim();
   if (cleaned === '') return { ok: true, value: null };
   const num = Number(cleaned);
   if (Number.isNaN(num) || !Number.isFinite(num) || num < 0) {
-    return { ok: false, error: 'يرجى كتابة رقم صحيح (0 أو أكثر) أو ترك الكمية فاضية' };
+    return { ok: false, error: 'أدخل رقماً صحيحاً أو اتركه فارغاً' };
   }
   return { ok: true, value: Math.round(num * 1000) / 1000 };
 }
@@ -66,14 +82,18 @@ export default function ShortagesView({
   onRefresh,
   onToast,
 }) {
+  const arch = useThemeArchitecture();
+  const isMinimal = arch.id === 'minimal';
+
   const [selectedCategory, setSelectedCategory] = useState('ألبان وجبن');
   const [catalogFilterCat, setCatalogFilterCat] = useState('all');
   const [catalogSearch, setCatalogSearch] = useState('');
+  const [showAllCatalog, setShowAllCatalog] = useState(false);
 
   // Composer state
   const [itemName, setItemName] = useState('');
   const [selectedCatalogId, setSelectedCatalogId] = useState('');
-  const [qtyInput, setQtyInput] = useState(''); // '' => null, '0' => 0, '5' => 5
+  const [qtyInput, setQtyInput] = useState('');
   const [unit, setUnit] = useState('');
   const [urgency, setUrgency] = useState('out_of_stock');
   const [isSuggestion, setIsSuggestion] = useState(false);
@@ -82,13 +102,21 @@ export default function ShortagesView({
   const [showExtraFields, setShowExtraFields] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [composerSheetOpen, setComposerSheetOpen] = useState(false);
+  const [actionsSheetOpen, setActionsSheetOpen] = useState(false);
+
+  const [isDesktop, setIsDesktop] = useState(() =>
+    typeof window !== 'undefined' ? window.matchMedia('(min-width: 768px)').matches : false
+  );
 
   // List filter state
   const [statusFilter, setStatusFilter] = useState('open');
   const [listSearch, setListSearch] = useState('');
   const [busyId, setBusyId] = useState('');
 
-  // Quick Edit / Full Admin Edit Modal
+  // Confirmation Sheet state
+  const [confirmState, setConfirmState] = useState(null);
+
+  // Quick Edit / Admin Edit Modal
   const [editingItem, setEditingItem] = useState(null);
   const [editForm, setEditForm] = useState({
     item_name: '',
@@ -113,17 +141,50 @@ export default function ShortagesView({
   const nameInputRef = useRef(null);
 
   useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return undefined;
+    const mq = window.matchMedia('(min-width: 768px)');
+    const handleChange = (e) => {
+      setIsDesktop(e.matches);
+      if (e.matches) {
+        setComposerSheetOpen(false);
+      }
+    };
+    setIsDesktop(mq.matches);
+    if (mq.addEventListener) {
+      mq.addEventListener('change', handleChange);
+      return () => mq.removeEventListener('change', handleChange);
+    }
+    mq.addListener(handleChange);
+    return () => mq.removeListener(handleChange);
+  }, []);
+
+  function focusOrOpenComposer() {
+    if (!canWrite) return;
+    if (isDesktop) {
+      composerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(() => nameInputRef.current?.focus(), 100);
+    } else {
+      setComposerSheetOpen(true);
+      setTimeout(() => nameInputRef.current?.focus(), 140);
+    }
+  }
+
+  useEffect(() => {
     const handleOpenComposer = (ev) => {
       if (ev?.detail?.action === 'shortage_add' && canWrite) {
-        setComposerSheetOpen(true);
-        setTimeout(() => nameInputRef.current?.focus(), 120);
+        if (isDesktop) {
+          composerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setTimeout(() => nameInputRef.current?.focus(), 100);
+        } else {
+          setComposerSheetOpen(true);
+          setTimeout(() => nameInputRef.current?.focus(), 140);
+        }
       }
     };
     window.addEventListener('zayed:open-composer', handleOpenComposer);
     return () => window.removeEventListener('zayed:open-composer', handleOpenComposer);
-  }, [canWrite]);
+  }, [canWrite, isDesktop]);
 
-  // Map open/ordered shortages by normalized item name so quick catalog shows live status
   const activeByNormName = useMemo(() => {
     const map = new Map();
     for (const s of shortages) {
@@ -159,6 +220,47 @@ export default function ShortagesView({
     });
   }, [productCatalog, catalogFilterCat, catalogSearch]);
 
+  const visibleCatalog = useMemo(() => {
+    if (showAllCatalog || filteredCatalog.length <= CATALOG_INITIAL_LIMIT) {
+      return filteredCatalog;
+    }
+    return filteredCatalog.slice(0, CATALOG_INITIAL_LIMIT);
+  }, [filteredCatalog, showAllCatalog]);
+
+  const hiddenCatalogCount = Math.max(0, filteredCatalog.length - visibleCatalog.length);
+
+  const catalogCategoryChips = useMemo(() => {
+    const items = [
+      {
+        id: 'all',
+        label: 'الكل',
+        count: productCatalog.length,
+      },
+    ];
+    for (const cat of SHORTAGE_CATEGORIES) {
+      const countInCat = productCatalog.filter((c) => c.category === cat.id).length;
+      if (countInCat > 0) {
+        items.push({
+          id: cat.id,
+          label: cat.label,
+          count: countInCat,
+        });
+      }
+    }
+    return items;
+  }, [productCatalog]);
+
+  const statusFilterChips = useMemo(
+    () => [
+      { id: 'open', label: 'مطلوب', count: counts.open },
+      { id: 'suggestions', label: 'مقترحات', count: counts.suggestions },
+      { id: 'ordered', label: 'تم طلبه', count: counts.ordered },
+      { id: 'resolved', label: 'توفّر', count: counts.resolved },
+      { id: 'all', label: 'الكل', count: counts.total },
+    ],
+    [counts]
+  );
+
   const filteredShortages = useMemo(() => {
     const q = listSearch.trim().toLowerCase();
     return shortages.filter((s) => {
@@ -192,7 +294,7 @@ export default function ShortagesView({
     const existingActive = activeByNormName.get(catItem.name.trim().toLowerCase());
     if (existingActive) {
       openEditModal(existingActive, false);
-      onToast?.(`"${catItem.name}" مسجل بالفعل — يمكنك تعديل الكمية هنا مباشرة`);
+      onToast?.(`${catItem.name} مسجل بالفعل`);
       return;
     }
     setItemName(catItem.name);
@@ -200,11 +302,7 @@ export default function ShortagesView({
     if (catItem.category) setSelectedCategory(catItem.category);
     if (catItem.default_unit) setUnit(catItem.default_unit);
     if (catItem.supplier_id) setSupplierId(catItem.supplier_id);
-    if (typeof window !== 'undefined' && window.innerWidth < 768) {
-      setComposerSheetOpen(true);
-    } else {
-      composerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
+    focusOrOpenComposer();
   }
 
   async function handleSubmitShortage(e) {
@@ -213,7 +311,7 @@ export default function ShortagesView({
 
     const cleanName = itemName.trim();
     if (!cleanName) {
-      onToast?.('اكتب اسم الصنف الناقص أو اختره من الأزرار السريعة أولاً', 'error');
+      onToast?.('اكتب اسم الصنف أولاً', 'error');
       nameInputRef.current?.focus();
       return;
     }
@@ -230,7 +328,7 @@ export default function ShortagesView({
         catalog_item_id: selectedCatalogId || '',
         item_name: cleanName,
         category: selectedCategory,
-        requested_qty: parsedQty.value, // null, 0, or positive number
+        requested_qty: parsedQty.value,
         unit,
         urgency,
         is_suggestion: isSuggestion ? 1 : 0,
@@ -246,15 +344,11 @@ export default function ShortagesView({
       );
 
       if (res?.queuedOffline) {
-        onToast?.(`تم حفظ "${cleanName}" مؤقتاً وسيتم إرساله فور عودة الشبكة`);
+        onToast?.(`تم حفظ ${cleanName} محلياً`);
       } else if (res?.merged) {
-        onToast?.(`تم تحديث الصنف الموجود مسبقاً "${cleanName}" بنجاح ✓`);
+        onToast?.(`تم تحديث ${cleanName}`);
       } else {
-        onToast?.(
-          isSuggestion
-            ? `تم تسجيل مقترح إضافة "${cleanName}" بنجاح ✓`
-            : `تم تسجيل "${cleanName}" في قائمة النواقص ✓`
-        );
+        onToast?.(`تم تسجيل ${cleanName}`);
       }
 
       setItemName('');
@@ -301,7 +395,7 @@ export default function ShortagesView({
     }
 
     if (!editForm.item_name.trim()) {
-      onToast?.('يرجى كتابة اسم الصنف', 'error');
+      onToast?.('اكتب اسم الصنف', 'error');
       return;
     }
 
@@ -310,7 +404,7 @@ export default function ShortagesView({
       const payload = {
         item_name: editForm.item_name.trim(),
         category: editForm.category,
-        requested_qty: parsedQty.value, // null, 0, or positive number
+        requested_qty: parsedQty.value,
         unit: editForm.unit,
         urgency: editForm.urgency,
         notes: editForm.notes.trim(),
@@ -323,7 +417,7 @@ export default function ShortagesView({
 
       await apiRequest(`/api/shortages/${editingItem.id}`, 'PUT', payload);
       playSuccessChime('in');
-      onToast?.(`تم حفظ التعديلات على "${editForm.item_name.trim()}" ✓`);
+      onToast?.(`تم تحديث ${editForm.item_name.trim()}`);
       setEditingItem(null);
       onRefresh?.();
     } catch (err) {
@@ -340,10 +434,10 @@ export default function ShortagesView({
       playSuccessChime(nextStatus === 'resolved' ? 'out' : 'in');
       const msg =
         nextStatus === 'ordered'
-          ? `تم تعليم "${item.item_name}" أنه تم طلبه من المورد`
+          ? `تم طلب ${item.item_name}`
           : nextStatus === 'resolved'
-          ? `تم توفير "${item.item_name}" في الصالة ✓`
-          : `تم إعادة "${item.item_name}" إلى النواقص المفتوحة`;
+          ? `تم توفير ${item.item_name}`
+          : `تمت إعادة ${item.item_name}`;
       onToast?.(msg);
       onRefresh?.();
     } catch (err) {
@@ -353,13 +447,13 @@ export default function ShortagesView({
     }
   }
 
-  async function handleResolveAll() {
-    if (!window.confirm('هل تم توفير جميع الأصناف المفتوحة في الصالة؟')) return;
+  async function executeResolveAll() {
     setBusyId('__ALL__');
     try {
       const res = await apiRequest('/api/shortages/resolve-all', 'POST', {});
       playSuccessChime('out');
-      onToast?.(`تم إغلاق وتوفير ${res.resolvedCount || 0} صنف بنجاح ✓`);
+      onToast?.(`تم توفير ${res.resolvedCount || 0} صنف`);
+      setConfirmState(null);
       onRefresh?.();
     } catch (err) {
       onToast?.(err.message, 'error');
@@ -368,13 +462,13 @@ export default function ShortagesView({
     }
   }
 
-  async function handleDeleteShortage(item) {
-    if (!canManageRecords) return;
-    if (!window.confirm(`حذف الصنف "${item.item_name}" نهائياً من السجل؟`)) return;
+  async function executeDeleteShortage(item) {
+    if (!canManageRecords || !item) return;
     setBusyId(item.id);
     try {
       await apiRequest(`/api/shortages/${item.id}`, 'DELETE');
-      onToast?.(`تم حذف "${item.item_name}" نهائياً`);
+      onToast?.(`تم حذف ${item.item_name}`);
+      setConfirmState(null);
       onRefresh?.();
     } catch (err) {
       onToast?.(err.message, 'error');
@@ -390,7 +484,7 @@ export default function ShortagesView({
       .map((l) => l.trim())
       .filter(Boolean);
     if (lines.length === 0) {
-      onToast?.('اكتب اسماً واحداً على الأقل في المربع', 'error');
+      onToast?.('اكتب صنفاً واحداً على الأقل', 'error');
       return;
     }
 
@@ -401,7 +495,7 @@ export default function ShortagesView({
         category: bulkCategory,
         default_unit: bulkUnit,
       });
-      onToast?.(`تم إضافة ${res.addedCount || 0} صنف سريع للكتالوج ✓`);
+      onToast?.(`تمت إضافة ${res.addedCount || 0} صنف`);
       setBulkLines('');
       onRefresh?.();
     } catch (err) {
@@ -411,12 +505,13 @@ export default function ShortagesView({
     }
   }
 
-  async function handleDeleteCatalogItem(catItem) {
-    if (!window.confirm(`إزالة "${catItem.name}" من الأزرار السريعة؟`)) return;
+  async function executeDeleteCatalogItem(catItem) {
+    if (!catItem) return;
     setCatalogBusy(true);
     try {
       await apiRequest(`/api/catalog/${catItem.id}`, 'DELETE');
-      onToast?.(`تم إزالة "${catItem.name}" من الأزرار السريعة`);
+      onToast?.(`تم حذف ${catItem.name}`);
+      setConfirmState(null);
       onRefresh?.();
     } catch (err) {
       onToast?.(err.message, 'error');
@@ -430,648 +525,536 @@ export default function ShortagesView({
     window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
   }
 
+  const sharedComposerProps = {
+    categories: SHORTAGE_CATEGORIES,
+    unitOptions: UNIT_OPTIONS,
+    qtyPresets: QTY_PRESETS,
+    suppliers,
+    canManageShortages,
+    canManageRecords,
+    selectedCategory,
+    setSelectedCategory,
+    itemName,
+    setItemName,
+    setSelectedCatalogId,
+    qtyInput,
+    setQtyInput,
+    unit,
+    setUnit,
+    urgency,
+    setUrgency,
+    isSuggestion,
+    setIsSuggestion,
+    supplierId,
+    setSupplierId,
+    notes,
+    setNotes,
+    showExtraFields,
+    setShowExtraFields,
+    submitting,
+    nameInputRef,
+    parseQtyInputForPayload,
+    adjustQty,
+    onSubmit: handleSubmitShortage,
+    onToast,
+  };
+
   return (
-    <div className="space-y-4">
-      {/* Top Summary Banner — Large, Friendly, Mobile-First */}
-      <div className="g-card p-4 sm:p-5">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-2xl bg-[var(--g-green-bg)] border border-[var(--g-green-border)]/30 text-[var(--g-green)] flex items-center justify-center shrink-0">
-              <span className="ms-icon filled text-2xl">shopping_basket</span>
-            </div>
-            <div>
-              <h2 className="text-lg sm:text-xl font-black text-[var(--g-text)]">
-                نواقص الصالة والأصناف المطلوبة
-              </h2>
-              <p className="text-xs sm:text-sm text-[var(--g-text-muted)] font-medium">
-                سجّل أي صنف خلص أو قرب يخلص من الرفوف بلمسة واحدة
-              </p>
-            </div>
-          </div>
+    <div className={arch.surfaces.sectionGapClass}>
+      {/* Borderless Canvas Header */}
+      <div
+        className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+          isMinimal ? 'pb-2.5 border-b border-line' : ''
+        }`}
+      >
+        <h1
+          className={`text-lg sm:text-xl ${arch.surfaces.headingWeight} tracking-tight text-ink m-0`}
+        >
+          النواقص
+        </h1>
 
-          {/* Mobile Quick Composer CTA */}
+        {/* Mobile Consolidated Actions */}
+        <div className="flex md:hidden items-center gap-1.5 shrink-0">
           {canWrite && (
-            <button
+            <Button
               type="button"
+              variant="primary"
+              size="sm"
+              icon="add"
               onClick={() => setComposerSheetOpen(true)}
-              className="md:hidden w-full min-h-[48px] px-4 py-2.5 rounded-2xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-sm font-black flex items-center justify-center gap-2 shadow-sm active:scale-[0.98]"
             >
-              <span className="ms-icon filled text-xl">add_shopping_cart</span>
-              <span>تسجيل صنف ناقص / اقتراح</span>
-            </button>
+              إضافة
+            </Button>
           )}
-
-          {/* Handover, Export & Catalog Actions */}
-          {(canHandover || canExport || canManageShortages || canManageRecords) && (
-            <div className="flex flex-wrap items-center gap-2">
-              {canHandover && (
-                <button
-                  type="button"
-                  onClick={onOpenHandoverModal}
-                  className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[var(--g-primary)] text-white text-xs sm:text-sm font-extrabold flex items-center gap-1.5 shadow-sm active:scale-[0.98]"
-                >
-                  <span className="ms-icon filled text-lg">swap_horiz</span>
-                  <span>تسليم وردية الصالة</span>
-                </button>
-              )}
-              {(canExport || canManageShortages) && (
-                <>
-                  <button
-                    type="button"
-                    onClick={handleShareWhatsApp}
-                    className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-xs sm:text-sm font-bold flex items-center gap-1.5 shadow-sm active:scale-[0.98]"
-                  >
-                    <span className="ms-icon text-lg">share</span>
-                    <span>إرسال واتساب</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => exportShortagesCsv(shortages, dateKey || 'today')}
-                    className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[var(--g-surface)] hover:bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-[var(--g-text)] text-xs sm:text-sm font-bold flex items-center gap-1.5 active:scale-[0.98]"
-                  >
-                    <span className="ms-icon text-lg text-[var(--g-primary)]">download</span>
-                    <span>ملف Excel</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => exportShortagesWord(shortages, dateKey || 'today', storeName)}
-                    className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[var(--g-surface)] hover:bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-[var(--g-text)] text-xs sm:text-sm font-bold flex items-center gap-1.5 active:scale-[0.98]"
-                  >
-                    <span className="ms-icon text-lg text-[var(--g-primary)]">description</span>
-                    <span>ملف Word</span>
-                  </button>
-                </>
-              )}
-              {(canManageShortages || canManageRecords) && (
-                <button
-                  type="button"
-                  onClick={() => setShowCatalogModal(true)}
-                  className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[var(--g-primary-container)] text-[var(--g-on-primary-container)] border border-[var(--g-primary)]/20 text-xs sm:text-sm font-bold flex items-center gap-1.5 active:scale-[0.98]"
-                >
-                  <span className="ms-icon text-lg">bolt</span>
-                  <span>أزرار الأصناف السريعة ({productCatalog.length})</span>
-                </button>
-              )}
-            </div>
+          {((canHandover && onOpenHandoverModal) ||
+            canExport ||
+            canManageShortages ||
+            canManageRecords) && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              icon="more_horiz"
+              onClick={() => setActionsSheetOpen(true)}
+            >
+              المزيد
+            </Button>
           )}
         </div>
 
-        {/* 3 Big Status Counters */}
-        <div className="grid grid-cols-3 gap-2 sm:gap-3 mt-4">
-          <button
-            type="button"
-            onClick={() => setStatusFilter('open')}
-            className={`p-3 rounded-2xl border-2 text-right transition-all ${
-              statusFilter === 'open'
-                ? 'border-[#9E1C17] bg-[#C5221F] text-white shadow-sm'
-                : 'border-[var(--g-red-border)]/35 bg-[var(--g-red-bg)] text-[var(--g-red)] hover:border-[var(--g-red-border)]'
-            }`}
-          >
-            <div className="text-[11px] sm:text-xs font-extrabold">
-              مطلوب الآن
-            </div>
-            <div className="text-2xl sm:text-3xl font-black num-ltr mt-0.5">
-              {counts.open}
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setStatusFilter('ordered')}
-            className={`p-3 rounded-2xl border-2 text-right transition-all ${
-              statusFilter === 'ordered'
-                ? 'border-[#9A4A00] bg-[#C25E00] text-white shadow-sm'
-                : 'border-[var(--g-yellow-border)]/40 bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] hover:border-[var(--g-yellow-border)]'
-            }`}
-          >
-            <div className="text-[11px] sm:text-xs font-extrabold">
-              تم طلبه
-            </div>
-            <div className="text-2xl sm:text-3xl font-black num-ltr mt-0.5">
-              {counts.ordered}
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setStatusFilter('resolved')}
-            className={`p-3 rounded-2xl border-2 text-right transition-all ${
-              statusFilter === 'resolved'
-                ? 'border-[#0F5223] bg-[#146C2E] text-white shadow-sm'
-                : 'border-[var(--g-green-border)]/40 bg-[var(--g-green-bg)] text-[var(--g-green)] hover:border-[var(--g-green-border)]'
-            }`}
-          >
-            <div className="text-[11px] sm:text-xs font-extrabold">
-              تم توفيره ✓
-            </div>
-            <div className="text-2xl sm:text-3xl font-black num-ltr mt-0.5">
-              {counts.resolved}
-            </div>
-          </button>
+        {/* Desktop Full Action Strip */}
+        <div className="hidden md:flex flex-wrap items-center gap-1.5">
+          {canHandover && onOpenHandoverModal && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              icon="swap_horiz"
+              onClick={onOpenHandoverModal}
+            >
+              الوردية
+            </Button>
+          )}
+          {(canExport || canManageShortages) && (
+            <>
+              <Button
+                type="button"
+                variant="whatsapp"
+                size="sm"
+                icon="share"
+                onClick={handleShareWhatsApp}
+              >
+                واتساب
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                icon="download"
+                onClick={() => exportShortagesCsv(shortages, dateKey || 'today')}
+              >
+                Excel
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                icon="description"
+                onClick={() => exportShortagesWord(shortages, dateKey || 'today', storeName)}
+              >
+                Word
+              </Button>
+            </>
+          )}
+          {(canManageShortages || canManageRecords) && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => setShowCatalogModal(true)}
+            >
+              الكتالوج
+            </Button>
+          )}
         </div>
       </div>
 
-      {/* Quick 1-Tap Product Catalog (if any saved products exist) */}
+      {/* 3-Metric Cockpit Strip */}
+      <CockpitMetricStrip
+        columns={3}
+        items={[
+          {
+            id: 'open',
+            label: 'مطلوب',
+            value: counts.open,
+            tone: counts.open > 0 ? 'danger' : 'neutral',
+            active: statusFilter === 'open',
+            onClick: () => setStatusFilter('open'),
+          },
+          {
+            id: 'ordered',
+            label: 'تم طلبه',
+            value: counts.ordered,
+            tone: counts.ordered > 0 ? 'warning' : 'neutral',
+            active: statusFilter === 'ordered',
+            onClick: () => setStatusFilter('ordered'),
+          },
+          {
+            id: 'resolved',
+            label: 'توفّر',
+            value: counts.resolved,
+            tone: counts.resolved > 0 ? 'success' : 'neutral',
+            active: statusFilter === 'resolved',
+            onClick: () => setStatusFilter('resolved'),
+          },
+        ]}
+      />
+
+      {/* Quick 1-Tap Product Catalog */}
       {canWrite && productCatalog.length > 0 && (
-        <div className="g-card p-4 sm:p-5 space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <span className="ms-icon filled text-xl text-[#E37400]">touch_app</span>
-              <h3 className="text-sm sm:text-base font-extrabold text-[var(--g-text)]">
-                اضغط على الصنف بلمسة واحدة للتسجيل السريع
-              </h3>
-            </div>
-            <div className="relative w-full sm:w-64">
-              <span className="ms-icon text-lg text-[var(--g-text-muted)] absolute right-3 top-1/2 -translate-y-1/2">
-                search
-              </span>
-              <input
-                type="search"
-                value={catalogSearch}
-                onChange={(e) => setCatalogSearch(e.target.value)}
-                placeholder="ابحث في الأصناف المحفوظة..."
-                className="g-input pr-9 min-h-[44px] text-sm"
-              />
-            </div>
-          </div>
+        <section className="space-y-3">
+          <SectionHeader
+            title="الأصناف السريعة"
+            count={filteredCatalog.length}
+            actions={
+              <div className="w-full sm:w-56">
+                <SearchFilterBar
+                  value={catalogSearch}
+                  onChange={setCatalogSearch}
+                  placeholder="بحث..."
+                />
+              </div>
+            }
+          />
 
-          {/* Category filter pills for catalog */}
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
-            <button
-              type="button"
-              onClick={() => setCatalogFilterCat('all')}
-              className={`min-h-[42px] px-3.5 py-1.5 rounded-full text-xs sm:text-sm font-bold whitespace-nowrap transition-all ${
-                catalogFilterCat === 'all'
-                  ? 'bg-[var(--g-primary)] text-white shadow-sm'
-                  : 'bg-[var(--g-surface-2)] text-[var(--g-text)] border border-[var(--g-border)]'
-              }`}
-            >
-              كل الأقسام ({productCatalog.length})
-            </button>
-            {SHORTAGE_CATEGORIES.map((cat) => {
-              const countInCat = productCatalog.filter((c) => c.category === cat.id).length;
-              if (countInCat === 0) return null;
-              return (
-                <button
-                  key={cat.id}
-                  type="button"
-                  onClick={() => {
-                    setCatalogFilterCat(cat.id);
-                    setSelectedCategory(cat.id);
-                  }}
-                  className={`min-h-[42px] px-3.5 py-1.5 rounded-full text-xs sm:text-sm font-bold whitespace-nowrap transition-all flex items-center gap-1.5 ${
-                    catalogFilterCat === cat.id
-                      ? 'bg-[var(--g-primary)] text-white shadow-sm'
-                      : 'bg-[var(--g-surface-2)] text-[var(--g-text)] border border-[var(--g-border)]'
-                  }`}
-                >
-                  <span className="ms-icon text-base">{cat.icon}</span>
-                  <span>{cat.label}</span>
-                  <span className="opacity-75">({countInCat})</span>
-                </button>
-              );
-            })}
-          </div>
+          <FilterChipRail
+            items={catalogCategoryChips}
+            activeId={catalogFilterCat}
+            onSelect={(catId) => {
+              setCatalogFilterCat(catId);
+              if (catId !== 'all') {
+                setSelectedCategory(catId);
+              }
+            }}
+          />
 
-          {/* Big Touch Product Buttons */}
           {filteredCatalog.length === 0 ? (
-            <div className="text-center py-4 text-xs sm:text-sm text-[var(--g-text-muted)]">
-              لا يوجد صنف محفوظ بهذا الاسم — اكتبه بالأسفل وسيُحفظ تلقائياً للمرات القادمة!
-            </div>
+            <EmptyState compact title="لا توجد أصناف مطابقة" />
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 max-h-64 overflow-y-auto p-0.5">
-              {filteredCatalog.slice(0, 48).map((catItem) => {
-                const activeMatch = activeByNormName.get(catItem.name.trim().toLowerCase());
-                const isSelected = itemName.trim().toLowerCase() === catItem.name.trim().toLowerCase();
-                return (
-                  <button
-                    key={catItem.id}
-                    type="button"
-                    onClick={() => handleSelectCatalogItem(catItem)}
-                    className={`min-h-[56px] p-3 rounded-2xl border text-right transition-all flex flex-col justify-between active:scale-[0.98] ${
-                      activeMatch
-                        ? 'border-[var(--g-green-border)] bg-[var(--g-green-bg)]'
-                        : isSelected
-                        ? 'border-[var(--g-primary)] ring-2 ring-[var(--g-primary)]/30 bg-[var(--g-primary-container)]'
-                        : 'border-[var(--g-border)] bg-[var(--g-surface)] hover:bg-[var(--g-surface-variant)] hover:border-[var(--g-primary)]'
-                    }`}
-                  >
-                    <div className="font-extrabold text-sm text-[var(--g-text)] leading-snug line-clamp-2">
-                      {catItem.name}
-                    </div>
-                    <div className="flex items-center justify-between gap-1 mt-1.5">
-                      <span className="text-[11px] text-[var(--g-text-muted)] truncate">
-                        {catItem.category}
-                      </span>
+            <div className="space-y-2.5">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                {visibleCatalog.map((catItem) => {
+                  const activeMatch = activeByNormName.get(
+                    catItem.name.trim().toLowerCase()
+                  );
+                  const isSelected =
+                    itemName.trim().toLowerCase() === catItem.name.trim().toLowerCase();
+                  return (
+                    <button
+                      key={catItem.id}
+                      type="button"
+                      onClick={() => handleSelectCatalogItem(catItem)}
+                      className={`min-h-[52px] px-3 py-2.5 rounded-[var(--g-radius-md)] border text-start flex items-center justify-between gap-2 transition-[border-color,background-color] duration-150 active:scale-[0.98] cursor-pointer ${
+                        activeMatch
+                          ? 'border-[var(--g-green-border)] bg-success-bg/40'
+                          : isSelected
+                          ? 'border-primary bg-surface-tint'
+                          : 'border-line bg-surface hover:border-line-strong'
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <div className="font-semibold text-xs sm:text-sm text-ink truncate">
+                          {catItem.name}
+                        </div>
+                        <div className="text-[11px] text-ink-muted truncate">
+                          {catItem.category}
+                        </div>
+                      </div>
                       {activeMatch ? (
-                        <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-[#146C2E] text-white shrink-0">
-                          مسجل ✓
-                        </span>
+                        <span
+                          className="w-2 h-2 rounded-full bg-success-solid shrink-0"
+                          aria-label="مسجل"
+                        />
                       ) : (
-                        <span className="text-[11px] font-bold text-[var(--g-primary)] shrink-0">
-                          اختر +
+                        <span
+                          className="text-sm font-semibold text-ink-muted shrink-0"
+                          aria-hidden="true"
+                        >
+                          +
                         </span>
                       )}
-                    </div>
-                  </button>
-                );
-              })}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {(hiddenCatalogCount > 0 || showAllCatalog) &&
+                filteredCatalog.length > CATALOG_INITIAL_LIMIT && (
+                  <div className="flex justify-center">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      icon={showAllCatalog ? 'expand_less' : 'expand_more'}
+                      onClick={() => setShowAllCatalog((prev) => !prev)}
+                    >
+                      {showAllCatalog ? 'إخفاء' : `عرض الكل (+${hiddenCatalogCount})`}
+                    </Button>
+                  </div>
+                )}
             </div>
           )}
-        </div>
+        </section>
       )}
 
-      {/* Super-Simple Add Shortage Form: Inline on Desktop, Snap BottomSheet on Mobile */}
+      {/* Single Active Composer Instance */}
       {canWrite && (
         <>
-          <div ref={composerRef} className="hidden md:block">
-            <ShortageComposerForm
-              categories={SHORTAGE_CATEGORIES}
-              unitOptions={UNIT_OPTIONS}
-              qtyPresets={QTY_PRESETS}
-              suppliers={suppliers}
-              canManageShortages={canManageShortages}
-              canManageRecords={canManageRecords}
-              selectedCategory={selectedCategory}
-              setSelectedCategory={setSelectedCategory}
-              itemName={itemName}
-              setItemName={setItemName}
-              setSelectedCatalogId={setSelectedCatalogId}
-              qtyInput={qtyInput}
-              setQtyInput={setQtyInput}
-              unit={unit}
-              setUnit={setUnit}
-              urgency={urgency}
-              setUrgency={setUrgency}
-              isSuggestion={isSuggestion}
-              setIsSuggestion={setIsSuggestion}
-              supplierId={supplierId}
-              setSupplierId={setSupplierId}
-              notes={notes}
-              setNotes={setNotes}
-              showExtraFields={showExtraFields}
-              setShowExtraFields={setShowExtraFields}
-              submitting={submitting}
-              nameInputRef={nameInputRef}
-              parseQtyInputForPayload={parseQtyInputForPayload}
-              adjustQty={adjustQty}
-              onSubmit={handleSubmitShortage}
-              onToast={onToast}
-            />
-          </div>
-
-          <BottomSheet
-            open={composerSheetOpen}
-            onClose={() => setComposerSheetOpen(false)}
-            title={isSuggestion ? 'اقتراح إضافة صنف جديد' : 'تسجيل صنف ناقص بالصالة'}
-            subtitle="اختر القسم والكمية ثم اضغط تسجيل"
-            icon={isSuggestion ? 'lightbulb' : 'add_shopping_cart'}
-            maxWidth="max-w-xl"
-          >
-            <ShortageComposerForm
-              inSheet
-              categories={SHORTAGE_CATEGORIES}
-              unitOptions={UNIT_OPTIONS}
-              qtyPresets={QTY_PRESETS}
-              suppliers={suppliers}
-              canManageShortages={canManageShortages}
-              canManageRecords={canManageRecords}
-              selectedCategory={selectedCategory}
-              setSelectedCategory={setSelectedCategory}
-              itemName={itemName}
-              setItemName={setItemName}
-              setSelectedCatalogId={setSelectedCatalogId}
-              qtyInput={qtyInput}
-              setQtyInput={setQtyInput}
-              unit={unit}
-              setUnit={setUnit}
-              urgency={urgency}
-              setUrgency={setUrgency}
-              isSuggestion={isSuggestion}
-              setIsSuggestion={setIsSuggestion}
-              supplierId={supplierId}
-              setSupplierId={setSupplierId}
-              notes={notes}
-              setNotes={setNotes}
-              showExtraFields={showExtraFields}
-              setShowExtraFields={setShowExtraFields}
-              submitting={submitting}
-              nameInputRef={nameInputRef}
-              parseQtyInputForPayload={parseQtyInputForPayload}
-              adjustQty={adjustQty}
-              onSubmit={handleSubmitShortage}
-              onToast={onToast}
-            />
-          </BottomSheet>
+          {isDesktop ? (
+            <div ref={composerRef}>
+              <ShortageComposerForm {...sharedComposerProps} />
+            </div>
+          ) : (
+            <BottomSheet
+              open={composerSheetOpen}
+              onClose={() => setComposerSheetOpen(false)}
+              title={isSuggestion ? 'اقتراح صنف' : 'تسجيل ناقص'}
+              maxWidth="max-w-xl"
+            >
+              <ShortageComposerForm inSheet {...sharedComposerProps} />
+            </BottomSheet>
+          )}
         </>
       )}
 
       {/* Recorded Shortages List */}
-      <div className="g-card p-4 sm:p-5 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1">
-            {[
-              { id: 'open', label: `مطلوب الآن (${counts.open})` },
-              { id: 'suggestions', icon: 'lightbulb', label: `مقترحات الكاشيرية (${counts.suggestions})` },
-              { id: 'ordered', label: `تم طلبه (${counts.ordered})` },
-              { id: 'resolved', label: `تم توفيره (${counts.resolved})` },
-              { id: 'all', label: `الكل (${counts.total})` },
-            ].map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setStatusFilter(tab.id)}
-                className={`min-h-[44px] px-4 py-2 rounded-full text-xs sm:text-sm font-extrabold whitespace-nowrap transition-all inline-flex items-center gap-1.5 ${
-                  statusFilter === tab.id
-                    ? 'bg-[var(--g-primary)] text-white shadow-sm'
-                    : 'bg-[var(--g-surface-2)] text-[var(--g-text)] border border-[var(--g-border)]'
-                }`}
-              >
-                {tab.icon && <span className="ms-icon text-base">{tab.icon}</span>}
-                <span>{tab.label}</span>
-              </button>
-            ))}
-          </div>
+      <section className="space-y-3">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+          <FilterChipRail
+            items={statusFilterChips}
+            activeId={statusFilter}
+            onSelect={setStatusFilter}
+            className="flex-1 min-w-0"
+          />
 
-          <div className="flex items-center gap-2">
-            <div className="relative flex-1 sm:w-56">
-              <span className="ms-icon text-lg text-[var(--g-text-muted)] absolute right-3 top-1/2 -translate-y-1/2">
-                search
-              </span>
-              <input
-                type="search"
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full lg:w-auto">
+            <div className="flex-1 sm:w-56">
+              <SearchFilterBar
                 value={listSearch}
-                onChange={(e) => setListSearch(e.target.value)}
-                placeholder="بحث في قائمة النواقص..."
-                className="g-input pr-9 min-h-[44px] text-sm"
+                onChange={setListSearch}
+                placeholder="بحث في النواقص"
               />
             </div>
 
-            {canManageShortages && counts.open + counts.ordered > 0 && statusFilter !== 'resolved' && (
-              <button
-                type="button"
-                disabled={busyId === '__ALL__'}
-                onClick={handleResolveAll}
-                className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-xs font-extrabold whitespace-nowrap shadow-xs active:scale-95"
-              >
-                توفير الكل ✓
-              </button>
-            )}
+            {canManageShortages &&
+              counts.open + counts.ordered > 0 &&
+              statusFilter !== 'resolved' && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  icon="done_all"
+                  loading={busyId === '__ALL__'}
+                  onClick={() => setConfirmState({ type: 'resolve_all' })}
+                  className="shrink-0"
+                >
+                  توفير الكل
+                </Button>
+              )}
           </div>
         </div>
 
         {filteredShortages.length === 0 ? (
           <EmptyState
-            icon="inventory"
-            tone="success"
-            title={
-              statusFilter === 'open'
-                ? 'لا توجد نواقص مطلوبة حالياً في الصالة'
-                : 'لا توجد أصناف في هذا القسم حالياً'
-            }
-            description="أي صنف يتم تسجيله يظهر هنا فوراً لكل المسؤولين"
-            actionLabel={canWrite ? 'تسجيل صنف الآن' : undefined}
-            onAction={canWrite ? () => setComposerSheetOpen(true) : undefined}
+            compact
+            title="لا توجد نواقص"
+            actionLabel={canWrite ? 'إضافة صنف' : undefined}
+            onAction={canWrite ? focusOrOpenComposer : undefined}
           />
         ) : (
-          <div className="space-y-3">
+          <GroupedList>
             {filteredShortages.map((item) => {
-              const isNullQty = item.requested_qty === null || item.requested_qty === undefined;
-              const isZeroQty = !isNullQty && Number(item.requested_qty) === 0;
+              const isNullQty =
+                item.requested_qty === null || item.requested_qty === undefined;
               const canWorkerEditThis = canWrite && item.status !== 'resolved';
+              const isSug = Number(item.is_suggestion) === 1;
+              const dotTone =
+                item.status === 'resolved'
+                  ? 'success'
+                  : item.status === 'ordered'
+                  ? 'warning'
+                  : isSug
+                  ? 'purple'
+                  : item.urgency === 'out_of_stock'
+                  ? 'danger'
+                  : 'warning';
+
+              const qtyDisplay = isNullQty
+                ? ''
+                : `${item.requested_qty}${item.unit ? ` ${item.unit}` : ''}`;
 
               return (
                 <div
                   key={item.id}
-                  className={`p-4 rounded-2xl border transition-all ${
-                    item.status === 'resolved'
-                      ? 'border-[var(--g-border)] bg-[var(--g-surface-2)]/60 opacity-85'
-                      : item.urgency === 'out_of_stock'
-                      ? 'border-[var(--g-red-border)]/50 bg-[var(--g-surface)]'
-                      : 'border-[var(--g-border)] bg-[var(--g-surface)]'
+                  className={`px-3.5 py-3 flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 ${
+                    item.status === 'resolved' ? 'opacity-65' : ''
                   }`}
                 >
-                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-                    {/* Item Main Info */}
-                    <div className="space-y-1.5 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        {Number(item.is_suggestion) === 1 && (
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-extrabold bg-[var(--g-purple-bg)] text-[var(--g-purple)] border border-[var(--g-purple-border)]/40">
-                            <span className="ms-icon text-sm">lightbulb</span>
-                            <span>اقتراح صنف جديد</span>
-                          </span>
-                        )}
-                        <span
-                          className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-extrabold border ${
-                            item.status === 'resolved'
-                              ? 'bg-[var(--g-green-bg)] text-[var(--g-green)] border-[var(--g-green-border)]/35'
-                              : item.status === 'ordered'
-                              ? 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] border-[var(--g-yellow-border)]/40'
-                              : item.urgency === 'out_of_stock'
-                              ? 'bg-[var(--g-red-bg)] text-[var(--g-red)] border-[var(--g-red-border)]/40'
-                              : 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] border-[var(--g-yellow-border)]/40'
-                          }`}
-                        >
-                          <span className="ms-icon text-sm">
-                            {item.status === 'resolved'
-                              ? 'check_circle'
-                              : item.status === 'ordered'
-                              ? 'local_shipping'
-                              : item.urgency === 'out_of_stock'
-                              ? 'error'
-                              : 'warning'}
-                          </span>
-                          <span>
-                            {item.status === 'resolved'
-                              ? 'تم التوفير بالصالة'
-                              : item.status === 'ordered'
-                              ? 'تم الطلب من المورد'
-                              : item.urgency === 'out_of_stock'
-                              ? 'خلص تماماً'
-                              : 'قرب يخلص'}
-                          </span>
-                        </span>
-
-                        <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[var(--g-surface-2)] text-[var(--g-text-muted)] border border-[var(--g-border)]">
-                          {item.category || 'بقالة جافة'}
-                        </span>
-
-                        {/* Quantity Badge — Explicitly differentiates NULL vs 0 vs Positive */}
-                        <span
-                          className={`px-3 py-1 rounded-xl text-xs sm:text-sm font-black ${
-                            isNullQty
-                              ? 'bg-[var(--g-surface-2)] text-[var(--g-text-muted)] border border-dashed border-[var(--g-border)]'
-                              : isZeroQty
-                              ? 'bg-[var(--g-purple-bg)] text-[var(--g-purple)] border border-[var(--g-purple-border)]/30'
-                              : 'bg-[var(--g-primary-container)] text-[var(--g-on-primary-container)]'
-                          }`}
-                        >
-                          {isNullQty
-                            ? 'الكمية: بدون تحديد (فاضي)'
-                            : isZeroQty
-                            ? `الكمية المطلوبة: 0${item.unit ? ` ${item.unit}` : ''}`
-                            : `المطلوب: ${item.requested_qty}${item.unit ? ` ${item.unit}` : ''}`}
-                        </span>
-                      </div>
-
-                      <div className="text-base sm:text-lg font-black text-[var(--g-text)] break-words">
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap min-w-0">
+                      <StatusDot tone={dotTone} />
+                      <span className="text-sm sm:text-base font-semibold text-ink break-words">
                         {item.item_name}
-                      </div>
+                      </span>
+                      {qtyDisplay && (
+                        <span className="num-ltr text-xs font-semibold text-primary">
+                          {qtyDisplay}
+                        </span>
+                      )}
+                      {isSug && (
+                        <span className="text-[11px] font-medium text-purple">
+                          · مقترح
+                        </span>
+                      )}
+                    </div>
 
+                    <div className="text-xs text-ink-muted flex items-center gap-1.5 flex-wrap">
+                      <span>{item.category || 'بقالة جافة'}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{item.recorded_by}</span>
+                      <span aria-hidden="true">·</span>
+                      <span className="num-ltr">
+                        {formatTimeArabic(item.updated_at || item.created_at)}
+                      </span>
+                      {item.supplier_name && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span>{item.supplier_name}</span>
+                        </>
+                      )}
+                      {item.status === 'resolved' && item.resolved_by && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-success">توفّر: {item.resolved_by}</span>
+                        </>
+                      )}
                       {item.notes && (
-                        <div className="flex items-start gap-1.5 text-xs sm:text-sm font-medium text-[var(--g-text)] bg-[var(--g-surface-2)] px-3 py-1.5 rounded-xl">
-                          <span className="ms-icon text-base text-[var(--g-text-muted)] shrink-0">notes</span>
-                          <span>{item.notes}</span>
-                        </div>
-                      )}
-
-                      <div className="flex items-center gap-3 flex-wrap text-[11px] sm:text-xs text-[var(--g-text-muted)]">
-                        <span>سجله: {item.recorded_by}</span>
-                        {item.updated_by && item.updated_by !== item.recorded_by && (
-                          <>
-                            <span>•</span>
-                            <span className="font-bold text-[var(--g-text)]">
-                              آخر تحديث: {item.updated_by}
-                            </span>
-                          </>
-                        )}
-                        <span>•</span>
-                        <span>{formatTimeArabic(item.updated_at || item.created_at)}</span>
-                        {item.supplier_name && (
-                          <>
-                            <span>•</span>
-                            <span className="font-bold text-[var(--g-primary)]">
-                              المورد: {item.supplier_name}
-                            </span>
-                          </>
-                        )}
-                        {item.status === 'resolved' && item.resolved_by && (
-                          <>
-                            <span>•</span>
-                            <span className="text-[var(--g-green)] font-bold">
-                              وفره: {item.resolved_by}
-                            </span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Big Touch Action Buttons */}
-                    <div className="flex flex-wrap items-center gap-2 shrink-0 pt-2.5 lg:pt-0 border-t lg:border-t-0 border-[var(--g-border)] w-full lg:w-auto">
-                      {(canWorkerEditThis || canManageRecords || canManageShortages) && (
-                        <button
-                          type="button"
-                          disabled={busyId === item.id}
-                          onClick={() => openEditModal(item, canManageRecords)}
-                          className="flex-1 sm:flex-none justify-center min-h-[46px] px-3.5 py-2 rounded-xl bg-[var(--g-surface-2)] hover:bg-[var(--g-primary-container)] border border-[var(--g-border)] text-xs sm:text-sm font-extrabold text-[var(--g-text)] flex items-center gap-1.5 active:scale-95 transition-colors"
-                        >
-                          <span className="ms-icon text-lg text-[var(--g-primary)]">edit</span>
-                          <span>{canManageRecords ? 'تعديل / كمية' : 'تعديل الكمية'}</span>
-                        </button>
-                      )}
-
-                      {canManageShortages && item.status === 'open' && (
-                        <button
-                          type="button"
-                          disabled={busyId === item.id}
-                          onClick={() => handleStatusChange(item, 'ordered')}
-                          className="flex-1 sm:flex-none justify-center min-h-[46px] px-3.5 py-2 rounded-xl bg-[#C25E00] hover:bg-[#9A4A00] text-white text-xs sm:text-sm font-extrabold flex items-center gap-1.5 shadow-xs active:scale-95"
-                        >
-                          <span className="ms-icon text-lg">local_shipping</span>
-                          <span>تم الطلب</span>
-                        </button>
-                      )}
-
-                      {canManageShortages && item.status !== 'resolved' && (
-                        <button
-                          type="button"
-                          disabled={busyId === item.id}
-                          onClick={() => handleStatusChange(item, 'resolved')}
-                          className="flex-1 sm:flex-none justify-center min-h-[46px] px-4 py-2 rounded-xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-xs sm:text-sm font-extrabold flex items-center gap-1.5 shadow-sm active:scale-95"
-                        >
-                          <span className="ms-icon text-lg">check_circle</span>
-                          <span>تم التوفير ✓</span>
-                        </button>
-                      )}
-
-                      {canManageShortages && item.status === 'resolved' && (
-                        <button
-                          type="button"
-                          disabled={busyId === item.id}
-                          onClick={() => handleStatusChange(item, 'open')}
-                          className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[var(--g-surface-2)] border border-[var(--g-border)] text-xs font-bold text-[var(--g-text)] flex items-center gap-1 active:scale-95"
-                        >
-                          <span className="ms-icon text-base">replay</span>
-                          <span>إعادة للنواقص</span>
-                        </button>
-                      )}
-
-                      {/* Permanent Delete strictly for Admin (records:manage) */}
-                      {canManageRecords && (
-                        <button
-                          type="button"
-                          disabled={busyId === item.id}
-                          onClick={() => handleDeleteShortage(item)}
-                          className="min-h-[44px] px-3 py-2 rounded-xl bg-[var(--g-red-bg)] hover:bg-[#C5221F] border border-[var(--g-red-border)]/40 text-[var(--g-red)] hover:text-white text-xs font-extrabold flex items-center gap-1 active:scale-95 transition-colors"
-                          title="حذف نهائي (للأدمن فقط)"
-                        >
-                          <span className="ms-icon text-lg">delete</span>
-                          <span className="hidden sm:inline">حذف</span>
-                        </button>
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-ink">{item.notes}</span>
+                        </>
                       )}
                     </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                    {(canWorkerEditThis || canManageRecords || canManageShortages) && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        icon="edit"
+                        disabled={busyId === item.id}
+                        onClick={() => openEditModal(item, canManageRecords)}
+                      >
+                        تعديل
+                      </Button>
+                    )}
+
+                    {canManageShortages && item.status === 'open' && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        loading={busyId === item.id}
+                        onClick={() => handleStatusChange(item, 'ordered')}
+                      >
+                        تم الطلب
+                      </Button>
+                    )}
+
+                    {canManageShortages && item.status !== 'resolved' && (
+                      <Button
+                        type="button"
+                        variant="success"
+                        size="sm"
+                        loading={busyId === item.id}
+                        onClick={() => handleStatusChange(item, 'resolved')}
+                      >
+                        توفّر
+                      </Button>
+                    )}
+
+                    {canManageShortages && item.status === 'resolved' && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        loading={busyId === item.id}
+                        onClick={() => handleStatusChange(item, 'open')}
+                      >
+                        إعادة
+                      </Button>
+                    )}
+
+                    {canManageRecords && (
+                      <button
+                        type="button"
+                        disabled={busyId === item.id}
+                        onClick={() =>
+                          setConfirmState({ type: 'delete_shortage', item })
+                        }
+                        aria-label={`حذف ${item.item_name}`}
+                        className="w-11 h-11 rounded-full text-danger hover:bg-danger-bg flex items-center justify-center shrink-0 cursor-pointer"
+                      >
+                        <Icon name="delete" size={18} />
+                      </button>
+                    )}
                   </div>
                 </div>
               );
             })}
-          </div>
+          </GroupedList>
         )}
-      </div>
+      </section>
 
-      {/* Quick / Admin Edit Modal */}
-      {editingItem && (
-        <div
-          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4"
-          onClick={() => setEditingItem(null)}
-        >
-          <form
-            onClick={(e) => e.stopPropagation()}
-            onSubmit={handleSaveEdit}
-            className="w-full sm:max-w-lg bg-[var(--g-surface)] rounded-t-3xl sm:rounded-3xl border border-[var(--g-border)] p-5 space-y-4 max-h-[92vh] overflow-y-auto shadow-2xl"
-          >
-            <div className="flex items-center justify-between">
-              <h3 className="text-lg font-black text-[var(--g-text)]">
-                تعديل الصنف والكمية المطلوبة
-              </h3>
-              <button
+      {/* Edit Shortage BottomSheet */}
+      <BottomSheet
+        open={Boolean(editingItem)}
+        onClose={() => {
+          if (busyId !== editingItem?.id) setEditingItem(null);
+        }}
+        title="تعديل الصنف"
+        subtitle={editingItem?.item_name || ''}
+        maxWidth="max-w-lg"
+        footer={
+          editingItem ? (
+            <div className="flex items-center gap-2">
+              <Button
                 type="button"
+                variant="secondary"
+                size="md"
+                disabled={busyId === editingItem.id}
                 onClick={() => setEditingItem(null)}
-                className="w-10 h-10 rounded-full bg-[var(--g-surface-2)] flex items-center justify-center"
               >
-                <span className="ms-icon">close</span>
-              </button>
+                إلغاء
+              </Button>
+              <Button
+                type="submit"
+                form="edit-shortage-form"
+                variant="primary"
+                size="md"
+                loading={busyId === editingItem.id}
+                className="flex-1"
+              >
+                حفظ
+              </Button>
             </div>
-
+          ) : null
+        }
+      >
+        {editingItem && (
+          <form id="edit-shortage-form" onSubmit={handleSaveEdit} className="space-y-4">
             <div>
-              <label className="block text-xs font-bold text-[var(--g-text-muted)] mb-1">
+              <label className="block text-xs font-medium text-ink-muted mb-1">
                 اسم الصنف
               </label>
               <input
                 type="text"
                 value={editForm.item_name}
                 onChange={(e) => setEditForm((f) => ({ ...f, item_name: e.target.value }))}
-                className="g-input min-h-[50px] text-base font-extrabold"
+                className="g-input"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-[var(--g-text-muted)] mb-1">
+              <label className="block text-xs font-medium text-ink-muted mb-1">
                 القسم
               </label>
               <select
                 value={editForm.category}
                 onChange={(e) => setEditForm((f) => ({ ...f, category: e.target.value }))}
-                className="g-input min-h-[48px] text-sm font-bold"
+                className="g-input font-medium"
               >
                 {SHORTAGE_CATEGORIES.map((c) => (
                   <option key={c.id} value={c.id}>
@@ -1081,30 +1064,29 @@ export default function ShortagesView({
               </select>
             </div>
 
-            {/* Nullable / 0 / Positive Qty in Edit Modal */}
-            <div className="p-3.5 rounded-2xl bg-[var(--g-surface-2)] border border-[var(--g-border)] space-y-2.5">
-              <div className="flex items-center justify-between">
-                <span className="text-xs sm:text-sm font-extrabold text-[var(--g-text)]">
-                  الكمية المطلوبة (فاضي أو 0 أو عدد)
-                </span>
-                <span className="text-xs font-black text-[var(--g-primary)]">
-                  {formatRequestedQty(
-                    parseQtyInputForPayload(editForm.qtyInput).value,
-                    editForm.unit
-                  )}
-                </span>
+            <div className="pt-3 border-t border-line space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-ink-muted">الكمية</span>
+                {parseQtyInputForPayload(editForm.qtyInput).value !== null && (
+                  <span className="text-xs font-semibold text-primary num-ltr">
+                    {formatRequestedQty(
+                      parseQtyInputForPayload(editForm.qtyInput).value,
+                      editForm.unit
+                    )}
+                  </span>
+                )}
               </div>
 
-              <div className="flex flex-wrap gap-1.5">
+              <div className="flex items-center gap-1.5 overflow-x-auto sm:flex-wrap no-scrollbar pb-0.5">
                 {QTY_PRESETS.map((p) => (
                   <button
                     key={p.label}
                     type="button"
                     onClick={() => setEditForm((f) => ({ ...f, qtyInput: p.value }))}
-                    className={`min-h-[42px] px-3 py-1.5 rounded-xl border text-xs font-black ${
+                    className={`min-h-[44px] px-3 py-1 rounded-[var(--g-radius-sm)] border text-xs font-medium shrink-0 cursor-pointer ${
                       normalizeDigitsClient(editForm.qtyInput).trim() === p.value
-                        ? 'border-[var(--g-primary)] bg-[var(--g-primary)] text-white'
-                        : 'border-[var(--g-border)] bg-[var(--g-surface)] text-[var(--g-text)]'
+                        ? 'border-primary bg-primary-solid text-on-primary'
+                        : 'border-line bg-surface text-ink'
                     }`}
                   >
                     {p.label}
@@ -1118,9 +1100,10 @@ export default function ShortagesView({
                   onClick={() =>
                     setEditForm((f) => ({ ...f, qtyInput: adjustQty(f.qtyInput, 1) }))
                   }
-                  className="w-12 h-12 rounded-xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-xl font-black shrink-0"
+                  className="w-12 h-12 rounded-[var(--g-radius-md)] bg-success-solid text-on-success flex items-center justify-center shrink-0 cursor-pointer"
+                  aria-label="زيادة الكمية"
                 >
-                  +
+                  <Icon name="add" size={20} weight="bold" />
                 </button>
                 <input
                   type="text"
@@ -1133,17 +1116,18 @@ export default function ShortagesView({
                       qtyInput: normalizeDigitsClient(e.target.value),
                     }))
                   }
-                  placeholder="فاضي (بدون كمية)"
-                  className="g-input min-h-[48px] text-center text-lg font-black"
+                  placeholder="0"
+                  className="g-input flex-1 min-w-0 text-center text-base font-semibold num-ltr"
                 />
                 <button
                   type="button"
                   onClick={() =>
                     setEditForm((f) => ({ ...f, qtyInput: adjustQty(f.qtyInput, -1) }))
                   }
-                  className="w-12 h-12 rounded-xl bg-[var(--g-surface)] border border-[var(--g-border)] text-xl font-black shrink-0"
+                  className="w-12 h-12 rounded-[var(--g-radius-md)] bg-surface-2 border border-line text-ink flex items-center justify-center shrink-0 cursor-pointer"
+                  aria-label="تقليل الكمية"
                 >
-                  −
+                  <Icon name="remove" size={20} weight="bold" />
                 </button>
               </div>
 
@@ -1153,10 +1137,10 @@ export default function ShortagesView({
                     key={u || '__none'}
                     type="button"
                     onClick={() => setEditForm((f) => ({ ...f, unit: u }))}
-                    className={`min-h-[36px] px-2.5 py-1 rounded-full text-xs font-extrabold border ${
+                    className={`min-h-[40px] px-3 py-1 rounded-full text-xs font-medium border cursor-pointer ${
                       editForm.unit === u
-                        ? 'border-[var(--g-primary)] bg-[var(--g-primary)] text-white'
-                        : 'border-[var(--g-border)] bg-[var(--g-surface)] text-[var(--g-text)]'
+                        ? 'border-primary bg-primary-solid text-on-primary'
+                        : 'border-line bg-surface text-ink'
                     }`}
                   >
                     {u || 'بدون وحدة'}
@@ -1169,69 +1153,57 @@ export default function ShortagesView({
               <button
                 type="button"
                 onClick={() => setEditForm((f) => ({ ...f, urgency: 'out_of_stock' }))}
-                className={`min-h-[48px] rounded-xl border-2 font-extrabold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-all ${
+                className={`min-h-[44px] rounded-[var(--g-radius-md)] border font-semibold text-xs sm:text-sm flex items-center justify-center gap-1.5 cursor-pointer ${
                   editForm.urgency === 'out_of_stock'
-                    ? 'border-[#9E1C17] bg-[#C5221F] text-white shadow-xs'
-                    : 'border-[var(--g-border)] bg-[var(--g-surface)] text-[var(--g-text)]'
+                    ? 'border-[var(--g-danger-solid)] bg-danger-solid text-on-danger'
+                    : 'border-line bg-surface text-ink'
                 }`}
               >
-                <span
-                  className={`ms-icon filled text-lg ${
-                    editForm.urgency === 'out_of_stock' ? 'text-white' : 'text-[#C5221F]'
-                  }`}
-                >
-                  error
-                </span>
-                <span>خلص تماماً</span>
+                نفد تماماً
               </button>
               <button
                 type="button"
                 onClick={() => setEditForm((f) => ({ ...f, urgency: 'low_stock' }))}
-                className={`min-h-[48px] rounded-xl border-2 font-extrabold text-xs sm:text-sm flex items-center justify-center gap-1.5 transition-all ${
+                className={`min-h-[44px] rounded-[var(--g-radius-md)] border font-semibold text-xs sm:text-sm flex items-center justify-center gap-1.5 cursor-pointer ${
                   editForm.urgency === 'low_stock'
-                    ? 'border-[#9A4A00] bg-[#C25E00] text-white shadow-xs'
-                    : 'border-[var(--g-border)] bg-[var(--g-surface)] text-[var(--g-text)]'
+                    ? 'border-[var(--g-warning-solid)] bg-warning-solid text-on-warning'
+                    : 'border-line bg-surface text-ink'
                 }`}
               >
-                <span
-                  className={`ms-icon filled text-lg ${
-                    editForm.urgency === 'low_stock' ? 'text-white' : 'text-[#C25E00]'
-                  }`}
-                >
-                  warning
-                </span>
-                <span>قرب يخلص</span>
+                قرب يخلص
               </button>
             </div>
 
             {(canManageShortages || canManageRecords) && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-bold text-[var(--g-text-muted)] mb-1">
-                    حالة التوفير
+                  <label className="block text-xs font-medium text-ink-muted mb-1">
+                    الحالة
                   </label>
                   <select
                     value={editForm.status}
                     onChange={(e) => setEditForm((f) => ({ ...f, status: e.target.value }))}
-                    className="g-input min-h-[46px] text-sm font-bold"
+                    className="g-input font-medium"
                   >
-                    <option value="open">مطلوب توفيره الآن</option>
-                    <option value="ordered">تم الطلب من المورد</option>
-                    <option value="resolved">تم التوفير بالصالة ✓</option>
+                    <option value="open">مطلوب</option>
+                    <option value="ordered">تم الطلب</option>
+                    <option value="resolved">تم التوفير</option>
                   </select>
                 </div>
 
                 {suppliers.length > 0 && (
                   <div>
-                    <label className="block text-xs font-bold text-[var(--g-text-muted)] mb-1">
+                    <label className="block text-xs font-medium text-ink-muted mb-1">
                       المورد
                     </label>
                     <select
                       value={editForm.supplier_id}
-                      onChange={(e) => setEditForm((f) => ({ ...f, supplier_id: e.target.value }))}
-                      className="g-input min-h-[46px] text-sm font-bold"
+                      onChange={(e) =>
+                        setEditForm((f) => ({ ...f, supplier_id: e.target.value }))
+                      }
+                      className="g-input font-medium"
                     >
-                      <option value="">— بدون مورد —</option>
+                      <option value="">بدون مورد</option>
                       {suppliers.map((s) => (
                         <option key={s.id} value={s.id}>
                           {s.name}
@@ -1244,158 +1216,264 @@ export default function ShortagesView({
             )}
 
             <div>
-              <label className="block text-xs font-bold text-[var(--g-text-muted)] mb-1">
+              <label className="block text-xs font-medium text-ink-muted mb-1">
                 ملاحظات
               </label>
               <input
                 type="text"
                 value={editForm.notes}
                 onChange={(e) => setEditForm((f) => ({ ...f, notes: e.target.value }))}
-                placeholder="ملاحظة إضافية..."
-                className="g-input min-h-[46px] text-sm"
+                placeholder="ملاحظة..."
+                className="g-input"
+              />
+            </div>
+          </form>
+        )}
+      </BottomSheet>
+
+      {/* Quick Catalog Manager BottomSheet */}
+      <BottomSheet
+        open={showCatalogModal}
+        onClose={() => {
+          if (!catalogBusy) setShowCatalogModal(false);
+        }}
+        title="كتالوج الأصناف السريعة"
+        maxWidth="max-w-xl"
+        footer={
+          <Button
+            type="button"
+            variant="secondary"
+            size="md"
+            fullWidth
+            onClick={() => setShowCatalogModal(false)}
+          >
+            إغلاق
+          </Button>
+        }
+      >
+        <div className="space-y-4">
+          <form onSubmit={handleBulkAddCatalog} className="space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  القسم
+                </label>
+                <select
+                  value={bulkCategory}
+                  onChange={(e) => setBulkCategory(e.target.value)}
+                  className="g-input font-medium"
+                >
+                  {SHORTAGE_CATEGORIES.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  الوحدة
+                </label>
+                <select
+                  value={bulkUnit}
+                  onChange={(e) => setBulkUnit(e.target.value)}
+                  className="g-input font-medium"
+                >
+                  {UNIT_OPTIONS.map((u) => (
+                    <option key={u || '__none'} value={u}>
+                      {u || 'بدون وحدة'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-ink-muted mb-1">
+                الأصناف (سطر لكل صنف)
+              </label>
+              <textarea
+                rows={4}
+                value={bulkLines}
+                onChange={(e) => setBulkLines(e.target.value)}
+                placeholder={'لبن جهينة 1 لتر\nجبنة عبور لاند 500 جم'}
+                className="g-input"
               />
             </div>
 
-            <div className="flex items-center gap-2 pt-2">
-              <button
-                type="submit"
-                disabled={busyId === editingItem.id}
-                className="flex-1 min-h-[52px] rounded-2xl bg-[var(--g-primary)] text-white font-black text-base"
-              >
-                حفظ التعديل ✓
-              </button>
-              <button
-                type="button"
-                onClick={() => setEditingItem(null)}
-                className="min-h-[52px] px-5 rounded-2xl bg-[var(--g-surface-2)] text-[var(--g-text)] font-bold text-sm"
-              >
-                إلغاء
-              </button>
-            </div>
+            <Button
+              type="submit"
+              variant="primary"
+              size="md"
+              fullWidth
+              loading={catalogBusy}
+            >
+              إضافة للكتالوج
+            </Button>
           </form>
-        </div>
-      )}
 
-      {/* Quick Catalog Manager Modal for Admin / Supervisor */}
-      {showCatalogModal && (
-        <div
-          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4"
-          onClick={() => setShowCatalogModal(false)}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full sm:max-w-xl bg-[var(--g-surface)] rounded-t-3xl sm:rounded-3xl border border-[var(--g-border)] p-5 space-y-4 max-h-[90vh] overflow-y-auto shadow-2xl"
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-lg font-black text-[var(--g-text)]">
-                  إدارة أزرار الأصناف السريعة ({productCatalog.length})
-                </h3>
-                <p className="text-xs text-[var(--g-text-muted)]">
-                  جهّز أشهر أصناف الماركت هنا ليختارها عمال الصالة بلمسة واحدة بدون كتابة
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowCatalogModal(false)}
-                className="w-10 h-10 rounded-full bg-[var(--g-surface-2)] flex items-center justify-center"
-              >
-                <span className="ms-icon">close</span>
-              </button>
-            </div>
-
-            <form onSubmit={handleBulkAddCatalog} className="space-y-3 p-3.5 rounded-2xl bg-[var(--g-surface-2)] border border-[var(--g-border)]">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                <div>
-                  <label className="block text-xs font-bold text-[var(--g-text-muted)] mb-1">
-                    القسم
-                  </label>
-                  <select
-                    value={bulkCategory}
-                    onChange={(e) => setBulkCategory(e.target.value)}
-                    className="g-input min-h-[44px] text-sm font-bold"
-                  >
-                    {SHORTAGE_CATEGORIES.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-[var(--g-text-muted)] mb-1">
-                    الوحدة الافتراضية (اختياري)
-                  </label>
-                  <select
-                    value={bulkUnit}
-                    onChange={(e) => setBulkUnit(e.target.value)}
-                    className="g-input min-h-[44px] text-sm font-bold"
-                  >
-                    {UNIT_OPTIONS.map((u) => (
-                      <option key={u || '__none'} value={u}>
-                        {u || 'بدون وحدة افتراضية'}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-[var(--g-text-muted)] mb-1">
-                  اكتب كل صنف في سطر مستقل (يمكنك لصق قائمة كاملة دفعة واحدة)
-                </label>
-                <textarea
-                  rows={4}
-                  value={bulkLines}
-                  onChange={(e) => setBulkLines(e.target.value)}
-                  placeholder={'لبن جهينة كامل الدسم 1 لتر\nجبنة عبور لاند فيتا 500 جم\nزيت كريستال عباد 800 مل'}
-                  className="g-input text-sm font-bold"
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={catalogBusy}
-                className="w-full min-h-[48px] rounded-xl bg-[var(--g-primary)] text-white font-black text-sm"
-              >
-                {catalogBusy ? 'جاري الحفظ...' : 'إضافة للأزرار السريعة +'}
-              </button>
-            </form>
-
-            {productCatalog.length > 0 && (
-              <div className="space-y-2 max-h-60 overflow-y-auto">
-                <div className="text-xs font-bold text-[var(--g-text-muted)]">
-                  الأصناف المحفوظة حالياً:
-                </div>
-                {productCatalog.map((c) => (
-                  <div
-                    key={c.id}
-                    className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-[var(--g-surface-2)] border border-[var(--g-border)]"
-                  >
-                    <div className="min-w-0">
-                      <div className="text-sm font-bold text-[var(--g-text)] truncate">
-                        {c.name}
-                      </div>
-                      <div className="text-[11px] text-[var(--g-text-muted)]">
-                        {c.category} {c.default_unit ? `• ${c.default_unit}` : ''}
-                      </div>
+          {productCatalog.length > 0 && (
+            <GroupedList label="المحفوظة" count={productCatalog.length}>
+              {productCatalog.map((c) => (
+                <div
+                  key={c.id}
+                  className="px-3.5 py-2.5 flex items-center justify-between gap-2"
+                >
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-ink truncate">{c.name}</div>
+                    <div className="text-xs text-ink-muted">
+                      {c.category}
+                      {c.default_unit ? ` · ${c.default_unit}` : ''}
                     </div>
-                    <button
-                      type="button"
-                      disabled={catalogBusy}
-                      onClick={() => handleDeleteCatalogItem(c)}
-                      className="w-9 h-9 rounded-lg text-[#C5221F] hover:bg-[#FCE8E6] flex items-center justify-center shrink-0"
-                      title="حذف من الكتالوج"
-                    >
-                      <span className="ms-icon text-lg">delete</span>
-                    </button>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
+                  <button
+                    type="button"
+                    disabled={catalogBusy}
+                    onClick={() =>
+                      setConfirmState({ type: 'delete_catalog', item: c })
+                    }
+                    aria-label={`حذف ${c.name}`}
+                    className="w-11 h-11 rounded-full text-danger hover:bg-danger-bg flex items-center justify-center shrink-0 cursor-pointer"
+                  >
+                    <Icon name="delete" size={18} />
+                  </button>
+                </div>
+              ))}
+            </GroupedList>
+          )}
         </div>
-      )}
+      </BottomSheet>
+
+      {/* Mobile Actions BottomSheet */}
+      <BottomSheet
+        open={actionsSheetOpen}
+        onClose={() => setActionsSheetOpen(false)}
+        title="خيارات النواقص"
+        maxWidth="max-w-md"
+      >
+        <GroupedList>
+          {canHandover && onOpenHandoverModal && (
+            <GroupedRow
+              onClick={() => {
+                setActionsSheetOpen(false);
+                onOpenHandoverModal();
+              }}
+            >
+              <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                <Icon name="swap_horiz" size={19} className="text-ink-muted" />
+                <span>تسليم الوردية</span>
+              </span>
+              <Icon
+                name="chevron_left"
+                size={18}
+                className="text-ink-muted ltr:rotate-180"
+              />
+            </GroupedRow>
+          )}
+
+          {(canExport || canManageShortages) && (
+            <>
+              <GroupedRow
+                onClick={() => {
+                  setActionsSheetOpen(false);
+                  handleShareWhatsApp();
+                }}
+              >
+                <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                  <Icon name="send" size={19} className="text-[var(--g-whatsapp)]" />
+                  <span>واتساب</span>
+                </span>
+                <Icon
+                  name="chevron_left"
+                  size={18}
+                  className="text-ink-muted ltr:rotate-180"
+                />
+              </GroupedRow>
+
+              <GroupedRow
+                onClick={() => {
+                  setActionsSheetOpen(false);
+                  exportShortagesCsv(shortages, dateKey || 'today');
+                }}
+              >
+                <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                  <Icon name="table_view" size={19} className="text-success" />
+                  <span>Excel (.xlsx)</span>
+                </span>
+                <Icon name="download" size={18} className="text-ink-muted opacity-70" />
+              </GroupedRow>
+
+              <GroupedRow
+                onClick={() => {
+                  setActionsSheetOpen(false);
+                  exportShortagesWord(shortages, dateKey || 'today', storeName);
+                }}
+              >
+                <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                  <Icon name="description" size={19} className="text-primary" />
+                  <span>Word (.doc)</span>
+                </span>
+                <Icon name="download" size={18} className="text-ink-muted opacity-70" />
+              </GroupedRow>
+            </>
+          )}
+
+          {(canManageShortages || canManageRecords) && (
+            <GroupedRow
+              onClick={() => {
+                setActionsSheetOpen(false);
+                setShowCatalogModal(true);
+              }}
+            >
+              <span className="flex items-center gap-2.5 text-sm font-medium text-ink">
+                <Icon name="inventory_2" size={19} className="text-ink-muted" />
+                <span>الكتالوج</span>
+              </span>
+              <Icon
+                name="chevron_left"
+                size={18}
+                className="text-ink-muted ltr:rotate-180"
+              />
+            </GroupedRow>
+          )}
+        </GroupedList>
+      </BottomSheet>
+
+      {/* Non-blocking Confirmation Sheet */}
+      <ConfirmSheet
+        open={Boolean(confirmState)}
+        onClose={() => {
+          if (!busyId && !catalogBusy) setConfirmState(null);
+        }}
+        onConfirm={() => {
+          if (confirmState?.type === 'resolve_all') {
+            executeResolveAll();
+          } else if (confirmState?.type === 'delete_shortage') {
+            executeDeleteShortage(confirmState.item);
+          } else if (confirmState?.type === 'delete_catalog') {
+            executeDeleteCatalogItem(confirmState.item);
+          }
+        }}
+        title={
+          confirmState?.type === 'resolve_all'
+            ? 'توفير جميع النواقص'
+            : confirmState?.type === 'delete_shortage'
+            ? 'حذف الصنف'
+            : 'حذف من الكتالوج'
+        }
+        description={
+          confirmState?.type === 'resolve_all'
+            ? 'تعليم جميع الأصناف المفتوحة كمتوفرة؟'
+            : confirmState?.type === 'delete_shortage'
+            ? `حذف ${confirmState?.item?.item_name || ''}؟`
+            : `إزالة ${confirmState?.item?.name || ''}؟`
+        }
+        confirmLabel={
+          confirmState?.type === 'resolve_all' ? 'توفير الكل' : 'حذف'
+        }
+        tone={confirmState?.type === 'resolve_all' ? 'success' : 'danger'}
+        loading={busyId === '__ALL__' || Boolean(busyId) || catalogBusy}
+      />
     </div>
   );
 }

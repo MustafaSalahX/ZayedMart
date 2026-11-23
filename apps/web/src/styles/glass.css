@@ -1,0 +1,382 @@
+/*
+ * ZayedMart V2 — Apple iOS 26 / visionOS Optical Liquid Glass Physics,
+ * GPU-Composited <AmbientBackdrop /> Multi-Orb Canvas & 3-Tier Performance/A11y Fallback.
+ *
+ * - Tier 1: Full GPU (4 radial-gradient orbs w/ translate3d drift + blur(32-36px) saturate(210%) + Fresnel ::before rim)
+ * - Tier 2: data-glass="reduced" (static orbs + 10px blur + 86-88% frosted opacity)
+ * - Tier 3: html.lite-mode / data-glass="off" / data-kiosk="true" / prefers-reduced-transparency / @supports fallback
+ */
+
+/* ============================================================================
+ * 1. Living Multi-Orb GPU Refractive Canvas (<AmbientBackdrop />)
+ * Zero full-screen filter:blur() — smooth multi-stop radial gradients on GPU layers!
+ * ============================================================================ */
+.g-ambient-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  contain: strict;
+  background-color: var(--g-bg);
+  background-image: var(--g-bg-canvas-wash, none);
+}
+
+.g-ambient-orb {
+  position: absolute;
+  border-radius: 9999px;
+  pointer-events: none;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+}
+
+.g-ambient-orb--1 {
+  width: 62vmax;
+  height: 62vmax;
+  top: -18vmax;
+  inset-inline-start: -14vmax;
+  background: radial-gradient(
+    circle,
+    var(--g-orb-1) 0%,
+    var(--g-orb-1-mid) 34%,
+    transparent 72%
+  );
+  animation: gOrbDriftA 26s ease-in-out infinite alternate;
+}
+
+.g-ambient-orb--2 {
+  width: 56vmax;
+  height: 56vmax;
+  top: -14vmax;
+  inset-inline-end: -16vmax;
+  background: radial-gradient(
+    circle,
+    var(--g-orb-2) 0%,
+    var(--g-orb-2-mid) 34%,
+    transparent 72%
+  );
+  animation: gOrbDriftB 32s ease-in-out infinite alternate;
+}
+
+.g-ambient-orb--3 {
+  width: 60vmax;
+  height: 60vmax;
+  bottom: -20vmax;
+  inset-inline-start: -10vmax;
+  background: radial-gradient(
+    circle,
+    var(--g-orb-3) 0%,
+    var(--g-orb-3-mid) 34%,
+    transparent 72%
+  );
+  animation: gOrbDriftC 29s ease-in-out infinite alternate;
+}
+
+.g-ambient-orb--4 {
+  width: 52vmax;
+  height: 52vmax;
+  bottom: -16vmax;
+  inset-inline-end: -12vmax;
+  background: radial-gradient(
+    circle,
+    var(--g-orb-4) 0%,
+    var(--g-orb-4-mid) 34%,
+    transparent 72%
+  );
+  animation: gOrbDriftD 35s ease-in-out infinite alternate;
+}
+
+@keyframes gOrbDriftA {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(4vw, 3vh, 0) scale(1.06);
+  }
+}
+
+@keyframes gOrbDriftB {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(-4vw, 4vh, 0) scale(1.05);
+  }
+}
+
+@keyframes gOrbDriftC {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(3vw, -4vh, 0) scale(1.07);
+  }
+}
+
+@keyframes gOrbDriftD {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(-3vw, -3vh, 0) scale(1.04);
+  }
+}
+
+/* ============================================================================
+ * 2. Primary Apple iOS 26 / visionOS Optical Liquid Glass Surfaces
+ * ============================================================================ */
+[data-theme='liquid-glass'] .g-card,
+[data-theme='liquid-glass'] .g-glass-pane,
+[data-theme='liquid-glass'] .g-glass-capsule,
+[data-theme='liquid-glass'] .g-glass-dock,
+[data-theme='liquid-glass'] .g-dialog-sheet,
+[data-theme='liquid-glass'] .g-glass-pill {
+  background-color: var(--g-surface-glass);
+  border: 1px solid var(--g-glass-border);
+  box-shadow: var(--g-shadow);
+  -webkit-backdrop-filter: blur(var(--g-blur-md)) saturate(var(--g-glass-saturate));
+  backdrop-filter: blur(var(--g-blur-md)) saturate(var(--g-glass-saturate));
+}
+
+/* Safe positioning anchor for ::before Fresnel rim — NEVER set relative on sticky/fixed chrome! */
+[data-theme='liquid-glass'] .g-card,
+[data-theme='liquid-glass'] .g-glass-pane,
+[data-theme='liquid-glass'] .g-glass-capsule {
+  position: relative;
+}
+
+[data-theme='liquid-glass'] .g-glass-capsule,
+[data-theme='liquid-glass'] .g-glass-dock,
+[data-theme='liquid-glass'] .g-dialog-sheet {
+  background-color: var(--g-surface-glass-strong);
+  box-shadow: var(--g-shadow-elevated);
+  -webkit-backdrop-filter: blur(var(--g-blur-lg)) saturate(var(--g-glass-saturate));
+  backdrop-filter: blur(var(--g-blur-lg)) saturate(var(--g-glass-saturate));
+}
+
+/* Directional Top-Left 1px Optical Fresnel Specular Rim (Chrome 64+ Safe @supports Guard) */
+@supports ((mask-composite: exclude) or (-webkit-mask-composite: xor)) {
+  [data-theme='liquid-glass'] .g-card::before,
+  [data-theme='liquid-glass'] .g-glass-pane::before,
+  [data-theme='liquid-glass'] .g-glass-capsule::before,
+  [data-theme='liquid-glass'] .g-glass-dock::before,
+  [data-theme='liquid-glass'] .g-dialog-sheet::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    padding: 1px;
+    background: var(--g-glass-rim-gradient);
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+}
+
+/* Glossy Liquid Glass Primary Button Highlight & Frosted Secondary Button */
+[data-theme='liquid-glass'] .g-btn-primary {
+  box-shadow:
+    inset 0 1px 0.5px rgba(255, 255, 255, 0.45),
+    0 6px 18px -4px rgba(0, 92, 200, 0.34);
+}
+
+[data-theme='liquid-glass'] .g-btn-secondary {
+  background-color: var(--g-glass-control);
+  border-color: var(--g-glass-border);
+  box-shadow: var(--g-glass-pill-specular);
+}
+
+/* Tactile Specular Press Sheen on Interactive Glass */
+[data-theme='liquid-glass'] .g-card-interactive:active,
+[data-theme='liquid-glass'] .g-glass-interactive:active {
+  background-color: var(--g-surface-glass-press);
+  box-shadow: var(--g-shadow-press);
+}
+
+/* Prohibit Nested GPU Blur Passes Inside Already-Frosted Parents */
+[data-theme='liquid-glass'] .g-card .g-card,
+[data-theme='liquid-glass'] .g-card .g-glass-pane,
+[data-theme='liquid-glass'] .g-glass-pane .g-card,
+[data-theme='liquid-glass'] .g-dialog-sheet .g-card,
+[data-theme='liquid-glass'] .g-dialog-sheet .g-glass-pane,
+[data-theme='liquid-glass'] .g-card .g-search-bar,
+[data-theme='liquid-glass'] .g-dialog-sheet .g-search-bar {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: var(--g-surface-inset);
+  border-color: var(--g-border-subtle);
+  box-shadow: none;
+}
+
+[data-theme='liquid-glass'] .g-card .g-card::before,
+[data-theme='liquid-glass'] .g-card .g-glass-pane::before,
+[data-theme='liquid-glass'] .g-glass-pane .g-card::before,
+[data-theme='liquid-glass'] .g-dialog-sheet .g-card::before,
+[data-theme='liquid-glass'] .g-dialog-sheet .g-glass-pane::before {
+  display: none;
+}
+
+/* ============================================================================
+ * 3. Tier 2 & Tier 3 Graceful Degradation (Accessibility + Budget Android Go)
+ * ============================================================================ */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  [data-theme='liquid-glass'] {
+    --g-surface-glass: var(--g-surface);
+    --g-surface-glass-strong: var(--g-surface);
+    --g-blur-sm: 0px;
+    --g-blur-md: 0px;
+    --g-blur-lg: 0px;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  [data-theme='liquid-glass'] {
+    --g-surface-glass: var(--g-surface);
+    --g-surface-glass-strong: var(--g-surface);
+    --g-blur-sm: 0px;
+    --g-blur-md: 0px;
+    --g-blur-lg: 0px;
+  }
+  [data-theme='liquid-glass'] .g-card,
+  [data-theme='liquid-glass'] .g-glass-pane,
+  [data-theme='liquid-glass'] .g-glass-capsule,
+  [data-theme='liquid-glass'] .g-glass-dock,
+  [data-theme='liquid-glass'] .g-dialog-sheet {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+  .g-ambient-backdrop {
+    display: none !important;
+  }
+}
+
+/* Tier 2: Reduced Glass Mode (Static Orbs + Gentle Blur) */
+html[data-glass='reduced'] {
+  --g-blur-sm: 0px;
+  --g-blur-md: 10px;
+  --g-blur-lg: 12px;
+  --g-glass-saturate: 130%;
+}
+
+html[data-glass='reduced'] .g-ambient-orb {
+  animation: none !important;
+}
+
+html[data-glass='reduced'][data-theme='liquid-glass'][data-mode='light'] {
+  --g-surface-glass: rgba(255, 255, 255, 0.86);
+  --g-surface-glass-strong: rgba(255, 255, 255, 0.92);
+}
+
+html[data-glass='reduced'][data-theme='liquid-glass'][data-mode='dark'] {
+  --g-surface-glass: rgba(16, 27, 48, 0.88);
+  --g-surface-glass-strong: rgba(16, 27, 48, 0.94);
+}
+
+/* Tier 3: Glass Off, Kiosk Daylight Lock, or Android Go Lite Mode */
+html[data-glass='off'],
+html[data-kiosk='true'],
+html.lite-mode {
+  --g-surface-glass: var(--g-surface);
+  --g-surface-glass-strong: var(--g-surface);
+  --g-blur-sm: 0px;
+  --g-blur-md: 0px;
+  --g-blur-lg: 0px;
+  --g-glass-specular: none;
+  --g-glass-rim-gradient: none;
+}
+
+html[data-glass='off'] .g-card,
+html[data-glass='off'] .g-glass-pane,
+html[data-glass='off'] .g-glass-capsule,
+html[data-glass='off'] .g-glass-dock,
+html[data-glass='off'] .g-header,
+html[data-glass='off'] .g-bottom-nav,
+html[data-glass='off'] .g-dialog-sheet,
+html[data-kiosk='true'] .g-card,
+html[data-kiosk='true'] .g-glass-pane,
+html[data-kiosk='true'] .g-header,
+html[data-kiosk='true'] .g-dialog-sheet {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+
+html[data-glass='off'] .g-card::before,
+html[data-glass='off'] .g-glass-pane::before,
+html[data-glass='off'] .g-glass-capsule::before,
+html[data-glass='off'] .g-glass-dock::before,
+html[data-glass='off'] .g-dialog-sheet::before,
+html.lite-mode .g-card::before,
+html.lite-mode .g-glass-pane::before,
+html.lite-mode .g-glass-capsule::before,
+html.lite-mode .g-glass-dock::before,
+html.lite-mode .g-dialog-sheet::before {
+  display: none !important;
+}
+
+html.lite-mode .g-ambient-backdrop,
+html[data-glass='off'] .g-ambient-backdrop,
+html[data-kiosk='true'] .g-ambient-backdrop {
+  display: none !important;
+}
+
+/* Lite / Economy Mode for Low-End Android Phones (1GB-2GB RAM, Android Go) */
+html.lite-mode *,
+html.lite-mode *::before,
+html.lite-mode *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  transition-duration: 0.01ms !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+}
+
+html.lite-mode .g-card,
+html.lite-mode .g-glass-pane,
+html.lite-mode .g-glass-capsule,
+html.lite-mode .g-glass-dock,
+html.lite-mode .g-dialog-sheet,
+html.lite-mode .g-header,
+html.lite-mode .g-bottom-nav,
+html.lite-mode header,
+html.lite-mode nav {
+  box-shadow: none !important;
+}
+
+html.lite-mode .g-modal-overlay {
+  background-color: rgba(0, 0, 0, 0.72) !important;
+}
+
+/* Reduced Motion: disable ambient loops & spatial motion while keeping calm fades */
+@media (prefers-reduced-motion: reduce) {
+  .g-ambient-orb,
+  .walkie-pulse-ring,
+  .animate-ping,
+  .animate-pulse,
+  .animate-bounce {
+    animation: none !important;
+  }
+
+  .animate-pop {
+    animation: fadeOnly 120ms ease-out forwards !important;
+  }
+
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 1ms !important;
+  }
+
+  * {
+    scroll-behavior: auto !important;
+  }
+}
+
+@keyframes fadeOnly {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

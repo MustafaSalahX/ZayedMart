@@ -7,6 +7,7 @@ import {
   evaluateNextCheckInAvailability,
   formatShiftDurationArabic,
   getLocalDateKey,
+  getLocalTimeHMS,
   getPreviousDateKey,
   getSaturdayWeekStart,
   getWeekdayCodeFromDateKey,
@@ -39,6 +40,28 @@ import {
 } from '../common/crypto.util';
 import { AuthContext } from '../common/decorators';
 import { execSupabaseRpcBatch, execSupabaseRpcSql } from '../common/supabase-http.util';
+
+export const VALID_THEMES = new Set([
+  'classic',
+  'minimal',
+  'liquid-glass',
+  'elegant',
+  'modern',
+]);
+
+export const LEGACY_THEME_ALIAS_MAP: Record<string, string> = {
+  nordic: 'minimal',
+  'cyber-ops': 'modern',
+  'desert-sand': 'elegant',
+};
+
+export function normalizeServerTheme(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const mapped = LEGACY_THEME_ALIAS_MAP[trimmed] || trimmed;
+  return VALID_THEMES.has(mapped) ? mapped : null;
+}
 
 const LEGACY_FAKE_USER_IDS = [
   '34cfe3c6-ebd0-4a8a-82e8-5eec90d82753',
@@ -315,7 +338,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         (SELECT COUNT(*) || ':' || COALESCE(MAX(timestamp), '') || ':' || COALESCE(SUM(acknowledged), 0) FROM shift_handovers) AS hnd,
         (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), '') FROM employee_dayoff_defaults) AS do_def,
         (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), '') FROM weekly_dayoff_overrides) AS do_ovr,
-        (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), '') FROM dayoff_swap_requests) AS do_swp`,
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), '') FROM dayoff_swap_requests) AS do_swp,
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), '') FROM system_users) AS usr,
+        (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), '') FROM role_policies) AS rp`,
       [targetDate, targetDate, targetDate, targetDate, targetDate]
     );
     const cacheEpoch = String(row?.epoch || '2026-11-06-clean-v2');
@@ -332,6 +357,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       row?.do_def || '',
       row?.do_ovr || '',
       row?.do_swp || '',
+      row?.usr || '',
+      row?.rp || '',
     ].join('|');
 
     return {
@@ -568,6 +595,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         pin_hash TEXT NOT NULL,
         pin_cipher TEXT DEFAULT '',
         avatar_color TEXT DEFAULT '#0B57D0',
+        avatar_url TEXT DEFAULT '',
+        avatar_preset TEXT DEFAULT '',
+        preferences_json TEXT DEFAULT '{}',
+        session_version INTEGER DEFAULT 1,
+        password_changed_at TEXT DEFAULT '',
+        username_changed_at TEXT DEFAULT '',
         is_active INTEGER DEFAULT 1,
         employee_id TEXT DEFAULT '',
         custom_permissions_json TEXT DEFAULT '[]',
@@ -578,6 +611,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       `CREATE TABLE IF NOT EXISTS role_policies (
         role TEXT PRIMARY KEY,
         permissions_json TEXT NOT NULL,
+        avatar_url TEXT DEFAULT '',
+        avatar_preset TEXT DEFAULT '',
+        avatar_color TEXT DEFAULT '',
         updated_at TEXT NOT NULL
       )`,
       `CREATE TABLE IF NOT EXISTS user_sessions (
@@ -609,6 +645,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         shift_start TEXT DEFAULT '08:00',
         shift_end TEXT DEFAULT '20:00',
         avatar_color TEXT DEFAULT '#0B57D0',
+        avatar_url TEXT DEFAULT '',
+        avatar_preset TEXT DEFAULT '',
         phone TEXT DEFAULT '',
         is_active INTEGER DEFAULT 1,
         system_role TEXT DEFAULT '',
@@ -633,6 +671,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         recorded_by TEXT NOT NULL,
         verified_by_cctv INTEGER DEFAULT 0,
         verified_at TEXT DEFAULT '',
+        verified_by TEXT DEFAULT '',
+        cctv_status TEXT DEFAULT 'pending',
+        cctv_observed_time TEXT DEFAULT '',
+        cctv_note TEXT DEFAULT '',
         synced INTEGER DEFAULT 1
       )`,
       `CREATE TABLE IF NOT EXISTS suppliers (
@@ -770,6 +812,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         role TEXT NOT NULL,
         role_label TEXT DEFAULT '',
         avatar_color TEXT DEFAULT '#146C2E',
+        avatar_url TEXT DEFAULT '',
         channel TEXT NOT NULL DEFAULT 'security',
         status TEXT NOT NULL DEFAULT 'listening',
         live_on INTEGER DEFAULT 1,
@@ -787,6 +830,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           // ignore
         }
       }
+      this.ensureCctvColumnsOnSqlite();
+      this.ensureRoleProfilesColumnsOnSqlite();
     }
 
     if (this.useSupabaseRpc || this.pgPool) {
@@ -794,11 +839,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         const rows = this.useSupabaseRpc
           ? (
               await execSupabaseRpcSql<{ key: string; value: string }>(
-                "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38', 'migration_schedule_tables_v41', 'migration_rbac_schedule_v41')"
+                "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38', 'migration_schedule_tables_v41', 'migration_rbac_schedule_v41', 'migration_cctv_verify_v42', 'migration_rbac_attendance_strict_v42', 'migration_role_profiles_v43', 'migration_rbac_profile_self_v43')"
               )
             ).rows
           : await this.queryAll<{ key: string; value: string }>(
-              "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38', 'migration_schedule_tables_v41', 'migration_rbac_schedule_v41')"
+              "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38', 'migration_schedule_tables_v41', 'migration_rbac_schedule_v41', 'migration_cctv_verify_v42', 'migration_rbac_attendance_strict_v42', 'migration_role_profiles_v43', 'migration_rbac_profile_self_v43')"
             );
         const secretRow = rows.find((r) => r.key === 'session_hmac_secret');
         if (secretRow?.value) {
@@ -815,9 +860,28 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
               // ignore non-fatal DDL migration if already provisioned or offline
             }
           }
+          const cctvMigrated = rows.find((r) => r.key === 'migration_cctv_verify_v42');
+          if (cctvMigrated?.value !== 'done') {
+            await this.ensureCctvVerifyV42Migration().catch(() => {});
+          }
+          const roleProfilesMigrated = rows.find((r) => r.key === 'migration_role_profiles_v43');
+          if (roleProfilesMigrated?.value !== 'done') {
+            await this.ensureRoleProfilesV43Migration().catch(() => {});
+          }
           const migratedWalkie = rows.find((r) => r.key === 'migration_rbac_walkie_v38');
           const migratedScheduleRbac = rows.find((r) => r.key === 'migration_rbac_schedule_v41');
-          if (migratedWalkie?.value !== 'done' || migratedScheduleRbac?.value !== 'done') {
+          const migratedStrictAttendance = rows.find(
+            (r) => r.key === 'migration_rbac_attendance_strict_v42'
+          );
+          const migratedProfileSelf = rows.find(
+            (r) => r.key === 'migration_rbac_profile_self_v43'
+          );
+          if (
+            migratedWalkie?.value !== 'done' ||
+            migratedScheduleRbac?.value !== 'done' ||
+            migratedStrictAttendance?.value !== 'done' ||
+            migratedProfileSelf?.value !== 'done'
+          ) {
             await this.ensureRolePoliciesUpToDate(new Date().toISOString()).catch(() => {});
           }
           return;
@@ -863,6 +927,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       supabase_anon_key: envSupabaseKey,
       cloud_sync_enabled: 'true',
       last_cloud_sync: '',
+      login_show_role_cards: 'true',
+      password_min_length: '4',
       migration_schedule_tables_v41: 'done',
     };
 
@@ -874,6 +940,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
 
     const nowIso = new Date().toISOString();
+    await this.ensureCctvVerifyV42Migration();
+    await this.ensureRoleProfilesV43Migration();
     await this.ensureRolePoliciesUpToDate(nowIso);
 
     // Ensure default Owner ('123') exists
@@ -906,6 +974,205 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private ensureCctvColumnsOnSqlite(): void {
+    if (!this.sqliteDb) return;
+    try {
+      const cols = this.sqliteDb.prepare('PRAGMA table_info(attendance_logs)').all() as Array<{
+        name: string;
+      }>;
+      const existing = new Set(cols.map((c) => c.name));
+      const alterations: Array<[string, string]> = [
+        ['verified_by', "TEXT DEFAULT ''"],
+        ['cctv_status', "TEXT DEFAULT 'pending'"],
+        ['cctv_observed_time', "TEXT DEFAULT ''"],
+        ['cctv_note', "TEXT DEFAULT ''"],
+      ];
+      for (const [col, def] of alterations) {
+        if (!existing.has(col)) {
+          this.sqliteDb.exec(`ALTER TABLE attendance_logs ADD COLUMN ${col} ${def}`);
+        }
+      }
+      this.sqliteDb.exec(
+        "CREATE INDEX IF NOT EXISTS idx_attendance_logs_cctv_status ON attendance_logs (date_key, cctv_status) WHERE cctv_status <> 'confirmed'"
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  private async ensureCctvVerifyV42Migration(): Promise<void> {
+    this.ensureCctvColumnsOnSqlite();
+
+    const migratedRow = await this.queryOne<{ value: string }>(
+      "SELECT value FROM settings WHERE key = 'migration_cctv_verify_v42'"
+    );
+    if (migratedRow?.value === 'done') return;
+
+    if (this.pgPool || (this.useSupabaseRpc && this.storageMode === 'supabase_postgres')) {
+      const pgStatements = [
+        `ALTER TABLE attendance_logs
+           ADD COLUMN IF NOT EXISTS verified_by TEXT DEFAULT '',
+           ADD COLUMN IF NOT EXISTS cctv_status TEXT DEFAULT 'pending',
+           ADD COLUMN IF NOT EXISTS cctv_observed_time TEXT DEFAULT '',
+           ADD COLUMN IF NOT EXISTS cctv_note TEXT DEFAULT ''`,
+        `UPDATE attendance_logs
+         SET cctv_status = 'confirmed'
+         WHERE verified_by_cctv = 1 AND COALESCE(cctv_status, 'pending') <> 'confirmed'`,
+        `UPDATE attendance_logs
+         SET cctv_status = 'pending'
+         WHERE cctv_status IS NULL OR cctv_status = ''`,
+        `CREATE INDEX IF NOT EXISTS idx_attendance_logs_cctv_status
+         ON attendance_logs (date_key, cctv_status)
+         WHERE cctv_status <> 'confirmed'`,
+      ];
+      for (const sql of pgStatements) {
+        if (this.pgPool) {
+          await this.execute(sql);
+        } else {
+          await execSupabaseRpcSql(sql);
+        }
+      }
+      if (this.sqliteDb) {
+        try {
+          this.sqliteDb.exec(
+            "UPDATE attendance_logs SET cctv_status = 'confirmed' WHERE verified_by_cctv = 1 AND COALESCE(cctv_status, 'pending') <> 'confirmed'"
+          );
+          this.sqliteDb.exec(
+            "UPDATE attendance_logs SET cctv_status = 'pending' WHERE cctv_status IS NULL OR cctv_status = ''"
+          );
+        } catch {
+          // ignore
+        }
+      }
+    } else {
+      await this.execute(
+        `UPDATE attendance_logs
+         SET cctv_status = 'confirmed'
+         WHERE verified_by_cctv = 1 AND COALESCE(cctv_status, 'pending') <> 'confirmed'`
+      );
+      await this.execute(
+        `UPDATE attendance_logs
+         SET cctv_status = 'pending'
+         WHERE cctv_status IS NULL OR cctv_status = ''`
+      );
+      await this.execute(
+        `CREATE INDEX IF NOT EXISTS idx_attendance_logs_cctv_status
+         ON attendance_logs (date_key, cctv_status)
+         WHERE cctv_status <> 'confirmed'`
+      );
+    }
+
+    await this.upsertSetting('migration_cctv_verify_v42', 'done');
+  }
+
+  private ensureRoleProfilesColumnsOnSqlite(): void {
+    if (!this.sqliteDb) return;
+    const ensureCols = (table: string, alterations: Array<[string, string]>) => {
+      try {
+        const cols = this.sqliteDb!.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+          name: string;
+        }>;
+        const existing = new Set(cols.map((c) => c.name));
+        for (const [col, def] of alterations) {
+          if (!existing.has(col)) {
+            this.sqliteDb!.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+          }
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    ensureCols('system_users', [
+      ['avatar_url', "TEXT DEFAULT ''"],
+      ['avatar_preset', "TEXT DEFAULT ''"],
+      ['preferences_json', "TEXT DEFAULT '{}'"],
+      ['session_version', 'INTEGER DEFAULT 1'],
+      ['password_changed_at', "TEXT DEFAULT ''"],
+      ['username_changed_at', "TEXT DEFAULT ''"],
+    ]);
+    ensureCols('employees', [
+      ['avatar_url', "TEXT DEFAULT ''"],
+      ['avatar_preset', "TEXT DEFAULT ''"],
+    ]);
+    ensureCols('role_policies', [
+      ['avatar_url', "TEXT DEFAULT ''"],
+      ['avatar_preset', "TEXT DEFAULT ''"],
+      ['avatar_color', "TEXT DEFAULT ''"],
+    ]);
+    ensureCols('walkie_presence', [['avatar_url', "TEXT DEFAULT ''"]]);
+
+    try {
+      this.sqliteDb.exec(
+        "UPDATE system_users SET username = LOWER(TRIM(username)) WHERE username <> LOWER(TRIM(username))"
+      );
+      this.sqliteDb.exec(
+        'CREATE UNIQUE INDEX IF NOT EXISTS idx_system_users_username_lower ON system_users (LOWER(username))'
+      );
+    } catch {
+      // ignore if duplicate legacy username prevents index creation
+    }
+  }
+
+  private async ensureRoleProfilesV43Migration(): Promise<void> {
+    this.ensureRoleProfilesColumnsOnSqlite();
+
+    const migratedRow = await this.queryOne<{ value: string }>(
+      "SELECT value FROM settings WHERE key = 'migration_role_profiles_v43'"
+    );
+    if (migratedRow?.value === 'done') return;
+
+    if (this.pgPool || (this.useSupabaseRpc && this.storageMode === 'supabase_postgres')) {
+      const pgStatements = [
+        `ALTER TABLE system_users
+           ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT '',
+           ADD COLUMN IF NOT EXISTS avatar_preset TEXT DEFAULT '',
+           ADD COLUMN IF NOT EXISTS preferences_json TEXT DEFAULT '{}',
+           ADD COLUMN IF NOT EXISTS session_version INTEGER DEFAULT 1,
+           ADD COLUMN IF NOT EXISTS password_changed_at TEXT DEFAULT '',
+           ADD COLUMN IF NOT EXISTS username_changed_at TEXT DEFAULT ''`,
+        `ALTER TABLE employees
+           ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT '',
+           ADD COLUMN IF NOT EXISTS avatar_preset TEXT DEFAULT ''`,
+        `ALTER TABLE role_policies
+           ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT '',
+           ADD COLUMN IF NOT EXISTS avatar_preset TEXT DEFAULT '',
+           ADD COLUMN IF NOT EXISTS avatar_color TEXT DEFAULT ''`,
+        `ALTER TABLE walkie_presence
+           ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT ''`,
+        `UPDATE system_users
+         SET avatar_url = COALESCE(avatar_url, ''),
+             avatar_preset = COALESCE(avatar_preset, ''),
+             preferences_json = COALESCE(NULLIF(preferences_json, ''), '{}'),
+             session_version = COALESCE(session_version, 1),
+             password_changed_at = COALESCE(password_changed_at, ''),
+             username_changed_at = COALESCE(username_changed_at, ''),
+             username = LOWER(TRIM(username))`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_system_users_username_lower
+         ON system_users (LOWER(username))`,
+      ];
+      for (const sql of pgStatements) {
+        try {
+          if (this.pgPool) {
+            await this.execute(sql);
+          } else {
+            await execSupabaseRpcSql(sql);
+          }
+        } catch {
+          // ignore non-fatal DDL if already applied
+        }
+      }
+    }
+
+    await this.execute(
+      `INSERT INTO settings (key, value) VALUES ('login_show_role_cards', 'true') ON CONFLICT (key) DO NOTHING`
+    );
+    await this.execute(
+      `INSERT INTO settings (key, value) VALUES ('password_min_length', '4') ON CONFLICT (key) DO NOTHING`
+    );
+    await this.upsertSetting('migration_role_profiles_v43', 'done');
+  }
+
   private async mergeRolePolicyPermissions(
     additions: Record<string, string[]>,
     nowIso: string
@@ -924,6 +1191,35 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
               'UPDATE role_policies SET permissions_json = ?, updated_at = ? WHERE role = ?',
               [JSON.stringify(merged), nowIso, roleId]
             );
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  private async stripRolePolicyPermissions(
+    removals: Record<string, string[]>,
+    nowIso: string
+  ): Promise<void> {
+    for (const [roleId, removePerms] of Object.entries(removals)) {
+      const removeSet = new Set(removePerms);
+      const row = await this.queryOne<{ permissions_json: string }>(
+        'SELECT permissions_json FROM role_policies WHERE role = ?',
+        [roleId]
+      );
+      if (row?.permissions_json) {
+        try {
+          const parsed = JSON.parse(row.permissions_json);
+          if (Array.isArray(parsed)) {
+            const filtered = parsed.filter((p) => !removeSet.has(p));
+            if (filtered.length !== parsed.length) {
+              await this.execute(
+                'UPDATE role_policies SET permissions_json = ?, updated_at = ? WHERE role = ?',
+                [JSON.stringify(filtered), nowIso, roleId]
+              );
+            }
           }
         } catch {
           // ignore
@@ -1008,6 +1304,55 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         nowIso
       );
       await this.upsertSetting('migration_rbac_schedule_v41', 'done');
+    }
+
+    const migratedAttendanceStrictV42 = await this.queryOne<{ value: string }>(
+      "SELECT value FROM settings WHERE key = 'migration_rbac_attendance_strict_v42'"
+    );
+    if (migratedAttendanceStrictV42?.value !== 'done') {
+      await this.stripRolePolicyPermissions(
+        {
+          manager: ['attendance:self', 'attendance:kiosk'],
+          supervisor: ['attendance:self', 'attendance:kiosk'],
+          cctv: ['attendance:self', 'attendance:kiosk'],
+          security: ['attendance:self', 'attendance:kiosk'],
+          cashier: ['attendance:self', 'attendance:kiosk', 'attendance:write'],
+          hall: ['attendance:self', 'attendance:kiosk', 'attendance:write'],
+          warehouse: ['attendance:self', 'attendance:kiosk', 'attendance:write'],
+          delivery: ['attendance:self', 'attendance:kiosk', 'attendance:write'],
+        },
+        nowIso
+      );
+      await this.mergeRolePolicyPermissions(
+        {
+          manager: ['attendance:write', 'attendance:verify'],
+          supervisor: ['attendance:write', 'attendance:verify'],
+          cctv: ['attendance:write', 'attendance:verify'],
+          security: ['attendance:write'],
+        },
+        nowIso
+      );
+      await this.upsertSetting('migration_rbac_attendance_strict_v42', 'done');
+    }
+
+    const migratedProfileSelfV43 = await this.queryOne<{ value: string }>(
+      "SELECT value FROM settings WHERE key = 'migration_rbac_profile_self_v43'"
+    );
+    if (migratedProfileSelfV43?.value !== 'done') {
+      await this.mergeRolePolicyPermissions(
+        {
+          manager: ['profile:edit_self'],
+          supervisor: ['profile:edit_self'],
+          cashier: ['profile:edit_self'],
+          cctv: ['profile:edit_self'],
+          security: ['profile:edit_self'],
+          hall: ['profile:edit_self'],
+          warehouse: ['profile:edit_self'],
+          delivery: ['profile:edit_self'],
+        },
+        nowIso
+      );
+      await this.upsertSetting('migration_rbac_profile_self_v43', 'done');
     }
   }
 
@@ -1108,13 +1453,82 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  parsePreferencesJson(raw?: string | Record<string, any> | null): Record<string, any> {
+    if (!raw) return {};
+    let parsed: Record<string, any>;
+    if (typeof raw === 'object' && !Array.isArray(raw)) {
+      parsed = { ...raw };
+    } else {
+      try {
+        const obj = JSON.parse(String(raw));
+        parsed = obj && typeof obj === 'object' && !Array.isArray(obj) ? { ...obj } : {};
+      } catch {
+        return {};
+      }
+    }
+    if (parsed.theme !== undefined) {
+      const normalizedTheme = normalizeServerTheme(parsed.theme);
+      if (normalizedTheme) {
+        parsed.theme = normalizedTheme;
+      } else {
+        delete parsed.theme;
+      }
+    }
+    return parsed;
+  }
+
+  resolveEffectiveAvatarUrl(user?: any, emp?: any, rolePolicy?: any): string {
+    const uUrl = String(user?.avatar_url || '').trim();
+    if (uUrl) return uUrl;
+    const eUrl = String(emp?.avatar_url || '').trim();
+    if (eUrl) return eUrl;
+    const rUrl = String(rolePolicy?.avatar_url || '').trim();
+    if (rUrl) return rUrl;
+    return '';
+  }
+
+  buildPublicUserPayload(userRow: any, empRow?: any, rolePolicyRow?: any) {
+    const roleMeta = ROLES_METADATA[userRow.role] || {
+      label: userRow.role,
+      shortLabel: userRow.role,
+      color: '#0B57D0',
+    };
+    const effectiveAvatar = this.resolveEffectiveAvatarUrl(userRow, empRow, rolePolicyRow);
+    return {
+      id: userRow.id,
+      username: userRow.username,
+      display_name: userRow.display_name,
+      role: userRow.role,
+      role_label: roleMeta.label || userRow.role,
+      avatar_color: userRow.avatar_color || rolePolicyRow?.avatar_color || roleMeta.color || '#0B57D0',
+      avatar_url: effectiveAvatar,
+      own_avatar_url: String(userRow.avatar_url || '').trim(),
+      role_default_avatar_url: String(rolePolicyRow?.avatar_url || '').trim(),
+      avatar_preset: String(userRow.avatar_preset || empRow?.avatar_preset || rolePolicyRow?.avatar_preset || '').trim(),
+      employee_id: userRow.employee_id || '',
+      preferences: this.parsePreferencesJson(userRow.preferences_json),
+      password_changed_at: userRow.password_changed_at || '',
+      username_changed_at: userRow.username_changed_at || '',
+    };
+  }
+
   async issueSessionForUser(
-    user: { id: string },
+    user: { id: string; session_version?: number },
     ip: string,
     userAgent: string,
     durationHours = 24 * 365 * 5
   ): Promise<string> {
-    const sessionId = `${crypto.randomUUID()}:${user.id}`;
+    let version = Number(user.session_version || 0);
+    if (!version && user.id !== '__DEVICE_KIOSK__') {
+      const row = await this.queryOne<{ session_version?: number }>(
+        'SELECT session_version FROM system_users WHERE id = ? LIMIT 1',
+        [user.id]
+      );
+      version = Number(row?.session_version || 1);
+    }
+    if (!version || version < 1) version = 1;
+
+    const sessionId = `${crypto.randomUUID()}:${user.id}:v${version}`;
     const now = new Date();
     const expires = new Date(now.getTime() + durationHours * 3600 * 1000);
     await this.execute(
@@ -1139,21 +1553,27 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     const sessionId = verifySignedTokenFormat(rawToken, secret);
     if (!sessionId) return null;
 
+    const sessionParts = sessionId.split(':');
+    const embeddedUserId = sessionParts.length >= 2 ? sessionParts[1].trim() : '';
+    const tokenVersion =
+      sessionParts.length >= 3 && sessionParts[2].startsWith('v')
+        ? Math.max(1, Number(sessionParts[2].slice(1)) || 1)
+        : 1;
+
     let session = await this.queryOne<any>('SELECT * FROM user_sessions WHERE id = ?', [sessionId]);
     if (session) {
       if (Number(session.revoked) === 1) return null;
       if (new Date(session.expires_at).getTime() <= Date.now()) return null;
-    } else if (sessionId.includes(':')) {
-      const colonIdx = sessionId.indexOf(':');
-      const embeddedUserId = sessionId.slice(colonIdx + 1).trim();
-      if (!embeddedUserId) return null;
-
+    } else if (embeddedUserId) {
       if (embeddedUserId !== '__DEVICE_KIOSK__') {
-        const activeUser = await this.queryOne<{ id: string }>(
-          'SELECT id FROM system_users WHERE id = ? AND is_active = 1',
+        const activeUser = await this.queryOne<{ id: string; session_version?: number }>(
+          'SELECT id, session_version FROM system_users WHERE id = ? AND is_active = 1',
           [embeddedUserId]
         );
         if (!activeUser) return null;
+        if (tokenVersion < Number(activeUser.session_version || 1)) {
+          return null;
+        }
       }
 
       const now = new Date();
@@ -1184,6 +1604,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           role: 'kiosk',
           role_label: ROLES_METADATA.kiosk.label,
           avatar_color: '#E37400',
+          avatar_url: '',
+          avatar_preset: '',
+          preferences: {},
         },
         permissions,
         actorLabel: 'كشك العمال',
@@ -1201,12 +1624,33 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     );
     if (!user) return null;
 
-    const permissions = await this.getRolePermissions(user.role, user.custom_permissions_json);
+    if (tokenVersion < Number(user.session_version || 1)) {
+      await this.execute('UPDATE user_sessions SET revoked = 1 WHERE id = ?', [session.id]).catch(
+        () => {}
+      );
+      return null;
+    }
+
+    const [permissions, rolePolicyRow, empRow] = await Promise.all([
+      this.getRolePermissions(user.role, user.custom_permissions_json),
+      this.queryOne<any>(
+        'SELECT role, avatar_url, avatar_preset, avatar_color FROM role_policies WHERE role = ? LIMIT 1',
+        [user.role]
+      ),
+      user.employee_id
+        ? this.queryOne<any>(
+            'SELECT id, avatar_url, avatar_preset FROM employees WHERE id = ? LIMIT 1',
+            [user.employee_id]
+          )
+        : Promise.resolve(null),
+    ]);
+
     const roleMeta = ROLES_METADATA[user.role] || { shortLabel: user.role, label: user.role };
     const actorLabel =
       user.role === 'kiosk'
         ? 'كشك العمال'
         : `${user.display_name} (${roleMeta.shortLabel})`;
+    const effectiveAvatarUrl = this.resolveEffectiveAvatarUrl(user, empRow, rolePolicyRow);
 
     const resolvedAuth: AuthContext = {
       sessionId: session.id,
@@ -1216,8 +1660,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         display_name: user.display_name,
         role: user.role,
         role_label: roleMeta.label || user.role,
-        avatar_color: user.avatar_color,
+        avatar_color: user.avatar_color || rolePolicyRow?.avatar_color || '#0B57D0',
+        avatar_url: effectiveAvatarUrl,
+        avatar_preset: String(user.avatar_preset || empRow?.avatar_preset || rolePolicyRow?.avatar_preset || '').trim(),
         employee_id: user.employee_id || '',
+        preferences: this.parsePreferencesJson(user.preferences_json),
       },
       permissions,
       actorLabel,
@@ -1329,9 +1776,13 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         cipher = encryptPasswordForAdmin(rawPass, secretHex);
       }
 
+      const nextAvatarUrl = existingLinked.avatar_url || emp.avatar_url || '';
+      const nextAvatarPreset = existingLinked.avatar_preset || emp.avatar_preset || '';
+      const nextAvatarColor = existingLinked.avatar_color || emp.avatar_color || '#0B57D0';
+
       await this.execute(
         `UPDATE system_users
-         SET display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?, avatar_color = ?, is_active = 1, updated_at = ?
+         SET display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?, avatar_color = ?, avatar_url = ?, avatar_preset = ?, is_active = 1, updated_at = ?
          WHERE id = ?`,
         [
           emp.name.trim(),
@@ -1339,7 +1790,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           saltHex,
           hashHex,
           cipher,
-          emp.avatar_color || '#0B57D0',
+          nextAvatarColor,
+          nextAvatarUrl,
+          nextAvatarPreset,
           nowIso,
           existingLinked.id,
         ]
@@ -1369,18 +1822,19 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       candidateUserId,
     ]);
     const newUserId = idCollision ? crypto.randomUUID() : candidateUserId;
-    const baseUsername = `emp_${finalPass.replace(/[^a-z0-9]/gi, '') || emp.id.slice(0, 6)}`;
-    const usernameExists = await this.queryOne('SELECT id FROM system_users WHERE username = ?', [
-      baseUsername,
-    ]);
+    const baseUsername = `emp_${finalPass.replace(/[^a-z0-9]/gi, '') || emp.id.slice(0, 6)}`.toLowerCase();
+    const usernameExists = await this.queryOne(
+      'SELECT id FROM system_users WHERE LOWER(username) = LOWER(?)',
+      [baseUsername]
+    );
     const finalUsername = usernameExists
       ? `${baseUsername}_${crypto.randomBytes(2).toString('hex')}`
       : baseUsername;
 
     await this.execute(
       `INSERT INTO system_users (
-        id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, is_active, employee_id, custom_permissions_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, '[]', ?, ?)`,
+        id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, avatar_url, avatar_preset, is_active, employee_id, custom_permissions_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, '[]', ?, ?)`,
       [
         newUserId,
         finalUsername,
@@ -1390,6 +1844,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         hashHex,
         cipher,
         emp.avatar_color || '#0B57D0',
+        emp.avatar_url || '',
+        emp.avatar_preset || '',
         emp.id,
         nowIso,
         nowIso,
@@ -1458,6 +1914,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     proof_url = '',
     recorded_by,
     autoVerified = false,
+    verified_by = '',
+    cctv_status,
+    cctv_observed_time = '',
+    cctv_note = '',
     timestamp,
     allowed_break_minutes = 0,
     break_reason = '',
@@ -1472,6 +1932,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     proof_url?: string;
     recorded_by: string;
     autoVerified?: boolean | number;
+    verified_by?: string;
+    cctv_status?: 'pending' | 'confirmed' | 'mismatch';
+    cctv_observed_time?: string;
+    cctv_note?: string;
     timestamp?: string;
     allowed_break_minutes?: number | string;
     break_reason?: string;
@@ -1617,13 +2081,27 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         ? `عودة من بريك بعد ${finalBreakDuration} دقيقة (المسموح ${finalAllowedBreak} د)`
         : '');
 
+    const isAutoConfirmed = Boolean(autoVerified) && cctv_status !== 'pending';
+    const finalCctvStatus: 'pending' | 'confirmed' | 'mismatch' = isAutoConfirmed
+      ? cctv_status || 'confirmed'
+      : 'pending';
+    const finalVerifiedFlag = isAutoConfirmed && finalCctvStatus === 'confirmed' ? 1 : 0;
+    const finalVerifiedAt = isAutoConfirmed ? isoTime : '';
+    const finalVerifiedBy = isAutoConfirmed ? String(verified_by || recorded_by || '').trim() : '';
+    const localHHMM = getLocalTimeHMS(eventDate).slice(0, 5);
+    const finalObservedTime = isAutoConfirmed
+      ? String(cctv_observed_time || '').trim().slice(0, 20) || localHHMM
+      : '';
+    const finalCctvNote = isAutoConfirmed ? String(cctv_note || '').trim().slice(0, 300) : '';
+
     const attLogId = requestedId ? String(requestedId) : crypto.randomUUID();
     await this.execute(
       `INSERT INTO attendance_logs (
         id, employee_id, employee_name, department, action_type, timestamp, date_key, shift_date_key,
         late_minutes, allowed_break_minutes, break_duration_minutes, break_reason,
-        note, proof_url, recorded_by, verified_by_cctv, verified_at, synced
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        note, proof_url, recorded_by, verified_by_cctv, verified_at,
+        verified_by, cctv_status, cctv_observed_time, cctv_note, synced
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
       [
         attLogId,
         emp.id,
@@ -1640,8 +2118,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         finalNote,
         proof_url,
         recorded_by,
-        autoVerified ? 1 : 0,
-        autoVerified ? isoTime : '',
+        finalVerifiedFlag,
+        finalVerifiedAt,
+        finalVerifiedBy,
+        finalCctvStatus,
+        finalObservedTime,
+        finalCctvNote,
       ]
     );
 
@@ -1939,12 +2421,16 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       auth!.has('attendance:self') ||
       auth!.has('attendance:read') ||
       auth!.has('attendance:write') ||
+      auth!.has('attendance:verify') ||
       auth!.has('attendance:kiosk') ||
       auth!.has('staff:manage') ||
       auth!.has('reports:view');
 
     const canReadAttendanceLogs =
-      isInternalSnap || auth!.has('attendance:read') || auth!.has('reports:view');
+      isInternalSnap ||
+      auth!.has('attendance:read') ||
+      auth!.has('attendance:verify') ||
+      auth!.has('reports:view');
 
     const canTrucks =
       isInternalSnap ||
@@ -1998,6 +2484,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     let dayoffDefaults: any[] = [];
     let dayoffOverrides: any[] = [];
     let rawPendingSwaps: any[] = [];
+    let rolePoliciesRows: any[] = [];
 
     if (this.useSupabaseRpc) {
       try {
@@ -2060,6 +2547,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           {
             sql: "SELECT * FROM dayoff_swap_requests WHERE status IN ('pending_requester', 'pending_peer', 'pending_manager') ORDER BY created_at DESC",
           },
+          {
+            sql: 'SELECT role, avatar_url, avatar_preset, avatar_color FROM role_policies',
+          },
         ]);
 
         this.storageMode = 'supabase_postgres';
@@ -2082,6 +2572,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         dayoffDefaults = canAttendance || canScheduleRead ? batchResults[12]?.rows || [] : [];
         dayoffOverrides = canAttendance || canScheduleRead ? batchResults[13]?.rows || [] : [];
         rawPendingSwaps = canScheduleRead ? batchResults[14]?.rows || [] : [];
+        rolePoliciesRows = batchResults[15]?.rows || [];
       } catch (err) {
         if (this.isServerless) throw err;
         this.storageMode = 'sqlite_local';
@@ -2105,6 +2596,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         dayoffDefaultsRes,
         dayoffOverridesRes,
         rawPendingSwapsRes,
+        rolePoliciesRes,
       ] = await Promise.all([
         this.getSettingsMap(),
         canAttendance || canScheduleRead
@@ -2184,6 +2676,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
               "SELECT * FROM dayoff_swap_requests WHERE status IN ('pending_requester', 'pending_peer', 'pending_manager') ORDER BY created_at DESC"
             )
           : Promise.resolve([]),
+        this.queryAll<any>('SELECT role, avatar_url, avatar_preset, avatar_color FROM role_policies'),
       ]);
 
       settings = settingsRes;
@@ -2201,7 +2694,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       dayoffDefaults = dayoffDefaultsRes;
       dayoffOverrides = dayoffOverridesRes;
       rawPendingSwaps = rawPendingSwapsRes;
+      rolePoliciesRows = rolePoliciesRes;
     }
+
+    const rolePoliciesByRole = new Map<string, any>(
+      rolePoliciesRows.map((rp) => [rp.role, rp])
+    );
 
     let attendanceLogs: any[] = [];
     if (canAttendance) {
@@ -2256,23 +2754,46 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     let checkedOutCount = 0;
     let lateCount = 0;
     let unverifiedAttendanceCount = 0;
+    let mismatchAttendanceCount = 0;
     let scheduledOffCount = 0;
     let scheduledOffAbsentCount = 0;
 
+    const resolveLogCctvStatus = (log: any): 'confirmed' | 'mismatch' | 'pending' => {
+      if (log?.cctv_status === 'mismatch') return 'mismatch';
+      if (log?.cctv_status === 'confirmed' || Number(log?.verified_by_cctv) === 1) {
+        return 'confirmed';
+      }
+      return 'pending';
+    };
+
     if (canAttendance) {
       for (const log of attendanceLogs) {
-        if (!Number(log.verified_by_cctv)) unverifiedAttendanceCount += 1;
+        const cctvSt = resolveLogCctvStatus(log);
+        if (cctvSt === 'mismatch') {
+          mismatchAttendanceCount += 1;
+        } else if (cctvSt === 'pending') {
+          unverifiedAttendanceCount += 1;
+        }
       }
     }
 
-    const linkedUsersByEmpId = new Map<string, { role: string; password: string }>();
-    if (canManageStaffOrUsers && employees.length > 0) {
-      const secretHex = settings.session_hmac_secret || (await this.getSessionSecret());
+    const linkedUsersByEmpId = new Map<
+      string,
+      { role: string; password: string; avatar_url: string; avatar_preset: string }
+    >();
+    if (employees.length > 0) {
+      const secretHex = canManageStaffOrUsers
+        ? settings.session_hmac_secret || (await this.getSessionSecret())
+        : '';
       for (const u of activeSysUsersAll) {
         if (!u.employee_id) continue;
         linkedUsersByEmpId.set(u.employee_id, {
           role: u.role,
-          password: this.decryptPinCached(u.id, u.pin_cipher, secretHex),
+          password: canManageStaffOrUsers
+            ? this.decryptPinCached(u.id, u.pin_cipher, secretHex)
+            : '',
+          avatar_url: u.avatar_url || '',
+          avatar_preset: u.avatar_preset || '',
         });
       }
     }
@@ -2392,6 +2913,19 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
               lockReasonArabic: '',
             };
 
+      const resolvedSystemRoleForAvatar =
+        linkedInfo?.role ||
+        emp.system_role ||
+        inferDefaultRoleFromDepartment(emp.department, emp.role_title);
+      const effectiveEmpAvatarUrl = this.resolveEffectiveAvatarUrl(
+        linkedInfo,
+        emp,
+        rolePoliciesByRole.get(resolvedSystemRoleForAvatar)
+      );
+      const effectiveEmpAvatarPreset = String(
+        emp.avatar_preset || linkedInfo?.avatar_preset || rolePoliciesByRole.get(resolvedSystemRoleForAvatar)?.avatar_preset || ''
+      ).trim();
+
       if (auth && !canReadAttendanceLogs && !auth.has('staff:manage')) {
         return {
           id: emp.id,
@@ -2399,6 +2933,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           name: emp.name,
           department: emp.department,
           avatar_color: emp.avatar_color,
+          avatar_url: effectiveEmpAvatarUrl,
+          avatar_preset: effectiveEmpAvatarPreset,
           shift_start: emp.shift_start || '08:00',
           shift_end: emp.shift_end || '20:00',
           shiftDurationHours,
@@ -2420,13 +2956,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         };
       }
 
-      const resolvedSystemRole =
-        linkedInfo?.role ||
-        emp.system_role ||
-        inferDefaultRoleFromDepartment(emp.department, emp.role_title);
+      const resolvedSystemRole = resolvedSystemRoleForAvatar;
 
       return {
         ...emp,
+        avatar_url: effectiveEmpAvatarUrl,
+        avatar_preset: effectiveEmpAvatarPreset,
         system_role: resolvedSystemRole,
         login_password: canManageStaffOrUsers
           ? linkedInfo?.password || emp.emp_code || ''
@@ -2449,6 +2984,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         latestRecordedBy: latestLog ? latestLog.recorded_by : null,
         latestLogId: latestLog ? latestLog.id : null,
         latestVerified: latestLog ? Boolean(Number(latestLog.verified_by_cctv)) : true,
+        latestCctvStatus: latestLog ? resolveLogCctvStatus(latestLog) : 'none',
+        latestVerifiedBy: latestLog ? latestLog.verified_by || '' : '',
+        latestVerifiedAt: latestLog ? latestLog.verified_at || '' : '',
+        latestCctvObservedTime: latestLog ? latestLog.cctv_observed_time || '' : '',
+        latestCctvNote: latestLog ? latestLog.cctv_note || '' : '',
         activeBreakStart: currentStatus === 'on_break' && latestLog ? latestLog.timestamp : null,
         allowedBreakMinutes:
           currentStatus === 'on_break' && latestLog
@@ -2519,6 +3059,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           totalPendingSwapsCount: 0,
           lateCount: 0,
           unverifiedAttendanceCount: 0,
+          mismatchAttendanceCount: 0,
           unloadingTrucksCount: 0,
           completedTrucksCount: 0,
           issuesTrucksCount: 0,
@@ -2655,6 +3196,16 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         empRow?.shift_end || '20:00'
       );
 
+      const rolePolicySelf = rolePoliciesByRole.get(auth.user.role) || null;
+      const effectiveSelfAvatarUrl = this.resolveEffectiveAvatarUrl(
+        userRow,
+        empRow,
+        rolePolicySelf
+      );
+      const selfAvatarPreset = String(
+        userRow?.avatar_preset || empRow?.avatar_preset || rolePolicySelf?.avatar_preset || ''
+      ).trim();
+
       myProfile = {
         user_id: auth.user.id,
         username: auth.user.username,
@@ -2662,6 +3213,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         role: auth.user.role,
         role_label: auth.user.role_label,
         avatar_color: auth.user.avatar_color,
+        avatar_url: effectiveSelfAvatarUrl,
+        own_avatar_url: String(userRow?.avatar_url || '').trim(),
+        effective_avatar_url: effectiveSelfAvatarUrl,
+        role_default_avatar_url: String(rolePolicySelf?.avatar_url || '').trim(),
+        avatar_preset: selfAvatarPreset,
+        preferences: this.parsePreferencesJson(userRow?.preferences_json),
+        password_changed_at: userRow?.password_changed_at || '',
+        username_changed_at: userRow?.username_changed_at || '',
         my_password: myPass,
         employee_id: empRow?.id || '',
         emp_code: empRow?.emp_code || '',
@@ -2791,6 +3350,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         branch_name: settings.branch_name || 'الفرع الرئيسي',
         max_break_minutes: Number(settings.max_break_minutes || 30),
         max_unload_minutes: Number(settings.max_unload_minutes || 60),
+        login_show_role_cards: settings.login_show_role_cards !== 'false',
+        password_min_length: Number(settings.password_min_length || 4),
         cloud_sync_enabled:
           this.storageMode === 'supabase_postgres' || settings.cloud_sync_enabled === 'true',
         supabase_url: canManageSettings
@@ -2847,6 +3408,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         totalPendingSwapsCount: pendingDayOffSwaps.length,
         lateCount: canReadAttendanceLogs ? lateCount : 0,
         unverifiedAttendanceCount: canReadAttendanceLogs ? unverifiedAttendanceCount : 0,
+        mismatchAttendanceCount: canReadAttendanceLogs ? mismatchAttendanceCount : 0,
         unloadingTrucksCount: canTrucks ? unloadingTrucksCount : 0,
         completedTrucksCount: canTrucks ? completedTrucksCount : 0,
         issuesTrucksCount: canTrucks ? issuesTrucksCount : 0,
@@ -2934,7 +3496,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     };
 
     await this.withTransaction(async () => {
-      await upsertRows('employees', 'id', tables.employees, [
+      const sanitizedEmployees = Array.isArray(tables.employees)
+        ? tables.employees.map((e: any) => ({
+            ...e,
+            avatar_url: e?.avatar_url ?? '',
+            avatar_preset: e?.avatar_preset ?? '',
+          }))
+        : [];
+      await upsertRows('employees', 'id', sanitizedEmployees, [
         'id',
         'emp_code',
         'name',
@@ -2943,12 +3512,66 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         'shift_start',
         'shift_end',
         'avatar_color',
+        'avatar_url',
+        'avatar_preset',
         'phone',
         'is_active',
         'system_role',
         'login_enabled',
         'updated_at',
       ]);
+      if (Array.isArray(tables.role_policies) && tables.role_policies.length > 0) {
+        const sanitizedPolicies = tables.role_policies.map((rp: any) => ({
+          ...rp,
+          avatar_url: rp?.avatar_url ?? '',
+          avatar_preset: rp?.avatar_preset ?? '',
+          avatar_color: rp?.avatar_color ?? '',
+        }));
+        await upsertRows('role_policies', 'role', sanitizedPolicies, [
+          'role',
+          'permissions_json',
+          'avatar_url',
+          'avatar_preset',
+          'avatar_color',
+          'updated_at',
+        ]);
+      }
+      if (Array.isArray(tables.system_users) && tables.system_users.length > 0) {
+        const sanitizedUsers = tables.system_users
+          .filter((u: any) => u && u.id && u.username && u.pin_salt && u.pin_hash)
+          .map((u: any) => ({
+            ...u,
+            username: String(u.username).trim().toLowerCase(),
+            avatar_url: u.avatar_url ?? '',
+            avatar_preset: u.avatar_preset ?? '',
+            preferences_json: u.preferences_json ?? '{}',
+            session_version: Number(u.session_version || 1),
+            password_changed_at: u.password_changed_at ?? '',
+            username_changed_at: u.username_changed_at ?? '',
+          }));
+        await upsertRows('system_users', 'id', sanitizedUsers, [
+          'id',
+          'username',
+          'display_name',
+          'role',
+          'pin_salt',
+          'pin_hash',
+          'pin_cipher',
+          'avatar_color',
+          'avatar_url',
+          'avatar_preset',
+          'preferences_json',
+          'session_version',
+          'password_changed_at',
+          'username_changed_at',
+          'is_active',
+          'employee_id',
+          'custom_permissions_json',
+          'last_login_at',
+          'created_at',
+          'updated_at',
+        ]);
+      }
       await upsertRows('suppliers', 'id', tables.suppliers, [
         'id',
         'name',
@@ -3012,6 +3635,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         'recorded_by',
         'verified_by_cctv',
         'verified_at',
+        'verified_by',
+        'cctv_status',
+        'cctv_observed_time',
+        'cctv_note',
         'synced',
       ]);
       await upsertRows('truck_logs', 'id', tables.truck_logs, [

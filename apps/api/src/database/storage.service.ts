@@ -115,4 +115,106 @@ export class StorageService {
       return { ok: true, url: dataUrl };
     }
   }
+
+  async uploadAvatarDataUrl(
+    dataUrl: string,
+    ownerKey = 'user'
+  ): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+    if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
+      return { ok: false, error: 'صيغة الصورة الشخصية غير صالحة' };
+    }
+    const match = dataUrl.match(/^data:image\/(jpeg|jpg|png|webp);base64,([A-Za-z0-9+/=\r\n]+)$/i);
+    if (!match) {
+      return { ok: false, error: 'يرجى رفع صورة شخصية بصيغة JPG أو PNG أو WebP فقط' };
+    }
+
+    const ext = match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
+    const mimeType = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
+    const buffer = Buffer.from(match[2], 'base64');
+
+    if (buffer.length > 512 * 1024) {
+      return {
+        ok: false,
+        error: 'حجم الصورة الشخصية كبير جداً (الحد الأقصى 512 كيلوبايت بعد الضغط)',
+      };
+    }
+
+    if (!validateImageMagicBytes(buffer, ext)) {
+      return { ok: false, error: 'محتوى ملف الصورة غير سليم أو غير مدعوم' };
+    }
+
+    const safeKey =
+      String(ownerKey || 'user')
+        .replace(/[^a-z0-9_-]/gi, '')
+        .slice(0, 48) || 'user';
+    const fileName = `avatar_${safeKey}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.${ext}`;
+
+    if (this.supabaseAdmin) {
+      try {
+        const storagePath = `avatars/${fileName}`;
+        const { error } = await this.supabaseAdmin.storage
+          .from('zayed-proofs')
+          .upload(storagePath, buffer, {
+            contentType: mimeType,
+            cacheControl: '31536000',
+            upsert: true,
+          });
+        if (!error) {
+          const { data } = this.supabaseAdmin.storage
+            .from('zayed-proofs')
+            .getPublicUrl(storagePath);
+          if (data?.publicUrl) {
+            return { ok: true, url: data.publicUrl };
+          }
+        }
+      } catch {
+        // Fallback below if storage upload fails transiently
+      }
+    }
+
+    if (this.isServerless) {
+      return { ok: true, url: dataUrl };
+    }
+
+    try {
+      const avatarsDir = path.join(this.uploadsDir, 'avatars');
+      fs.mkdirSync(avatarsDir, { recursive: true });
+      const fullPath = path.join(avatarsDir, fileName);
+      fs.writeFileSync(fullPath, buffer);
+      return { ok: true, url: `/uploads/avatars/${fileName}` };
+    } catch {
+      return { ok: true, url: dataUrl };
+    }
+  }
+
+  async deleteManagedAvatar(oldUrl: string): Promise<void> {
+    if (!oldUrl || typeof oldUrl !== 'string' || oldUrl.startsWith('data:')) {
+      return;
+    }
+
+    try {
+      if (oldUrl.startsWith('/uploads/avatars/')) {
+        const rawName = oldUrl.slice('/uploads/avatars/'.length).split('?')[0];
+        const safeName = path.basename(rawName);
+        if (!safeName || safeName !== rawName) return;
+        const avatarsDir = path.resolve(this.uploadsDir, 'avatars');
+        const fullPath = path.resolve(avatarsDir, safeName);
+        if (fullPath.startsWith(avatarsDir + path.sep) && fs.existsSync(fullPath)) {
+          fs.unlinkSync(fullPath);
+        }
+        return;
+      }
+
+      if (this.supabaseAdmin && oldUrl.includes('/zayed-proofs/avatars/')) {
+        const idx = oldUrl.indexOf('/zayed-proofs/avatars/');
+        const rel = oldUrl.slice(idx + '/zayed-proofs/'.length).split('?')[0];
+        const safeName = path.basename(rel);
+        if (rel === `avatars/${safeName}` && safeName) {
+          await this.supabaseAdmin.storage.from('zayed-proofs').remove([rel]);
+        }
+      }
+    } catch {
+      // Best-effort cleanup; never fail caller on stale asset delete
+    }
+  }
 }

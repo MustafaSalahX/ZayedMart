@@ -48,7 +48,9 @@ export class RbacController {
     const secretHex = await this.db.getSessionSecret();
     const rawUsers = canManageUsers
       ? await this.db.queryAll<any>(
-          `SELECT id, username, display_name, role, pin_cipher, avatar_color, is_active, employee_id, custom_permissions_json, last_login_at, created_at
+          `SELECT id, username, display_name, role, pin_cipher, avatar_color, avatar_url, avatar_preset,
+                  is_active, employee_id, custom_permissions_json, last_login_at,
+                  password_changed_at, username_changed_at, created_at
            FROM system_users
            ORDER BY is_active DESC, created_at ASC`
         )
@@ -117,6 +119,8 @@ export class RbacController {
         password,
         pin,
         avatar_color = '#0B57D0',
+        avatar_url = '',
+        avatar_preset = '',
         custom_permissions = [],
       } = body || {};
 
@@ -143,7 +147,7 @@ export class RbacController {
         : `${role}_${crypto.randomBytes(3).toString('hex')}`;
 
       const exists = await this.db.queryOne(
-        'SELECT id FROM system_users WHERE username = ?',
+        'SELECT id FROM system_users WHERE LOWER(username) = LOWER(?)',
         [cleanUsername]
       );
       if (exists) {
@@ -162,8 +166,8 @@ export class RbacController {
 
       await this.db.execute(
         `INSERT INTO system_users (
-          id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, is_active, custom_permissions_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+          id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, avatar_url, avatar_preset, is_active, custom_permissions_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
         [
           id,
           cleanUsername,
@@ -173,6 +177,8 @@ export class RbacController {
           hashHex,
           cipher,
           avatar_color,
+          String(avatar_url || '').trim(),
+          String(avatar_preset || '').trim(),
           JSON.stringify(cleanCustomPerms),
           now,
           now,
@@ -214,17 +220,26 @@ export class RbacController {
       }
 
       const {
+        username,
         display_name = target.display_name,
         role = target.role,
         password,
         pin,
         is_active = target.is_active,
         avatar_color = target.avatar_color,
+        avatar_url = target.avatar_url || '',
+        avatar_preset = target.avatar_preset || '',
         custom_permissions,
       } = body || {};
 
       if (!ROLES_METADATA[role]) {
         return res.status(400).json({ error: 'الدور غير صالح' });
+      }
+
+      if (auth.user.role !== 'owner' && (target.role === 'owner' || role === 'owner')) {
+        return res.status(403).json({
+          error: 'غير مصرح بتعديل حساب المالك أو منح صلاحية المالك',
+        });
       }
 
       if (target.role === 'owner' && (role !== 'owner' || !is_active)) {
@@ -238,10 +253,35 @@ export class RbacController {
         }
       }
 
+      const nowIso = new Date().toISOString();
+      let nextUsername = target.username;
+      let usernameChangedAt = target.username_changed_at || '';
+      if (username !== undefined && String(username).trim()) {
+        const cleanUser = String(username).trim().toLowerCase().replace(/\s+/g, '_');
+        if (!/^[a-z0-9._-]{3,32}$/.test(cleanUser)) {
+          return res.status(400).json({
+            error: 'اسم المستخدم يجب أن يكون بين 3 و 32 حرفاً إنجليزياً أو أرقاماً أو (. _ -)',
+          });
+        }
+        if (cleanUser !== String(target.username || '').toLowerCase()) {
+          const exists = await this.db.queryOne(
+            'SELECT id FROM system_users WHERE LOWER(username) = LOWER(?) AND id != ?',
+            [cleanUser, target.id]
+          );
+          if (exists) {
+            return res.status(409).json({ error: 'اسم المستخدم محجوز بالفعل لحساب آخر' });
+          }
+          nextUsername = cleanUser;
+          usernameChangedAt = nowIso;
+        }
+      }
+
       const rawPass = normalizeDigits(String(password ?? pin ?? '').trim());
       let saltHex = target.pin_salt;
       let hashHex = target.pin_hash;
       let cipher = target.pin_cipher || '';
+      let passwordChangedAt = target.password_changed_at || '';
+      let nextSessionVersion = Number(target.session_version || 1);
 
       if (rawPass.length > 0) {
         const conflict = await this.db.findPasswordConflict(rawPass, target.id);
@@ -254,6 +294,7 @@ export class RbacController {
         saltHex = hashed.saltHex;
         hashHex = hashed.hashHex;
         cipher = encryptPasswordForAdmin(rawPass, await this.db.getSessionSecret());
+        passwordChangedAt = nowIso;
       }
 
       let nextCustomPermsJson = target.custom_permissions_json || '[]';
@@ -264,20 +305,32 @@ export class RbacController {
         );
       }
 
-      const nowIso = new Date().toISOString();
+      const shouldBumpVersion = Boolean(!is_active || role !== target.role || rawPass.length > 0);
+      if (shouldBumpVersion) {
+        nextSessionVersion += 1;
+      }
+
       await this.db.execute(
         `UPDATE system_users
-         SET display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?, avatar_color = ?, is_active = ?, custom_permissions_json = ?, updated_at = ?
+         SET username = ?, display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?,
+             avatar_color = ?, avatar_url = ?, avatar_preset = ?, is_active = ?,
+             custom_permissions_json = ?, session_version = ?, password_changed_at = ?, username_changed_at = ?, updated_at = ?
          WHERE id = ?`,
         [
+          nextUsername,
           display_name.trim(),
           role,
           saltHex,
           hashHex,
           cipher,
           avatar_color,
+          String(avatar_url || '').trim(),
+          String(avatar_preset || '').trim(),
           is_active ? 1 : 0,
           nextCustomPermsJson,
+          nextSessionVersion,
+          passwordChangedAt,
+          usernameChangedAt,
           nowIso,
           target.id,
         ]
@@ -289,26 +342,38 @@ export class RbacController {
            SET name = ?,
                system_role = ?,
                login_enabled = ?,
-               emp_code = CASE WHEN ? != '' THEN ? ELSE emp_code END,
+               avatar_color = ?,
+               avatar_url = ?,
+               avatar_preset = ?,
                updated_at = ?
            WHERE id = ?`,
           [
             display_name.trim(),
             role,
             is_active ? 1 : 0,
-            rawPass,
-            rawPass,
+            avatar_color,
+            String(avatar_url || '').trim(),
+            String(avatar_preset || '').trim(),
             nowIso,
             target.employee_id,
           ]
         );
       }
 
-      if (!is_active || role !== target.role || rawPass.length > 0) {
+      let freshToken: string | undefined;
+      if (shouldBumpVersion) {
         await this.db.execute(
-          'UPDATE user_sessions SET revoked = 1 WHERE user_id = ? AND id != ?',
-          [target.id, auth.sessionId]
+          'UPDATE user_sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0',
+          [target.id]
         );
+        this.db.invalidateAuthCache();
+        if (target.id === auth.user.id && is_active) {
+          freshToken = await this.db.issueSessionForUser(
+            { id: target.id, session_version: nextSessionVersion },
+            getClientIp(req),
+            String(req.headers['user-agent'] || '')
+          );
+        }
       }
 
       await this.db.recordAuditLog({
@@ -322,7 +387,7 @@ export class RbacController {
       });
 
       await this.realtime.broadcastStoreUpdate('rbac_user_update');
-      return res.json({ ok: true });
+      return res.json({ ok: true, ...(freshToken ? { token: freshToken } : {}) });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }

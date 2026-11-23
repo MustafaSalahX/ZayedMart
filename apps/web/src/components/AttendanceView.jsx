@@ -2,94 +2,128 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ProofUploader from './ProofUploader.jsx';
 import VoiceMicButton from './VoiceMicButton.jsx';
 import {
+  BottomSheet,
+  Button,
+  CockpitMetricStrip,
+  ConfirmSheet,
+  EmptyState,
+  FilterChipRail,
+  GroupedList,
+  GroupedRow,
+  Icon,
+  RoleAvatar,
+  SearchFilterBar,
+  SectionHeader,
+  SkeletonKpiStrip,
+  SkeletonList,
+  StatusDot,
+  ToggleSwitch,
+} from './ui/index.js';
+import {
   postActionWithOfflineSupport,
   apiRequest,
+  verifyAttendanceLog,
   computeShiftDurationHoursClient,
   formatShiftDurationArabicClient,
 } from '../lib/api.js';
 import { playSuccessChime, speakArabicConfirmation } from '../lib/audio.js';
-import { formatTimeArabic, formatTimeWithSeconds } from '../lib/exportUtils.js';
+import {
+  formatTimeArabic,
+  exportDailyAttendanceExcel,
+  buildAttendanceWhatsAppText,
+  openWhatsAppShare,
+} from '../lib/exportUtils.js';
 
-const DEPT_ICONS = {
-  الكل: 'groups',
-  المدير: 'workspace_premium',
-  مشرفين: 'supervisor_account',
-  'مراقب كاميرات': 'videocam',
-  أمن: 'shield_person',
-  نظافة: 'cleaning_services',
-  كاشير: 'point_of_sale',
-  'منسقي ممرات': 'shelves',
-  'ثلاجات وأجبان': 'kitchen',
-  مخزن: 'warehouse',
-  دليفري: 'two_wheeler',
-  'أمن ونظافة': 'shield_person',
-  'إدارة ومشرفين': 'supervisor_account',
+const STATUS_META = {
+  present: { label: 'حاضر', tone: 'success' },
+  on_break: { label: 'بريك', tone: 'warning' },
+  checked_out: { label: 'منصرف', tone: 'primary' },
+  absent: { label: 'غائب', tone: 'neutral' },
 };
+
+function getLogCctvStatus(log) {
+  if (!log) return 'none';
+  if (
+    log.cctv_status === 'confirmed' ||
+    log.cctv_status === 'mismatch' ||
+    log.cctv_status === 'pending'
+  ) {
+    return log.cctv_status;
+  }
+  return Number(log.verified_by_cctv) ? 'confirmed' : 'pending';
+}
+
+function getEmployeeCctvStatus(emp) {
+  if (!emp || !emp.latestLogId) return 'none';
+  if (
+    emp.latestCctvStatus === 'confirmed' ||
+    emp.latestCctvStatus === 'mismatch' ||
+    emp.latestCctvStatus === 'pending'
+  ) {
+    return emp.latestCctvStatus;
+  }
+  return emp.latestVerified ? 'confirmed' : 'pending';
+}
+
+function extractLocalHHMM(isoString) {
+  if (!isoString) return '';
+  const d = new Date(isoString);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+const CCTV_NOTE_PRESETS = [
+  'حضر في الموعد وظاهر على DVR',
+  'لم يظهر بالكاميرا في الموعد',
+  'وقت الكاميرا مختلف عن المسجل',
+  'انصرف قبل الموعد المسجل',
+];
 
 const CALL_ALLOWED_ROLES = new Set(['owner', 'manager', 'supervisor', 'cctv', 'security']);
 
 const QUICK_ATTENDANCE_NOTES = [
-  'حضور منتظم بالموعد',
-  'بإذن مسبق من الإدارة',
+  'حضور منتظم',
+  'بإذن مسبق',
   'تأخير مواصلات',
-  'استراحة غداء / صلاة',
-  'مأمورية خاصة بالماركت',
-  'إضافي بعد الوردية',
+  'غداء / صلاة',
+  'مأمورية خاصة',
+  'إضافي',
 ];
 
-const BREAK_PRESETS = [
-  { minutes: 15, label: '15 دقيقة (صلاة / سريعة)' },
-  { minutes: 30, label: '30 دقيقة (استراحة عادية)' },
-  { minutes: 45, label: '45 دقيقة (غداء)' },
-  { minutes: 60, label: '60 دقيقة (ساعة كاملة)' },
-];
-
-const BREAK_REASONS = ['استراحة غداء', 'صلاة', 'راحة قصيرة', 'إذن خاص', 'ظرف طارئ'];
+const BREAK_PRESETS = [15, 30, 45, 60];
+const BREAK_REASONS = ['غداء', 'صلاة', 'راحة قصيرة', 'إذن خاص', 'طارئ'];
 
 const ACTION_META = {
-  check_in: {
-    label: 'حضور',
-    btnLabel: 'تسجيل حضور الآن',
-    icon: 'login',
-    bg: 'bg-[#146C2E] hover:bg-[#0F5223] text-white',
-    badge: 'bg-[var(--g-green-bg)] text-[var(--g-green)]',
-  },
-  break_start: {
-    label: 'في بريك',
-    btnLabel: 'بداية بريك محدد المدة',
-    icon: 'free_breakfast',
-    bg: 'bg-[#C25E00] hover:bg-[#9A4A00] text-white',
-    badge: 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]',
-  },
-  break_end: {
-    label: 'عودة من البريك',
-    btnLabel: 'عودة من البريك للعمل',
-    icon: 'play_arrow',
-    bg: 'bg-[#0B57D0] hover:bg-[#0842A0] text-white',
-    badge: 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)]',
-  },
-  check_out: {
-    label: 'انصراف',
-    btnLabel: 'تسجيل انصراف نهاية الشفت',
-    icon: 'logout',
-    bg: 'bg-[#B3261E] hover:bg-[#8C1D18] text-white',
-    badge: 'bg-[var(--g-red-bg)] text-[var(--g-red)]',
-  },
+  check_in: { label: 'حضور', dotTone: 'success' },
+  break_start: { label: 'بريك', dotTone: 'warning' },
+  break_end: { label: 'عودة', dotTone: 'primary' },
+  check_out: { label: 'انصراف', dotTone: 'danger' },
 };
 
+/**
+ * Detoxed Attendance & Shift Control View (`الحضور`).
+ * Zero read-only promo box, `<CockpitMetricStrip />`, hairline `<GroupedList>` employee rows
+ * (max 1 StatusDot + 1 quiet meta line + primary action + tap for Details Sheet),
+ * and clean chronological `<GroupedList>` logs.
+ */
 export default function AttendanceView({
   employees = [],
   attendanceLogs = [],
+  storeName = 'زايد مارت',
+  branchName = '',
+  dateKey = '',
   maxBreakMinutes = 30,
   actorName = 'الأمن',
   actorRole = '',
   myProfile = null,
   filterRequest = null,
+  loading = false,
   canWrite = true,
   canSelfAttendance = false,
   canVerify = false,
   canReadLogs = true,
   canPrintCards = true,
+  canExport = false,
   canManageStaff = false,
   canManageRecords = false,
   onJumpToRealData,
@@ -104,18 +138,44 @@ export default function AttendanceView({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDept, setSelectedDept] = useState('الكل');
   const [statusFilter, setStatusFilter] = useState('all');
+
   const [activeEmployee, setActiveEmployee] = useState(null);
   const [note, setNote] = useState('');
   const [allowedBreakMins, setAllowedBreakMins] = useState(maxBreakMinutes || 30);
-  const [breakReason, setBreakReason] = useState('استراحة غداء');
+  const [breakReason, setBreakReason] = useState('غداء');
   const [customTimeHHMM, setCustomTimeHHMM] = useState('');
   const [proofDataUrl, setProofDataUrl] = useState('');
+  const [confirmByCctv, setConfirmByCctv] = useState(true);
+  const [cctvNote, setCctvNote] = useState('');
+  const [cctvObservedTime, setCctvObservedTime] = useState('');
+
   const [submitting, setSubmitting] = useState(false);
+  const [busyEmployeeId, setBusyEmployeeId] = useState('');
+  const [verifyBusyLogId, setVerifyBusyLogId] = useState('');
+  const [exportingExcel, setExportingExcel] = useState(false);
+
   const [editingLog, setEditingLog] = useState(null);
+  const [editSubmitting, setEditSubmitting] = useState(false);
+
+  const [reviewTarget, setReviewTarget] = useState(null);
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+
+  const [exportSheetOpen, setExportSheetOpen] = useState(false);
+
+  const [confirmCheckoutEmp, setConfirmCheckoutEmp] = useState(null);
+  const [confirmReopenEmp, setConfirmReopenEmp] = useState(null);
+  const [deleteLogTarget, setDeleteLogTarget] = useState(null);
+  const [deletingLogId, setDeletingLogId] = useState('');
 
   const cardsSectionRef = useRef(null);
   const canCallPhone = CALL_ALLOWED_ROLES.has(actorRole) || canReadLogs;
   const isOwner = actorRole === 'owner';
+  void canSelfAttendance;
+
+  const resolvedActiveEmployee = useMemo(() => {
+    if (!activeEmployee) return null;
+    return employees.find((e) => e.id === activeEmployee.id) || activeEmployee;
+  }, [activeEmployee, employees]);
 
   function isOwnEmployeeRecord(emp) {
     if (!emp) return false;
@@ -123,15 +183,19 @@ export default function AttendanceView({
     return String(emp.name || '').trim() === String(actorName || '').trim();
   }
 
-  function canActOnEmployee(emp) {
-    if (canWrite) return true;
-    return Boolean(canSelfAttendance && isOwnEmployeeRecord(emp));
+  function canActOnEmployee() {
+    return Boolean(canWrite);
   }
 
-  // Respond to Smart Alert [عرض الاستراحات] button immediately!
   useEffect(() => {
     if (filterRequest?.status) {
-      setStatusFilter(filterRequest.status);
+      const incoming =
+        filterRequest.status === 'mismatch'
+          ? 'mismatch_cctv'
+          : filterRequest.status === 'unverified'
+          ? 'pending_cctv'
+          : filterRequest.status;
+      setStatusFilter(incoming);
       setSelectedDept('الكل');
       setSearchQuery('');
       setTimeout(() => {
@@ -140,16 +204,22 @@ export default function AttendanceView({
     }
   }, [filterRequest]);
 
-  // Live tick every 15s so Smart Break Timers auto-color orange immediately
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 15000);
     return () => clearInterval(id);
   }, []);
 
-  const departments = useMemo(() => {
-    const set = new Set(['الكل']);
-    employees.forEach((e) => set.add(e.department));
-    return Array.from(set);
+  const departmentChipItems = useMemo(() => {
+    const counts = new Map();
+    for (const e of employees) {
+      const d = e.department || 'أخرى';
+      counts.set(d, (counts.get(d) || 0) + 1);
+    }
+    const items = [{ id: 'الكل', label: 'الكل', count: employees.length }];
+    for (const [dept, count] of counts.entries()) {
+      items.push({ id: dept, label: dept, count });
+    }
+    return items;
   }, [employees]);
 
   const scheduledOffCount = useMemo(
@@ -157,9 +227,35 @@ export default function AttendanceView({
     [employees]
   );
 
-  const workedOnDayOffCount = useMemo(
-    () => employees.filter((e) => e.workedOnDayOff).length,
-    [employees]
+  const empCctvLogFlags = useMemo(() => {
+    const map = new Map();
+    for (const log of attendanceLogs) {
+      if (!log?.employee_id) continue;
+      const entry = map.get(log.employee_id) || { hasPending: false, hasMismatch: false };
+      const st = getLogCctvStatus(log);
+      if (st === 'pending') entry.hasPending = true;
+      if (st === 'mismatch') entry.hasMismatch = true;
+      map.set(log.employee_id, entry);
+    }
+    return map;
+  }, [attendanceLogs]);
+
+  const pendingCctvCount = useMemo(
+    () =>
+      employees.filter((emp) => {
+        const st = getEmployeeCctvStatus(emp);
+        return st === 'pending' || Boolean(empCctvLogFlags.get(emp.id)?.hasPending);
+      }).length,
+    [employees, empCctvLogFlags]
+  );
+
+  const mismatchCctvCount = useMemo(
+    () =>
+      employees.filter((emp) => {
+        const st = getEmployeeCctvStatus(emp);
+        return st === 'mismatch' || Boolean(empCctvLogFlags.get(emp.id)?.hasMismatch);
+      }).length,
+    [employees, empCctvLogFlags]
   );
 
   const filteredEmployees = useMemo(() => {
@@ -172,13 +268,126 @@ export default function AttendanceView({
       if (statusFilter === 'checked_out' && emp.currentStatus !== 'checked_out') return false;
       if (statusFilter === 'scheduled_off' && !(emp.isScheduledOff && !emp.workedOnDayOff))
         return false;
+      if (statusFilter === 'pending_cctv') {
+        const st = getEmployeeCctvStatus(emp);
+        if (st !== 'pending' && !empCctvLogFlags.get(emp.id)?.hasPending) return false;
+      }
+      if (statusFilter === 'mismatch_cctv') {
+        const st = getEmployeeCctvStatus(emp);
+        if (st !== 'mismatch' && !empCctvLogFlags.get(emp.id)?.hasMismatch) return false;
+      }
       if (q) {
-        const hay = `${emp.name} ${isOwner ? emp.emp_code || '' : ''} ${emp.department} ${emp.role_title || ''}`.toLowerCase();
+        const hay = `${emp.name || ''} ${isOwner ? emp.emp_code || '' : ''} ${emp.department || ''} ${emp.role_title || ''}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [employees, selectedDept, statusFilter, searchQuery, isOwner]);
+  }, [employees, selectedDept, statusFilter, searchQuery, isOwner, empCctvLogFlags]);
+
+  const displayedLogs = useMemo(() => {
+    if (statusFilter === 'pending_cctv') {
+      return attendanceLogs.filter((l) => getLogCctvStatus(l) === 'pending');
+    }
+    if (statusFilter === 'mismatch_cctv') {
+      return attendanceLogs.filter((l) => getLogCctvStatus(l) === 'mismatch');
+    }
+    return attendanceLogs;
+  }, [attendanceLogs, statusFilter]);
+
+  const presentCount = useMemo(
+    () => employees.filter((e) => e.currentStatus === 'present').length,
+    [employees]
+  );
+  const onBreakCount = useMemo(
+    () => employees.filter((e) => e.currentStatus === 'on_break').length,
+    [employees]
+  );
+  const checkedOutCount = useMemo(
+    () => employees.filter((e) => e.currentStatus === 'checked_out').length,
+    [employees]
+  );
+
+  const attendanceExportData = useMemo(() => {
+    const absentCount = Math.max(
+      0,
+      employees.length - presentCount - onBreakCount - checkedOutCount
+    );
+    const lateCount = employees.filter((e) => (e.lateMinutes || 0) > 0).length;
+    const unverifiedAttendanceCount = attendanceLogs.filter(
+      (l) => getLogCctvStatus(l) === 'pending'
+    ).length;
+    const mismatchAttendanceCount = attendanceLogs.filter(
+      (l) => getLogCctvStatus(l) === 'mismatch'
+    ).length;
+
+    return {
+      dateKey: dateKey || new Date().toISOString().slice(0, 10),
+      settings: {
+        store_name: storeName || 'زايد مارت',
+        branch_name: branchName || '',
+        max_break_minutes: maxBreakMinutes || 30,
+      },
+      employees,
+      attendanceLogs,
+      summary: {
+        totalEmployees: employees.length,
+        presentCount,
+        onBreakCount,
+        checkedOutCount,
+        absentCount,
+        lateCount,
+        unverifiedAttendanceCount,
+        mismatchAttendanceCount,
+      },
+    };
+  }, [
+    employees,
+    attendanceLogs,
+    dateKey,
+    storeName,
+    branchName,
+    maxBreakMinutes,
+    presentCount,
+    onBreakCount,
+    checkedOutCount,
+  ]);
+
+  const metricItems = useMemo(
+    () => [
+      {
+        id: 'all',
+        label: 'الكل',
+        value: employees.length,
+        active: statusFilter === 'all',
+        onClick: () => setStatusFilter('all'),
+      },
+      {
+        id: 'present',
+        label: 'حاضر',
+        value: presentCount,
+        dotTone: presentCount > 0 ? 'success' : '',
+        active: statusFilter === 'present',
+        onClick: () => setStatusFilter((p) => (p === 'present' ? 'all' : 'present')),
+      },
+      {
+        id: 'on_break',
+        label: 'بريك',
+        value: onBreakCount,
+        secondary: onBreakCount > 0 ? `حد ${maxBreakMinutes}د` : '',
+        dotTone: onBreakCount > 0 ? 'warning' : '',
+        active: statusFilter === 'on_break',
+        onClick: () => setStatusFilter((p) => (p === 'on_break' ? 'all' : 'on_break')),
+      },
+      {
+        id: 'checked_out',
+        label: 'منصرف',
+        value: checkedOutCount,
+        active: statusFilter === 'checked_out',
+        onClick: () => setStatusFilter((p) => (p === 'checked_out' ? 'all' : 'checked_out')),
+      },
+    ],
+    [employees.length, presentCount, onBreakCount, checkedOutCount, maxBreakMinutes, statusFilter]
+  );
 
   function getBreakElapsedMinutes(emp) {
     if (emp.currentStatus !== 'on_break') return 0;
@@ -188,20 +397,16 @@ export default function AttendanceView({
   }
 
   function openEmployeeModal(emp, defaultBreakMins = null) {
-    if (!canActOnEmployee(emp)) {
-      if (onOpenPersonLog && canReadLogs) {
-        onOpenPersonLog(emp.id, emp.name);
-        return;
-      }
-      onToast?.('عرض فقط — يمكنك تسجيل حضورك الشخصي فقط أو مراجعة الآدمن لمنحك الصلاحية', 'error');
-      return;
-    }
+    if (!emp) return;
     setActiveEmployee(emp);
     setNote('');
     setAllowedBreakMins(defaultBreakMins || emp.allowedBreakMinutes || maxBreakMinutes || 30);
-    setBreakReason('استراحة غداء');
+    setBreakReason('غداء');
     setCustomTimeHHMM('');
     setProofDataUrl('');
+    setConfirmByCctv(true);
+    setCctvNote('');
+    setCctvObservedTime('');
   }
 
   async function submitAttendance(
@@ -209,8 +414,10 @@ export default function AttendanceView({
     customBreakOverride = null,
     allowReopenShift = false
   ) {
-    if (!activeEmployee || submitting) return;
+    const targetEmp = resolvedActiveEmployee;
+    if (!targetEmp || submitting || !canWrite) return;
     setSubmitting(true);
+    setBusyEmployeeId(targetEmp.id);
     try {
       let manualIso = undefined;
       if (canManageRecords && customTimeHHMM) {
@@ -230,7 +437,7 @@ export default function AttendanceView({
       const res = await postActionWithOfflineSupport(
         '/api/attendance',
         {
-          employee_id: activeEmployee.id,
+          employee_id: targetEmp.id,
           action_type: actionType,
           note: note.trim() || (actionType === 'break_start' ? breakReason : ''),
           allowed_break_minutes: finalBreakMins,
@@ -238,6 +445,15 @@ export default function AttendanceView({
           allow_reopen_shift: Boolean(allowReopenShift),
           recorded_by: actorName,
           ...(manualIso ? { timestamp: manualIso } : {}),
+          ...(canVerify
+            ? {
+                confirm_by_cctv: Boolean(confirmByCctv),
+                ...(confirmByCctv && (cctvObservedTime || customTimeHHMM)
+                  ? { cctv_observed_time: cctvObservedTime || customTimeHHMM }
+                  : {}),
+                ...(confirmByCctv && cctvNote.trim() ? { cctv_note: cctvNote.trim() } : {}),
+              }
+            : {}),
         },
         {
           rawDataUrl: proofDataUrl,
@@ -248,21 +464,14 @@ export default function AttendanceView({
       playSuccessChime(actionType === 'check_out' ? 'out' : 'in');
       const actionAr = ACTION_META[actionType]?.label || 'حركة';
       speakArabicConfirmation(
-        `تم تسجيل ${actionAr}، ${activeEmployee.name}`,
+        `تم تسجيل ${actionAr}، ${targetEmp.name}`,
         voiceConfirmEnabled
       );
 
-      const breakDurationMsg =
-        res.log?.break_duration_minutes > 0
-          ? ` (استغرقت الاستراحة ${res.log.break_duration_minutes} دقيقة)`
-          : actionType === 'break_start'
-            ? ` (لمدة ${finalBreakMins} دقيقة)`
-            : '';
-
       onToast?.(
         res.queuedOffline
-          ? `تم حفظ ${actionAr} (${activeEmployee.name}) محلياً وسيتم الرفع فور عودة الشبكة`
-          : `تم تسجيل ${actionAr} لـ "${activeEmployee.name}"${breakDurationMsg} بنجاح ✓`
+          ? `تم حفظ ${actionAr} (${targetEmp.name}) محلياً`
+          : `تم تسجيل ${actionAr} — ${targetEmp.name}`
       );
       setActiveEmployee(null);
       onRefresh?.();
@@ -270,6 +479,7 @@ export default function AttendanceView({
       onToast?.(err.message || 'تعذر تسجيل الحركة', 'error');
     } finally {
       setSubmitting(false);
+      setBusyEmployeeId('');
     }
   }
 
@@ -280,9 +490,10 @@ export default function AttendanceView({
     customBreakMinutes = null,
     allowReopenShift = false
   ) {
-    e?.stopPropagation();
-    if (!canActOnEmployee(emp) || submitting) return;
+    e?.stopPropagation?.();
+    if (!canActOnEmployee(emp) || submitting || busyEmployeeId) return;
     setSubmitting(true);
+    setBusyEmployeeId(emp.id);
     try {
       const res = await postActionWithOfflineSupport('/api/attendance', {
         employee_id: emp.id,
@@ -291,48 +502,155 @@ export default function AttendanceView({
           actionType === 'break_start' ? Number(customBreakMinutes || maxBreakMinutes || 30) : 0,
         break_reason: actionType === 'break_start' ? 'استراحة' : '',
         allow_reopen_shift: Boolean(allowReopenShift),
-        note: allowReopenShift ? 'إعادة فتح الشفت استثنائياً بقرار الإدارة' : '',
+        note: allowReopenShift ? 'إعادة فتح الشفت استثنائياً' : '',
         recorded_by: actorName,
       });
       playSuccessChime(actionType === 'check_out' ? 'out' : 'in');
       const actionAr = ACTION_META[actionType]?.label || 'حركة';
       speakArabicConfirmation(`تم تسجيل ${actionAr}، ${emp.name}`, voiceConfirmEnabled);
-      const breakDurationMsg =
-        res.log?.break_duration_minutes > 0
-          ? ` (مدة الاستراحة: ${res.log.break_duration_minutes} د)`
-          : actionType === 'break_start'
-            ? ` (مسموح ${customBreakMinutes || maxBreakMinutes || 30} د)`
-            : '';
       onToast?.(
         res.queuedOffline
           ? `تم حفظ ${actionAr} (${emp.name}) محلياً`
-          : `تم تسجيل ${actionAr} لـ "${emp.name}"${breakDurationMsg} بنجاح ✓`
+          : `تم تسجيل ${actionAr} — ${emp.name}`
       );
       onRefresh?.();
     } catch (err) {
       onToast?.(err.message || 'تعذر تسجيل الحركة', 'error');
     } finally {
       setSubmitting(false);
+      setBusyEmployeeId('');
     }
   }
 
   async function handleVerifyLog(logId, e) {
-    e?.stopPropagation();
+    e?.stopPropagation?.();
+    if (!logId || verifyBusyLogId) return;
+    setVerifyBusyLogId(logId);
     try {
-      await apiRequest(`/api/attendance/${logId}/verify`, 'POST');
+      await verifyAttendanceLog(logId, { status: 'confirmed' });
       playSuccessChime('in');
-      onToast?.('تمت المطابقة بالكاميرا ✓');
+      onToast?.('تم تأكيد الحضور بالكاميرا');
       onRefresh?.();
     } catch (err) {
-      onToast?.(err.message, 'error');
+      onToast?.(err?.message || 'تعذر تأكيد الحركة', 'error');
+    } finally {
+      setVerifyBusyLogId('');
     }
   }
 
+  function openCctvReviewForLog(log, e) {
+    e?.stopPropagation?.();
+    if (!log?.id) return;
+    setActiveEmployee(null);
+    const currentStatus = getLogCctvStatus(log);
+    const meta = ACTION_META[log.action_type] || ACTION_META.check_in;
+    setReviewTarget({
+      logId: log.id,
+      employeeName: log.employee_name || 'موظف',
+      department: log.department || '',
+      actionLabel: meta.label,
+      recordedTimeIso: log.timestamp || '',
+      recordedBy: log.recorded_by || '',
+      currentStatus,
+      status: currentStatus === 'mismatch' ? 'mismatch' : 'confirmed',
+      observedTime: log.cctv_observed_time || extractLocalHHMM(log.timestamp),
+      note: log.cctv_note || '',
+    });
+  }
+
+  function openCctvReviewForEmployee(emp, e) {
+    e?.stopPropagation?.();
+    if (!emp?.latestLogId) return;
+    setActiveEmployee(null);
+    const matchedLog = attendanceLogs.find((l) => l.id === emp.latestLogId);
+    if (matchedLog) {
+      openCctvReviewForLog(matchedLog, e);
+      return;
+    }
+    const currentStatus = getEmployeeCctvStatus(emp);
+    const actionLabel = ACTION_META[emp.latestActionType]?.label || 'حضور';
+    setReviewTarget({
+      logId: emp.latestLogId,
+      employeeName: emp.name || 'موظف',
+      department: emp.department || '',
+      actionLabel,
+      recordedTimeIso: emp.latestActionTime || emp.checkInTime || '',
+      recordedBy: emp.latestRecordedBy || '',
+      currentStatus,
+      status: currentStatus === 'mismatch' ? 'mismatch' : 'confirmed',
+      observedTime:
+        emp.latestCctvObservedTime ||
+        extractLocalHHMM(emp.latestActionTime || emp.checkInTime),
+      note: emp.latestCctvNote || '',
+    });
+  }
+
+  async function handleSubmitCctvReview(e) {
+    e?.preventDefault?.();
+    if (!reviewTarget?.logId || reviewSubmitting) return;
+    setReviewSubmitting(true);
+    try {
+      await verifyAttendanceLog(reviewTarget.logId, {
+        status: reviewTarget.status,
+        observed_time: (reviewTarget.observedTime || '').trim(),
+        note: (reviewTarget.note || '').trim(),
+      });
+      playSuccessChime(reviewTarget.status === 'mismatch' ? 'alert' : 'in');
+      onToast?.(
+        reviewTarget.status === 'mismatch'
+          ? `تم تسجيل تعارض كاميرا — ${reviewTarget.employeeName}`
+          : `تم تأكيد الحضور — ${reviewTarget.employeeName}`
+      );
+      setReviewTarget(null);
+      onRefresh?.();
+    } catch (err) {
+      onToast?.(err?.message || 'تعذر حفظ المراجعة', 'error');
+    } finally {
+      setReviewSubmitting(false);
+    }
+  }
+
+  async function handleExportAttendanceExcel() {
+    if (exportingExcel) return;
+    setExportingExcel(true);
+    try {
+      await exportDailyAttendanceExcel(attendanceExportData);
+      onToast?.('تم تحميل ملف Excel');
+    } catch (err) {
+      onToast?.(err?.message || 'تعذر تصدير Excel', 'error');
+    } finally {
+      setExportingExcel(false);
+    }
+  }
+
+  async function handleCopyAttendanceText() {
+    try {
+      const text = buildAttendanceWhatsAppText(attendanceExportData);
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      onToast?.('تم نسخ التقرير');
+    } catch {
+      onToast?.('تعذر النسخ التلقائي', 'error');
+    }
+  }
+
+  function handleShareAttendanceWhatsApp() {
+    const text = buildAttendanceWhatsAppText(attendanceExportData);
+    openWhatsAppShare(text);
+  }
+
   function openEditAttendanceLog(log) {
-    const dt = new Date(log.timestamp);
-    const hhmm = !Number.isNaN(dt.getTime())
-      ? `${String(dt.getHours()).padStart(2, '0')}:${String(dt.getMinutes()).padStart(2, '0')}`
-      : '08:00';
+    const hhmm = extractLocalHHMM(log.timestamp) || '08:00';
     setEditingLog({
       ...log,
       hhmm,
@@ -340,8 +658,9 @@ export default function AttendanceView({
   }
 
   async function handleSaveEditedLog(e) {
-    e.preventDefault();
-    if (!editingLog) return;
+    e?.preventDefault?.();
+    if (!editingLog || editSubmitting) return;
+    setEditSubmitting(true);
     try {
       const baseDt = new Date(editingLog.timestamp);
       const [hh, mm] = (editingLog.hhmm || '08:00').split(':').map(Number);
@@ -357,717 +676,568 @@ export default function AttendanceView({
         break_reason: editingLog.break_reason || '',
         note: editingLog.note || '',
         verified_by_cctv: Boolean(editingLog.verified_by_cctv),
+        cctv_status: editingLog.verified_by_cctv
+          ? 'confirmed'
+          : editingLog.cctv_status === 'mismatch'
+          ? 'mismatch'
+          : 'pending',
       });
       setEditingLog(null);
-      onToast?.('تم تعديل سجل الحضور بنجاح ✓');
+      onToast?.('تم حفظ التعديل');
       onRefresh?.();
     } catch (err) {
-      onToast?.(err.message, 'error');
+      onToast?.(err.message || 'تعذر حفظ التعديل', 'error');
+    } finally {
+      setEditSubmitting(false);
     }
   }
 
-  async function handleDeleteAttendanceLog(log) {
-    if (!window.confirm(`حذف حركة "${ACTION_META[log.action_type]?.label || log.action_type}" للموظف "${log.employee_name}"؟`)) {
-      return;
-    }
+  async function handleConfirmDeleteLog() {
+    if (!deleteLogTarget || deletingLogId) return;
+    setDeletingLogId(deleteLogTarget.id);
     try {
-      await apiRequest(`/api/attendance/${log.id}`, 'DELETE');
-      onToast?.('تم حذف حركة الحضور');
+      await apiRequest(`/api/attendance/${deleteLogTarget.id}`, 'DELETE');
+      setDeleteLogTarget(null);
+      onToast?.('تم حذف الحركة');
       onRefresh?.();
     } catch (err) {
-      onToast?.(err.message, 'error');
+      onToast?.(err.message || 'تعذر حذف الحركة', 'error');
+    } finally {
+      setDeletingLogId('');
     }
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <SkeletonKpiStrip count={4} />
+        <SkeletonList rows={5} />
+      </div>
+    );
+  }
+
+  const hasAnyActiveFilter =
+    statusFilter !== 'all' || selectedDept !== 'الكل' || searchQuery.trim() !== '';
+
+  const secondaryFilterChips = [];
+  if (canVerify) {
+    secondaryFilterChips.push(
+      { id: 'pending_cctv', label: 'بانتظار الكاميرا', count: pendingCctvCount },
+      {
+        id: 'mismatch_cctv',
+        label: 'تعارض كاميرا',
+        count: mismatchCctvCount,
+        alert: mismatchCctvCount > 0,
+      }
+    );
+  }
+  if (scheduledOffCount > 0) {
+    secondaryFilterChips.push({
+      id: 'scheduled_off',
+      label: 'إجازة اليوم',
+      count: scheduledOffCount,
+    });
   }
 
   return (
     <div className="space-y-5">
-      {/* Google Search Bar + Quick QR / Print Badges Actions */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
-        <div className="g-search-bar flex-1 flex items-center gap-2.5 px-4 py-2.5">
-          <span className="ms-icon text-[var(--g-muted)]">search</span>
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="ابحث باسم الموظف أو القسم أو الوظيفة..."
-            className="bg-transparent border-none outline-none w-full text-sm sm:text-base text-[var(--g-text)]"
-          />
-          {searchQuery && (
-            <button
-              type="button"
-              onClick={() => setSearchQuery('')}
-              className="text-[var(--g-muted)] flex items-center"
-            >
-              <span className="ms-icon text-lg">close</span>
-            </button>
-          )}
-        </div>
+      {/* 1. Borderless Header & Toolbar */}
+      <div className="space-y-3">
+        <SectionHeader
+          title="الحضور"
+          subtitle={!canWrite ? 'للعرض فقط' : dateKey}
+          actions={
+            <div className="flex items-center gap-1.5 flex-wrap">
+              {canWrite && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon="qr_code_scanner"
+                  onClick={() => onOpenQrModal?.('scan')}
+                >
+                  QR
+                </Button>
+              )}
 
-        <div className="flex items-center gap-2 shrink-0">
-          {canWrite && (
-            <button
-              type="button"
-              onClick={() => onOpenQrModal?.('scan')}
-              className="flex-1 sm:flex-none px-4 py-2.5 rounded-full bg-[var(--g-primary)] text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-1.5 shadow-xs"
-            >
-              <span className="ms-icon filled text-lg">qr_code_scanner</span>
-              <span>مسح كرت QR</span>
-            </button>
-          )}
-          {canPrintCards && (
-            <button
-              type="button"
-              onClick={() => onOpenQrModal?.('cards')}
-              className="flex-1 sm:flex-none px-4 py-2.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 hover:border-[var(--g-primary)]"
-            >
-              <span className="ms-icon text-lg text-[var(--g-primary)]">print</span>
-              <span>طباعة كروت QR ({employees.length})</span>
-            </button>
-          )}
-        </div>
-      </div>
+              {(canPrintCards || canExport || canWrite || canVerify) && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon="ios_share"
+                  onClick={() => setExportSheetOpen(true)}
+                  className="md:hidden"
+                >
+                  تصدير
+                </Button>
+              )}
 
-      {/* Quick Status Summary Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3.5">
-        {[
-          {
-            id: 'all',
-            label: 'إجمالي الموظفين (شفتات مرنة)',
-            count: employees.length,
-            icon: 'groups',
-            tone: 'text-[var(--g-primary)] bg-[var(--g-primary-container)]',
-          },
-          {
-            id: 'present',
-            label: 'حاضر الآن بالشفت ✓',
-            count: employees.filter((e) => e.currentStatus === 'present').length,
-            icon: 'how_to_reg',
-            tone: 'text-[var(--g-green)] bg-[var(--g-green-bg)]',
-          },
-          {
-            id: 'on_break',
-            label: 'في بريك حالياً ☕',
-            count: employees.filter((e) => e.currentStatus === 'on_break').length,
-            icon: 'free_breakfast',
-            tone: 'text-[var(--g-yellow)] bg-[var(--g-yellow-bg)]',
-          },
-          {
-            id: 'checked_out',
-            label: 'تم الانصراف ✓',
-            count: employees.filter((e) => e.currentStatus === 'checked_out').length,
-            icon: 'logout',
-            tone: 'text-[var(--g-red)] bg-[var(--g-red-bg)]',
-          },
-        ].map((card) => {
-          const selected = statusFilter === card.id;
-          return (
-            <button
-              key={card.id}
-              type="button"
-              onClick={() => setStatusFilter(selected ? 'all' : card.id)}
-              className={`g-card p-3 sm:p-4 text-right flex items-center justify-between transition-all ${
-                selected ? 'ring-2 ring-[var(--g-primary)]' : ''
-              }`}
-            >
-              <div>
-                <div className="text-[11px] sm:text-xs text-[var(--g-muted)] font-semibold">
-                  {card.label}
-                </div>
-                <div className="text-xl sm:text-2xl font-extrabold num-ltr mt-0.5">
-                  {card.count}
-                </div>
+              <div className="hidden md:flex items-center gap-1.5 flex-wrap">
+                {canPrintCards && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon="print"
+                    onClick={() => onOpenQrModal?.('cards')}
+                  >
+                    كروت QR
+                  </Button>
+                )}
+                {(canExport || canWrite || canVerify) && (
+                  <>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      icon="table_view"
+                      loading={exportingExcel}
+                      onClick={handleExportAttendanceExcel}
+                    >
+                      Excel
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon="content_copy"
+                      onClick={handleCopyAttendanceText}
+                    >
+                      نسخ
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon="share"
+                      onClick={handleShareAttendanceWhatsApp}
+                    >
+                      واتساب
+                    </Button>
+                  </>
+                )}
               </div>
-              <div className={`w-10 h-10 sm:w-11 sm:h-11 rounded-2xl flex items-center justify-center ${card.tone}`}>
-                <span className="ms-icon filled text-xl sm:text-2xl">{card.icon}</span>
-              </div>
-            </button>
-          );
-        })}
+            </div>
+          }
+        />
+
+        <SearchFilterBar
+          value={searchQuery}
+          onChange={setSearchQuery}
+          placeholder="بحث بالاسم أو القسم..."
+        />
       </div>
 
-      {/* Subtle Weekly Day-Off Summary / Filter Bar */}
-      {(scheduledOffCount > 0 || workedOnDayOffCount > 0) && (
-        <div className="flex flex-wrap items-center gap-2">
-          {scheduledOffCount > 0 && (
-            <button
-              type="button"
-              onClick={() =>
-                setStatusFilter((prev) => (prev === 'scheduled_off' ? 'all' : 'scheduled_off'))
-              }
-              className={`min-h-[36px] px-3 py-1.5 rounded-full text-xs font-extrabold inline-flex items-center gap-1.5 border transition-all cursor-pointer ${
-                statusFilter === 'scheduled_off'
-                  ? 'bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] border-transparent ring-2 ring-[var(--g-primary)]'
-                  : 'bg-[var(--g-surface)] text-[var(--g-on-secondary-container)] border-[var(--g-border)] hover:border-[var(--g-primary)]'
-              }`}
-            >
-              <span className="ms-icon text-base text-[var(--g-primary)]">event_available</span>
-              <span>إجازة أسبوعية اليوم:</span>
-              <span className="num-ltr font-black">{scheduledOffCount}</span>
-            </button>
-          )}
-          {workedOnDayOffCount > 0 && (
-            <span className="min-h-[36px] px-3 py-1.5 rounded-full text-xs font-extrabold inline-flex items-center gap-1.5 bg-[var(--g-purple-bg)] text-[var(--g-purple)] border border-[var(--g-purple-border)]/30">
-              <span className="ms-icon text-base">workspace_premium</span>
-              <span>حضور في يوم إجازة (إضافي):</span>
-              <span className="num-ltr font-black">{workedOnDayOffCount}</span>
-            </span>
-          )}
-        </div>
-      )}
+      {/* 2. Adaptive 4-Metric Cockpit Strip */}
+      <CockpitMetricStrip items={metricItems} columns={4} />
 
-      {/* Department Filter Chips */}
-      <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-0.5">
-        {departments.map((dept) => {
-          const active = selectedDept === dept;
-          return (
-            <button
-              key={dept}
-              type="button"
-              onClick={() => setSelectedDept(dept)}
-              className={`flex items-center gap-1.5 px-4 py-2 rounded-full text-xs sm:text-sm whitespace-nowrap border transition-all ${
-                active
-                  ? 'g-pill-active border-transparent shadow-2xs'
-                  : 'bg-[var(--g-surface)] border-[var(--g-border)] text-[var(--g-text)] font-semibold'
-              }`}
-            >
-              <span className="ms-icon text-base sm:text-lg">
-                {DEPT_ICONS[dept] || 'badge'}
-              </span>
-              <span>{dept}</span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Employee Touch Cards Grid */}
-      <div ref={cardsSectionRef} className="scroll-mt-24">
-        {employees.length === 0 ? (
-          <div className="g-card p-6 sm:p-8 text-center space-y-3 border-2 border-dashed border-[var(--g-border)]">
-            <div className="w-14 h-14 mx-auto rounded-3xl bg-[var(--g-primary-container)] text-[var(--g-primary)] flex items-center justify-center">
-              <span className="ms-icon filled text-3xl">group_add</span>
-            </div>
-            <div>
-              <h3 className="text-base sm:text-lg font-extrabold m-0">
-                قاعدة البيانات نظيفة وجاهزة لإدخال موظفي زايد مارت الحقيقيين
-              </h3>
-              <p className="text-xs sm:text-sm text-[var(--g-muted)] m-0 mt-1 max-w-lg mx-auto">
-                أضف موظفي الماركت والكاشيرية والأمن الحقيقيين (شفت 8 أو 10 أو 12 ساعة أو مخصص) ليتم تفعيل حساباتهم وكروت الـ QR لهم فوراً.
-              </p>
-            </div>
-            {canManageStaff && (
-              <button
-                type="button"
-                onClick={() => onJumpToRealData?.('staff')}
-                className="px-6 py-3 rounded-full bg-[var(--g-primary)] text-white text-xs sm:text-sm font-extrabold inline-flex items-center gap-2 shadow-xs"
-              >
-                <span className="ms-icon filled text-lg">person_add</span>
-                <span>+ إضافة موظفي الماركت الحقيقيين الآن</span>
-              </button>
-            )}
-          </div>
-        ) : filteredEmployees.length === 0 ? (
-          <div className="g-card p-6 text-center space-y-2.5">
-            <div className="text-sm font-extrabold text-[var(--g-muted)]">
-              لا يوجد موظفون مطابقون للفلتر المختار حالياً.
-            </div>
-            {statusFilter !== 'all' && (
+      {/* 3. Filters */}
+      <div className="space-y-2">
+        {secondaryFilterChips.length > 0 && (
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <FilterChipRail
+              items={secondaryFilterChips}
+              activeId={statusFilter}
+              onSelect={(id) => setStatusFilter((prev) => (prev === id ? 'all' : id))}
+            />
+            {hasAnyActiveFilter && (
               <button
                 type="button"
                 onClick={() => {
                   setStatusFilter('all');
                   setSelectedDept('الكل');
+                  setSearchQuery('');
                 }}
-                className="px-4 py-2 rounded-full bg-[var(--g-primary)] text-white text-xs font-extrabold"
+                className="text-xs font-medium text-primary hover:underline cursor-pointer min-h-[36px] px-1"
               >
-                عرض كل الموظفين ({employees.length})
+                إعادة ضبط
               </button>
             )}
           </div>
+        )}
+
+        <FilterChipRail
+          items={departmentChipItems}
+          activeId={selectedDept}
+          onSelect={setSelectedDept}
+        />
+      </div>
+
+      {/* 4. Detoxed Hairline Employee List */}
+      <div ref={cardsSectionRef} className="scroll-mt-24">
+        {employees.length === 0 ? (
+          <EmptyState
+            title="لا يوجد موظفون"
+            actionLabel={canManageStaff ? 'إضافة موظف' : ''}
+            actionIcon="add"
+            onAction={canManageStaff ? () => onJumpToRealData?.('staff') : undefined}
+          />
+        ) : filteredEmployees.length === 0 ? (
+          <EmptyState
+            compact
+            title="لا توجد نتائج مطابقة"
+            actionLabel={hasAnyActiveFilter ? 'عرض الكل' : ''}
+            onAction={
+              hasAnyActiveFilter
+                ? () => {
+                    setStatusFilter('all');
+                    setSelectedDept('الكل');
+                    setSearchQuery('');
+                  }
+                : undefined
+            }
+          />
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+          <GroupedList>
             {filteredEmployees.map((emp) => {
               const breakMins = getBreakElapsedMinutes(emp);
               const empAllowedBreak = emp.allowedBreakMinutes || maxBreakMinutes || 30;
-              const breakExceeded = emp.currentStatus === 'on_break' && breakMins > empAllowedBreak;
-              const needsCctvVerify = emp.latestLogId && !emp.latestVerified && canVerify;
-              const canEmpWrite = canActOnEmployee(emp);
+              const breakExceeded =
+                emp.currentStatus === 'on_break' && breakMins > empAllowedBreak;
+              const cctvStatus = getEmployeeCctvStatus(emp);
+              const canEmpWrite = canActOnEmployee();
               const isSelfCard = isOwnEmployeeRecord(emp);
-              const shiftHours =
-                emp.shiftDurationHours ||
-                computeShiftDurationHoursClient(emp.shift_start, emp.shift_end);
-              const shiftLabel =
-                emp.shiftDurationLabel || formatShiftDurationArabicClient(shiftHours);
-              const canCheckInAfterCheckout = Boolean(emp.nextCheckInAvailability?.canCheckIn);
+              const isCardBusy = busyEmployeeId === emp.id;
+              const canCheckInAfterCheckout = Boolean(
+                emp.nextCheckInAvailability?.canCheckIn
+              );
               const nextWindowTimeStr =
-                emp.nextCheckInAvailability?.windowOpenTimeStr || emp.shift_start || '08:00';
-              const initials = emp.name
-                .split(' ')
-                .slice(0, 2)
-                .map((w) => w[0])
-                .join(' ');
+                emp.nextCheckInAvailability?.windowOpenTimeStr ||
+                emp.shift_start ||
+                '08:00';
+
+              const isOffToday =
+                emp.currentStatus === 'absent' &&
+                emp.isScheduledOff &&
+                !emp.workedOnDayOff;
+
+              const dotTone = isOffToday
+                ? 'purple'
+                : emp.currentStatus === 'present'
+                ? 'success'
+                : emp.currentStatus === 'on_break'
+                ? breakExceeded
+                  ? 'danger'
+                  : 'warning'
+                : emp.currentStatus === 'checked_out'
+                ? 'primary'
+                : 'neutral';
+
+              const dotLabel = isOffToday
+                ? 'إجازة'
+                : emp.currentStatus === 'present'
+                ? 'حاضر'
+                : emp.currentStatus === 'on_break'
+                ? `بريك ${breakMins}د`
+                : emp.currentStatus === 'checked_out'
+                ? 'منصرف'
+                : 'غائب';
+
+              const metaParts = [
+                emp.department,
+                `${emp.shift_start || '08:00'}–${emp.shift_end || '20:00'}`,
+                emp.checkInTime ? extractLocalHHMM(emp.checkInTime) : '',
+                isOwner && emp.emp_code ? `#${emp.emp_code}` : '',
+              ].filter(Boolean);
 
               return (
                 <div
                   key={emp.id}
-                  onClick={() => openEmployeeModal(emp)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => e.key === 'Enter' && openEmployeeModal(emp)}
-                  className={`g-card g-card-interactive p-4 text-right flex flex-col justify-between gap-3 cursor-pointer ${
-                    breakExceeded ? 'g-smart-timer-orange' : ''
-                  } ${isSelfCard ? 'ring-2 ring-[var(--g-primary)]/40' : ''}`}
+                  className={`min-h-[60px] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                    isSelfCard ? 'bg-surface-tint' : ''
+                  }`}
                 >
-                  <div className="flex items-start justify-between gap-2 w-full">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div
-                        style={{ backgroundColor: emp.avatar_color || '#0B57D0' }}
-                        className="w-12 h-12 rounded-2xl text-white font-extrabold text-sm flex items-center justify-center shrink-0 shadow-2xs"
-                      >
-                        {initials}
+                  {/* Tappable Employee Info -> Details Sheet */}
+                  <button
+                    type="button"
+                    onClick={() => openEmployeeModal(emp)}
+                    className="flex items-center gap-3 min-w-0 flex-1 text-start bg-transparent border-0 p-0 cursor-pointer"
+                  >
+                    <RoleAvatar
+                      src={emp.avatar_url || ''}
+                      name={emp.name}
+                      role={emp.system_role || ''}
+                      color={emp.avatar_color || ''}
+                      preset="initials_gradient"
+                      size="sm"
+                      shape="circle"
+                    />
+
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap min-w-0">
+                        <span className="text-sm font-semibold text-ink truncate">
+                          {emp.name}
+                        </span>
+                        <StatusDot
+                          tone={dotTone}
+                          label={dotLabel}
+                          tintedText={dotTone === 'danger' || dotTone === 'warning'}
+                        />
+                        {cctvStatus === 'confirmed' && (
+                          <Icon
+                            name="verified"
+                            size={14}
+                            filled
+                            className="text-success shrink-0"
+                            ariaLabel="مؤكد بالكاميرا"
+                          />
+                        )}
                       </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="font-extrabold text-base truncate">{emp.name}</span>
-                          {isSelfCard && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-[var(--g-primary-container)] text-[var(--g-primary)] font-black shrink-0">
-                              أنت
-                            </span>
-                          )}
-                          {isOwner && emp.emp_code && (
-                            <span
-                              title="الرمز السري (يظهر للأدمن فقط)"
-                              className="num-ltr text-[10px] px-1.5 py-0.5 rounded-md bg-[var(--g-surface-variant)] text-[var(--g-muted)] font-bold shrink-0"
-                            >
-                              🔑 {emp.emp_code}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-xs text-[var(--g-muted)] truncate mt-0.5">
-                          {emp.department}
-                          {emp.role_title ? ` • ${emp.role_title}` : ''}
-                        </div>
-                        <div className="text-[11px] text-[var(--g-muted)] num-ltr mt-0.5 font-semibold">
-                          ⏰ {emp.shift_start || '08:00'} → {emp.shift_end || '20:00'} ({shiftLabel})
-                        </div>
+
+                      <div className="text-xs text-ink-muted truncate num-ltr mt-0.5">
+                        {metaParts.join(' · ')}
+                        {emp.lateMinutes > 0 && (
+                          <span className="text-warning font-medium">
+                            {' '}
+                            · تأخير {emp.lateMinutes}د
+                          </span>
+                        )}
+                        {cctvStatus === 'mismatch' && (
+                          <span className="text-danger font-medium"> · تعارض كاميرا</span>
+                        )}
+                        {breakExceeded && (
+                          <span className="text-danger font-medium">
+                            {' '}
+                            · تجاوز +{breakMins - empAllowedBreak}د
+                          </span>
+                        )}
                       </div>
                     </div>
+                  </button>
 
-                    <div className="flex flex-col items-end gap-1 shrink-0">
-                      {emp.currentStatus === 'absent' && emp.isScheduledOff && !emp.workedOnDayOff ? (
-                        <span className="text-xs font-extrabold px-2.5 py-1 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] inline-flex items-center gap-1">
-                          <span className="ms-icon text-sm">event_available</span>
-                          <span>إجازة أسبوعية</span>
-                        </span>
-                      ) : (
-                        <span
-                          className={`text-xs font-extrabold px-2.5 py-1 rounded-full ${
-                            emp.currentStatus === 'present'
-                              ? 'bg-[var(--g-green-bg)] text-[var(--g-green)]'
-                              : emp.currentStatus === 'on_break'
-                              ? breakExceeded
-                                ? 'bg-[#C25E00] text-white'
-                                : 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]'
-                              : emp.currentStatus === 'checked_out'
-                              ? 'bg-[var(--g-red-bg)] text-[var(--g-red)]'
-                              : 'bg-[var(--g-surface-variant)] text-[var(--g-muted)]'
-                          }`}
+                  {/* End Action Strip */}
+                  <div className="flex items-center justify-end gap-1.5 flex-wrap shrink-0">
+                    {canVerify &&
+                      emp.latestLogId &&
+                      (cctvStatus === 'pending' || cctvStatus === 'mismatch') && (
+                        <Button
+                          variant={cctvStatus === 'mismatch' ? 'dangerTonal' : 'secondary'}
+                          size="sm"
+                          loading={verifyBusyLogId === emp.latestLogId}
+                          onClick={(e) => handleVerifyLog(emp.latestLogId, e)}
                         >
-                          {emp.currentStatus === 'present'
-                            ? 'حاضر ✓'
-                            : emp.currentStatus === 'on_break'
-                            ? `في بريك ${breakMins}/${empAllowedBreak} د`
-                            : emp.currentStatus === 'checked_out'
-                            ? 'منصرف ✓'
-                            : 'لم يحضر'}
-                        </span>
+                          تأكيد
+                        </Button>
                       )}
 
-                      {emp.workedOnDayOff && (
-                        <span className="px-2 py-0.5 rounded-full bg-[var(--g-purple-bg)] text-[var(--g-purple)] text-[10px] font-extrabold inline-flex items-center gap-1">
-                          <span className="ms-icon text-xs">workspace_premium</span>
-                          <span>عمل في يوم إجازة (إضافي)</span>
-                        </span>
-                      )}
-
-                      {emp.isCrossDayShift && (
-                        <span className="px-2 py-0.5 rounded-full bg-[var(--g-purple-bg)] text-[var(--g-purple)] text-[10px] font-extrabold">
-                          🌙 شفت ممتد ({emp.shiftDateKey})
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Break summary or live break alert */}
-                  {(emp.currentStatus === 'on_break' || emp.totalBreakMinutes > 0) && (
-                    <div className="px-2.5 py-1.5 rounded-xl bg-[var(--g-surface-variant)] flex items-center justify-between text-[11px] font-bold">
-                      {emp.currentStatus === 'on_break' ? (
-                        <span className={breakExceeded ? 'text-[var(--g-orange-text)] font-extrabold' : 'text-[var(--g-yellow)]'}>
-                          ☕ في بريك منذ {breakMins} د (مسموح {empAllowedBreak} د)
-                        </span>
-                      ) : (
-                        <span className="text-[var(--g-muted)]">
-                          ☕ إجمالي البريك بالشفت: {emp.totalBreakMinutes} دقيقة ({emp.breaksCount || 1} مرة)
-                        </span>
-                      )}
-                      {breakExceeded && (
-                        <span className="px-1.5 py-0.5 rounded bg-[#B3261E] text-white text-[10px] font-extrabold">
-                          تجاوز +{breakMins - empAllowedBreak} د!
-                        </span>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Direct 1-Tap Phone Call Button */}
-                  {canCallPhone && emp.phone && (
-                    <div onClick={(e) => e.stopPropagation()} className="flex items-center">
-                      <a
-                        href={`tel:${emp.phone}`}
-                        onClick={(e) => e.stopPropagation()}
-                        className="w-full min-h-[36px] px-3 py-1 rounded-xl bg-[var(--g-primary-container)]/50 hover:bg-[var(--g-primary-container)] text-[var(--g-primary)] border border-[var(--g-primary)]/30 text-xs font-extrabold flex items-center justify-between gap-2 active:scale-95 transition-all no-underline"
-                        title={`اتصال مباشر بـ ${emp.name}`}
+                    {canEmpWrite && emp.currentStatus === 'absent' && (
+                      <Button
+                        variant="success"
+                        size="sm"
+                        loading={isCardBusy}
+                        disabled={submitting && !isCardBusy}
+                        onClick={(e) => handleQuickCardAction(emp, 'check_in', e)}
                       >
-                        <span className="flex items-center gap-1.5">
-                          <span className="ms-icon filled text-base">call</span>
-                          <span>اتصال مباشر</span>
-                        </span>
-                        <span className="num-ltr font-black">{emp.phone}</span>
-                      </a>
-                    </div>
-                  )}
+                        حضور
+                      </Button>
+                    )}
 
-                  {/* CCTV Verification Stamp */}
-                  {needsCctvVerify && (
-                    <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-[var(--g-yellow-bg)]/70">
-                      <span className="text-[11px] font-bold text-[var(--g-yellow)]">
-                        سُجل عبر ({emp.latestRecordedBy}) بدون صورة
-                      </span>
-                      <button
-                        type="button"
-                        onClick={(e) => handleVerifyLog(emp.latestLogId, e)}
-                        className="w-full sm:w-auto px-2.5 py-1.5 rounded-lg bg-[#146C2E] text-white text-[11px] font-extrabold flex items-center justify-center gap-1 shrink-0"
-                      >
-                        <span className="ms-icon filled text-sm">verified</span>
-                        <span>تمت المطابقة بالكاميرا ✓</span>
-                      </button>
-                    </div>
-                  )}
+                    {canEmpWrite && emp.currentStatus === 'present' && (
+                      <>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          disabled={submitting}
+                          onClick={() => openEmployeeModal(emp, 30)}
+                        >
+                          بريك
+                        </Button>
+                        <Button
+                          variant="dangerTonal"
+                          size="sm"
+                          disabled={submitting}
+                          onClick={() => setConfirmCheckoutEmp(emp)}
+                        >
+                          انصراف
+                        </Button>
+                      </>
+                    )}
 
-                  {canEmpWrite && (
-                    <div
-                      onClick={(e) => e.stopPropagation()}
-                      className="space-y-1.5 pt-2 border-t border-[var(--g-border)] w-full"
-                    >
-                      <div className="flex flex-wrap items-center gap-1.5 w-full">
-                        {emp.currentStatus === 'absent' && (
-                          <button
-                            type="button"
-                            disabled={submitting}
+                    {canEmpWrite && emp.currentStatus === 'on_break' && (
+                      <>
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          loading={isCardBusy}
+                          disabled={submitting && !isCardBusy}
+                          onClick={(e) => handleQuickCardAction(emp, 'break_end', e)}
+                        >
+                          عودة
+                        </Button>
+                        <Button
+                          variant="dangerTonal"
+                          size="sm"
+                          disabled={submitting}
+                          onClick={() => setConfirmCheckoutEmp(emp)}
+                        >
+                          انصراف
+                        </Button>
+                      </>
+                    )}
+
+                    {canEmpWrite && emp.currentStatus === 'checked_out' && (
+                      <>
+                        {canCheckInAfterCheckout ? (
+                          <Button
+                            variant="success"
+                            size="sm"
+                            loading={isCardBusy}
+                            disabled={submitting && !isCardBusy}
                             onClick={(e) => handleQuickCardAction(emp, 'check_in', e)}
-                            className="flex-1 min-h-[40px] px-3 py-1.5 rounded-xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-xs sm:text-sm font-black flex items-center justify-center gap-1.5 active:scale-95 transition-all shadow-2xs"
                           >
-                            <span className="ms-icon filled text-base">login</span>
-                            <span>تسجيل حضور</span>
-                          </button>
-                        )}
-
-                        {emp.currentStatus === 'present' && (
+                            حضور
+                          </Button>
+                        ) : (
                           <>
-                            <span
-                              title="الموظف حاضر الآن في الشفت"
-                              className="min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-green-bg)] text-[var(--g-green)] border border-[var(--g-green)]/30 text-xs font-black flex items-center justify-center gap-1 shrink-0"
-                            >
-                              <span className="ms-icon filled text-base">check_circle</span>
-                              <span>حاضر ✓</span>
+                            <span className="num-ltr text-xs text-ink-muted px-1">
+                              يفتح {nextWindowTimeStr}
                             </span>
-                            <button
-                              type="button"
-                              disabled={submitting}
-                              onClick={() => openEmployeeModal(emp, 30)}
-                              className="flex-1 min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] border border-[var(--g-yellow-border)]/35 text-xs font-extrabold flex items-center justify-center gap-1 active:scale-95"
-                              title="بدء بريك وتحديد المدة"
-                            >
-                              <span className="ms-icon text-base">coffee</span>
-                              <span>بداية بريك</span>
-                            </button>
-                            <button
-                              type="button"
-                              disabled={submitting}
-                              onClick={(e) => handleQuickCardAction(emp, 'check_out', e)}
-                              className="min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-red-bg)] text-[var(--g-red)] border border-[var(--g-red-border)]/30 text-xs font-extrabold flex items-center justify-center gap-1 active:scale-95"
-                            >
-                              <span className="ms-icon text-base">logout</span>
-                              <span>انصراف</span>
-                            </button>
-                          </>
-                        )}
-
-                        {emp.currentStatus === 'on_break' && (
-                          <>
-                            <button
-                              type="button"
-                              disabled={submitting}
-                              onClick={(e) => handleQuickCardAction(emp, 'break_end', e)}
-                              className="flex-1 min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-primary)] text-white text-xs font-extrabold flex items-center justify-center gap-1 active:scale-95 shadow-2xs"
-                            >
-                              <span className="ms-icon text-base">work_history</span>
-                              <span>عودة من البريك ({breakMins} د) ✓</span>
-                            </button>
-                            <button
-                              type="button"
-                              disabled={submitting}
-                              onClick={(e) => handleQuickCardAction(emp, 'check_out', e)}
-                              className="min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-red-bg)] text-[var(--g-red)] text-xs font-extrabold flex items-center justify-center gap-1 active:scale-95"
-                            >
-                              <span className="ms-icon text-base">logout</span>
-                              <span>انصراف</span>
-                            </button>
-                          </>
-                        )}
-
-                        {emp.currentStatus === 'checked_out' && (
-                          <>
-                            {canCheckInAfterCheckout ? (
-                              <button
-                                type="button"
+                            {canManageRecords && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
                                 disabled={submitting}
-                                onClick={(e) => handleQuickCardAction(emp, 'check_in', e)}
-                                className="flex-1 min-h-[40px] px-3 py-1.5 rounded-xl bg-[#146C2E] hover:bg-[#0F5223] text-white text-xs font-black flex items-center justify-center gap-1.5 active:scale-95 transition-all shadow-2xs"
+                                onClick={() => setConfirmReopenEmp(emp)}
                               >
-                                <span className="ms-icon filled text-base">login</span>
-                                <span>تسجيل حضور للشفت الجديد ✓</span>
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                disabled
-                                title={
-                                  emp.nextCheckInAvailability?.lockReasonArabic ||
-                                  'تم الانصراف ولا يمكن تسجيل حضور جديد قبل موعد الشفت القادم'
-                                }
-                                className="flex-1 min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-surface-variant)] text-[var(--g-muted)] border border-[var(--g-border)] text-[11px] font-extrabold flex items-center justify-center gap-1 opacity-85 cursor-not-allowed"
-                              >
-                                <span className="ms-icon text-sm">lock_clock</span>
-                                <span>منصرف ✓ (يفتح {nextWindowTimeStr})</span>
-                              </button>
+                                إعادة فتح
+                              </Button>
                             )}
                           </>
                         )}
-
-                        {canReadLogs && onOpenPersonLog && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onOpenPersonLog(emp.id, emp.name);
-                            }}
-                            title="عرض السجل الفردي الكامل للموظف"
-                            className="min-h-[40px] px-2.5 py-1.5 rounded-xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-xs font-extrabold text-[var(--g-primary)] flex items-center justify-center gap-1 active:scale-95 shrink-0"
-                          >
-                            <span className="ms-icon text-base">assignment_ind</span>
-                            <span>سجله</span>
-                          </button>
-                        )}
-                      </div>
-
-                      {emp.currentStatus === 'checked_out' &&
-                        !canCheckInAfterCheckout &&
-                        canManageRecords && (
-                          <div className="pt-1">
-                            <button
-                              type="button"
-                              disabled={submitting}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (
-                                  window.confirm(
-                                    `هل تريد إعادة فتح حضور الشفت الحالي استثنائياً للموظف "${emp.name}"؟`
-                                  )
-                                ) {
-                                  handleQuickCardAction(emp, 'check_in', e, null, true);
-                                }
-                              }}
-                              className="w-full py-1 px-2 rounded-lg bg-[var(--g-surface-variant)] hover:bg-[var(--g-primary-container)] text-[10px] font-extrabold text-[var(--g-primary)] border border-dashed border-[var(--g-primary)]/40"
-                            >
-                              🔓 إعادة فتح حضور الشفت استثنائياً (للآدمن)
-                            </button>
-                          </div>
-                        )}
-
-                      {/* Quick 1-Tap Break Duration Pills for Security & Supervisors */}
-                      {emp.currentStatus === 'present' && (
-                        <div className="flex items-center justify-between gap-1 pt-1">
-                          <span className="text-[10px] font-bold text-[var(--g-muted)]">بريك سريع:</span>
-                          {[15, 30, 45, 60].map((m) => (
-                            <button
-                              key={m}
-                              type="button"
-                              disabled={submitting}
-                              onClick={(e) => handleQuickCardAction(emp, 'break_start', e, m)}
-                              className="flex-1 py-1 rounded-lg bg-[var(--g-surface-variant)] hover:bg-[var(--g-yellow-bg)] text-[10px] font-extrabold text-[var(--g-text)] border border-[var(--g-border)]"
-                            >
-                              {m} د
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-between pt-2 border-t border-[var(--g-border)] text-xs w-full gap-2">
-                    <div className="text-[var(--g-muted)] truncate">
-                      {emp.checkInTime ? (
-                        <span>
-                          حضر:{' '}
-                          <strong className="num-ltr text-[var(--g-text)]">
-                            {formatTimeArabic(emp.checkInTime)}
-                          </strong>
-                          {emp.latestRecordedBy ? ` • سجله: ${emp.latestRecordedBy}` : ''}
-                        </span>
-                      ) : (
-                        <span>
-                          الشفت: <span className="num-ltr font-semibold">{emp.shift_start || '08:00'} → {emp.shift_end || '20:00'}</span>
-                        </span>
-                      )}
-                    </div>
-
-                    {emp.lateMinutes > 0 ? (
-                      <span className="text-[var(--g-yellow)] font-extrabold shrink-0">
-                        تأخير {emp.lateMinutes} د
-                      </span>
-                    ) : (
-                      <span className="text-[var(--g-primary)] font-bold flex items-center gap-0.5 shrink-0">
-                        <span>التفاصيل</span>
-                        <span className="ms-icon text-sm">chevron_left</span>
-                      </span>
+                      </>
                     )}
                   </div>
                 </div>
               );
             })}
-          </div>
+          </GroupedList>
         )}
       </div>
 
-      {/* Today's & Cross-Day Linked Attendance Logs */}
+      {/* 5. Chronological Hairline Attendance Logs */}
       {canReadLogs && (
-        <section className="g-card p-4 sm:p-5">
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-3.5">
-            <div className="flex items-center gap-2">
-              <span className="ms-icon filled text-[var(--g-primary)]">history</span>
-              <h2 className="text-base sm:text-lg font-extrabold m-0">
-                سجل الحضور والانصراف والاستراحات التفصيلي ({attendanceLogs.length})
-              </h2>
-            </div>
-            <span className="text-xs text-[var(--g-muted)] font-bold">
-              🔄 يدعم الشفتات المرنة (8 / 10 / 12 ساعة) والشفتات الليلية الممتدة تلقائياً
-            </span>
-          </div>
+        <section className="space-y-3">
+          <SectionHeader
+            title="سجل الحضور"
+            count={displayedLogs.length}
+            actions={
+              (statusFilter === 'pending_cctv' || statusFilter === 'mismatch_cctv') && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setStatusFilter('all')}
+                >
+                  عرض الكل
+                </Button>
+              )
+            }
+          />
 
-          {attendanceLogs.length === 0 ? (
-            <div className="text-center py-8 text-[var(--g-muted)] text-sm">
-              لم يتم تسجيل أي حركة حضور أو انصراف في هذا اليوم بعد.
-            </div>
+          {displayedLogs.length === 0 ? (
+            <EmptyState
+              compact
+              title={
+                attendanceLogs.length === 0
+                  ? 'لا توجد حركات اليوم'
+                  : 'لا توجد حركات مطابقة'
+              }
+            />
           ) : (
-            <div className="space-y-2.5">
-              {attendanceLogs.map((log) => {
+            <GroupedList>
+              {displayedLogs.map((log) => {
                 const meta = ACTION_META[log.action_type] || ACTION_META.check_in;
-                const isCrossDay = log.shift_date_key && log.shift_date_key !== log.date_key;
+                const logCctvStatus = getLogCctvStatus(log);
+                const subParts = [
+                  log.department,
+                  log.recorded_by,
+                  log.late_minutes > 0 ? `تأخير ${log.late_minutes}د` : '',
+                  log.break_duration_minutes > 0 ? `بريك ${log.break_duration_minutes}د` : '',
+                  log.cctv_observed_time ? `DVR ${log.cctv_observed_time}` : '',
+                  log.note || log.break_reason || '',
+                ].filter(Boolean);
+
                 return (
                   <div
                     key={log.id}
-                    className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3.5 rounded-2xl bg-[var(--g-surface-variant)]/55 border border-[var(--g-border)]"
+                    className="min-h-[54px] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                   >
-                    <div className="flex items-start sm:items-center gap-3 min-w-0">
-                      <span className={`px-3 py-1 rounded-full text-xs font-extrabold shrink-0 ${meta.badge}`}>
-                        {meta.label}
-                      </span>
-                      <div className="min-w-0">
-                        <div className="font-extrabold text-sm sm:text-base flex flex-wrap items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => onOpenPersonLog?.(log.employee_id, log.employee_name)}
-                            className="hover:underline text-right font-extrabold text-[var(--g-text)]"
-                          >
-                            {log.employee_name}
-                          </button>
-                          <span className="text-xs font-normal text-[var(--g-muted)]">
-                            ({log.department})
+                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                      <StatusDot
+                        tone={logCctvStatus === 'mismatch' ? 'danger' : meta.dotTone}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                          <span className="text-xs sm:text-sm font-medium text-ink truncate">
+                            {meta.label} ·{' '}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onOpenPersonLog?.(log.employee_id, log.employee_name)
+                              }
+                              className="font-semibold hover:underline text-ink bg-transparent border-0 p-0 cursor-pointer"
+                            >
+                              {log.employee_name}
+                            </button>
                           </span>
-                          {isCrossDay && (
-                            <span className="px-2 py-0.5 rounded-full bg-[var(--g-purple-bg)] text-[var(--g-purple)] text-[10px] font-extrabold">
-                              🌙 تابع لشفت {log.shift_date_key}
-                            </span>
+                          {logCctvStatus === 'confirmed' && (
+                            <Icon
+                              name="verified"
+                              size={14}
+                              filled
+                              className="text-success shrink-0"
+                              ariaLabel="مؤكد بالكاميرا"
+                            />
                           )}
-                          {log.allowed_break_minutes > 0 && log.action_type === 'break_start' && (
-                            <span className="px-2 py-0.5 rounded-full bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] text-[10px] font-extrabold">
-                              مسموح {log.allowed_break_minutes} د
-                            </span>
-                          )}
-                          {log.break_duration_minutes > 0 && (
-                            <span className="px-2 py-0.5 rounded-full bg-[var(--g-green-bg)] text-[var(--g-green)] text-[10px] font-extrabold">
-                              استغرقت الاستراحة: {log.break_duration_minutes} د
+                          {logCctvStatus === 'mismatch' && (
+                            <span className="text-xs font-medium text-danger shrink-0">
+                              تعارض
                             </span>
                           )}
                         </div>
-                        <div className="text-xs text-[var(--g-muted)] flex flex-wrap items-center gap-1.5 mt-0.5">
-                          <span className="num-ltr font-bold text-[var(--g-text)]">
-                            {log.date_key} • {formatTimeWithSeconds(log.timestamp)}
-                          </span>
-                          <span>• {log.recorded_by}</span>
-                          {log.late_minutes > 0 && (
-                            <span className="text-[var(--g-yellow)] font-bold">
-                              • تأخير {log.late_minutes} د
-                            </span>
-                          )}
-                          {(log.note || log.break_reason) && (
-                            <span>• "{log.note || log.break_reason}"</span>
-                          )}
-                        </div>
+                        {subParts.length > 0 && (
+                          <div className="text-xs text-ink-muted truncate">
+                            {subParts.join(' · ')}
+                          </div>
+                        )}
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 self-end sm:self-auto flex-wrap">
-                      {onOpenPersonLog && (
-                        <button
-                          type="button"
-                          onClick={() => onOpenPersonLog(log.employee_id, log.employee_name)}
-                          className="px-2.5 py-1.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] text-xs font-bold flex items-center gap-1"
-                          title="سجل الموظف الكامل"
-                        >
-                          <span className="ms-icon text-sm text-[var(--g-primary)]">assignment_ind</span>
-                          <span>سجله</span>
-                        </button>
-                      )}
+                    <div className="w-full sm:w-auto flex items-center justify-between sm:justify-end gap-1.5 flex-wrap pt-1 sm:pt-0 shrink-0">
+                      <span className="num-ltr text-xs font-medium text-ink-muted px-1">
+                        {extractLocalHHMM(log.timestamp)}
+                      </span>
 
                       {log.proof_url && (
                         <button
                           type="button"
                           onClick={() =>
-                            onPreviewImage?.(log.proof_url, `${log.employee_name} - ${meta.label}`)
+                            onPreviewImage?.(
+                              log.proof_url,
+                              `${log.employee_name} - ${meta.label}`
+                            )
                           }
-                          className="px-3 py-1.5 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] text-xs font-bold flex items-center gap-1"
+                          aria-label="عرض الإثبات"
+                          className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-primary inline-flex items-center justify-center cursor-pointer"
                         >
-                          <span className="ms-icon text-base text-[var(--g-primary)]">image</span>
-                          <span>الإثبات</span>
+                          <Icon name="image" size={18} />
                         </button>
                       )}
 
-                      {log.verified_by_cctv ? (
-                        <span className="px-3 py-1.5 rounded-full bg-[var(--g-green-bg)] text-[var(--g-green)] text-xs font-extrabold flex items-center gap-1">
-                          <span className="ms-icon filled text-base">verified</span>
-                          <span>تمت المطابقة ✓</span>
-                        </span>
-                      ) : canVerify ? (
+                      {canVerify && logCctvStatus !== 'confirmed' && (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          loading={verifyBusyLogId === log.id}
+                          onClick={(e) => handleVerifyLog(log.id, e)}
+                        >
+                          تأكيد
+                        </Button>
+                      )}
+
+                      {canVerify && (
                         <button
                           type="button"
-                          onClick={(e) => handleVerifyLog(log.id, e)}
-                          className="px-3.5 py-1.5 rounded-full bg-[#0B57D0] text-white text-xs font-extrabold flex items-center gap-1"
+                          onClick={(e) => openCctvReviewForLog(log, e)}
+                          aria-label="مراجعة بالكاميرا"
+                          className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink inline-flex items-center justify-center cursor-pointer"
                         >
-                          <span className="ms-icon filled text-base">fact_check</span>
-                          <span>مطابقة الكاميرا ✓</span>
+                          <Icon name="videocam" size={18} />
                         </button>
-                      ) : (
-                        <span className="text-xs text-[var(--g-muted)] px-2">بانتظار المطابقة</span>
                       )}
 
                       {canManageRecords && (
@@ -1075,18 +1245,18 @@ export default function AttendanceView({
                           <button
                             type="button"
                             onClick={() => openEditAttendanceLog(log)}
-                            className="w-9 h-9 rounded-full bg-[var(--g-surface)] border border-[var(--g-border)] flex items-center justify-center text-[var(--g-primary)]"
-                            title="تعديل الحركة (أدمن)"
+                            aria-label={`تعديل حركة ${log.employee_name}`}
+                            className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink inline-flex items-center justify-center cursor-pointer"
                           >
-                            <span className="ms-icon text-base">edit</span>
+                            <Icon name="edit" size={18} />
                           </button>
                           <button
                             type="button"
-                            onClick={() => handleDeleteAttendanceLog(log)}
-                            className="w-9 h-9 rounded-full bg-[var(--g-red-bg)] text-[var(--g-red)] flex items-center justify-center"
-                            title="حذف الحركة (أدمن)"
+                            onClick={() => setDeleteLogTarget(log)}
+                            aria-label={`حذف حركة ${log.employee_name}`}
+                            className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-danger-bg text-ink-muted hover:text-danger inline-flex items-center justify-center cursor-pointer"
                           >
-                            <span className="ms-icon text-base">delete</span>
+                            <Icon name="delete" size={18} />
                           </button>
                         </>
                       )}
@@ -1094,363 +1264,635 @@ export default function AttendanceView({
                   </div>
                 );
               })}
-            </div>
+            </GroupedList>
           )}
         </section>
       )}
 
-      {/* Material 3 Bottom Sheet / Dialog for Employee Attendance & Smart Break Control */}
-      {activeEmployee && (
-        <div
-          onClick={() => !submitting && setActiveEmployee(null)}
-          className="g-modal-overlay"
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="g-dialog-sheet max-w-lg animate-pop space-y-4"
-          >
-            <div className="g-sheet-handle" />
+      {/* MODAL 1: Employee Details & Control Sheet */}
+      {resolvedActiveEmployee &&
+        (() => {
+          const activeCctvStatus = getEmployeeCctvStatus(resolvedActiveEmployee);
+          const activeStatusMeta =
+            STATUS_META[resolvedActiveEmployee.currentStatus || 'absent'] ||
+            STATUS_META.absent;
+          const activeShiftHours =
+            resolvedActiveEmployee.shiftDurationHours ||
+            computeShiftDurationHoursClient(
+              resolvedActiveEmployee.shift_start,
+              resolvedActiveEmployee.shift_end
+            );
+          const activeShiftLabel =
+            resolvedActiveEmployee.shiftDurationLabel ||
+            formatShiftDurationArabicClient(activeShiftHours);
 
-            <div className="flex items-center justify-between gap-3 pb-3 border-b border-[var(--g-border)]">
-              <div className="flex items-center gap-3">
-                <div
-                  style={{ backgroundColor: activeEmployee.avatar_color || '#0B57D0' }}
-                  className="w-12 h-12 rounded-2xl text-white font-extrabold flex items-center justify-center text-lg"
-                >
-                  {activeEmployee.name[0]}
-                </div>
-                <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h3 className="text-lg font-extrabold m-0">{activeEmployee.name}</h3>
-                    <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold ${STATUS_META[activeEmployee.currentStatus || 'absent']?.chipClass || ''}`}>
-                      {STATUS_META[activeEmployee.currentStatus || 'absent']?.label}
-                    </span>
-                  </div>
-                  <p className="text-xs text-[var(--g-muted)] m-0">
-                    {activeEmployee.department} • شفت ({activeEmployee.shiftDurationLabel || formatShiftDurationArabicClient(activeEmployee.shift_start, activeEmployee.shift_end)}):{' '}
-                    <span className="num-ltr font-bold">
-                      {activeEmployee.shift_start || '08:00'} → {activeEmployee.shift_end || '20:00'}
-                    </span>
-                  </p>
-                  <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                    {canCallPhone && activeEmployee.phone && (
-                      <a
-                        href={`tel:${activeEmployee.phone}`}
-                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[var(--g-primary)] text-white text-xs font-extrabold no-underline shadow-2xs"
-                      >
-                        <span className="ms-icon filled text-sm">call</span>
-                        <span>اتصال:</span>
-                        <span className="num-ltr">{activeEmployee.phone}</span>
-                      </a>
-                    )}
-                    {onOpenPersonLog && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const emp = activeEmployee;
-                          setActiveEmployee(null);
-                          onOpenPersonLog(emp.id, emp.name);
-                        }}
-                        className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-[var(--g-secondary-container)] text-[var(--g-on-secondary-container)] text-xs font-extrabold"
-                      >
-                        <span className="ms-icon text-sm">assignment_ind</span>
-                        <span>فتح السجل الكامل للموظف</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveEmployee(null)}
-                className="w-9 h-9 rounded-full bg-[var(--g-surface-variant)] flex items-center justify-center"
-              >
-                <span className="ms-icon">close</span>
-              </button>
-            </div>
-
-            {/* Smart Break Duration & Reason Selector (shown only when present and ready to start a break) */}
-            {activeEmployee.currentStatus === 'present' && (
-              <div className="p-3.5 rounded-2xl bg-[var(--g-yellow-bg)]/50 border border-[var(--g-yellow-border)]/40 space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-extrabold text-[var(--g-yellow)] flex items-center gap-1">
-                    <span className="ms-icon text-base">timer</span>
-                    <span>تحديد مدة وسبب البريك:</span>
-                  </span>
-                  <span className="text-xs font-black num-ltr text-[var(--g-yellow)]">
-                    {allowedBreakMins} دقيقة
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-                  {BREAK_PRESETS.map((bp) => (
-                    <button
-                      key={bp.minutes}
-                      type="button"
-                      onClick={() => setAllowedBreakMins(bp.minutes)}
-                      className={`py-2 px-2 rounded-xl text-xs font-extrabold transition-all border ${
-                        Number(allowedBreakMins) === bp.minutes
-                          ? 'bg-[#C25E00] text-white border-transparent shadow-2xs'
-                          : 'bg-[var(--g-surface)] text-[var(--g-text)] border-[var(--g-border)]'
-                      }`}
-                    >
-                      {bp.minutes} دقيقة
-                    </button>
-                  ))}
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-[var(--g-muted)] shrink-0">مدة مخصصة (دقائق):</span>
-                  <input
-                    type="number"
-                    min="5"
-                    max="240"
-                    value={allowedBreakMins}
-                    onChange={(e) => setAllowedBreakMins(Number(e.target.value) || 30)}
-                    className="g-input py-1.5 w-24 text-center num-ltr font-black text-sm"
-                  />
-                  <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
-                    {BREAK_REASONS.map((r) => (
-                      <button
-                        key={r}
-                        type="button"
-                        onClick={() => setBreakReason(r)}
-                        className={`px-2.5 py-1 rounded-full text-[11px] font-bold whitespace-nowrap ${
-                          breakReason === r
-                            ? 'bg-[var(--g-primary)] text-white'
-                            : 'bg-[var(--g-surface)] text-[var(--g-muted)]'
-                        }`}
-                      >
-                        {r}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <ProofUploader
-              value={proofDataUrl}
-              onChange={setProofDataUrl}
-              label="إرفاق صورة من الفون أو سكرين شوت (اختياري)"
-              compact
-            />
-
-            <div>
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <span className="text-xs font-bold text-[var(--g-muted)]">
-                  ملاحظة سريعة أو إملاء صوتي (اختياري):
-                </span>
-                <VoiceMicButton
-                  small
-                  onToast={onToast}
-                  onTranscript={(txt) => setNote((prev) => (prev ? `${prev} ${txt}` : txt))}
-                />
-              </div>
-              <div className="flex flex-wrap gap-1.5 mb-2">
-                {QUICK_ATTENDANCE_NOTES.map((chip) => (
-                  <button
-                    key={chip}
-                    type="button"
-                    onClick={() => setNote(note === chip ? '' : chip)}
-                    className={`text-xs px-3 py-1.5 rounded-full border transition-all ${
-                      note === chip
-                        ? 'g-pill-active border-transparent'
-                        : 'bg-[var(--g-surface-variant)] border-[var(--g-border)] font-medium'
-                    }`}
-                  >
-                    {chip}
-                  </button>
-                ))}
-              </div>
-              <input
-                type="text"
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                placeholder="أو اكتب ملاحظة قصيرة هنا..."
-                className="g-input w-full"
-              />
-            </div>
-
-            {canManageRecords && (
-              <div className="p-3 rounded-2xl bg-[var(--g-surface-variant)] border border-[var(--g-border)] flex items-center justify-between gap-3">
-                <label className="text-xs font-extrabold text-[var(--g-text)]">
-                  وقت مخصص للأدمن (اتركه فارغاً للوقت الحالي):
-                </label>
-                <input
-                  type="time"
-                  value={customTimeHHMM}
-                  onChange={(e) => setCustomTimeHHMM(e.target.value)}
-                  className="g-input w-36 num-ltr text-sm font-black py-1.5"
-                />
-              </div>
-            )}
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
-              {(!activeEmployee.currentStatus || activeEmployee.currentStatus === 'absent') && (
-                <button
-                  type="button"
-                  disabled={submitting}
+          const stickyFooter = canWrite ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {(!resolvedActiveEmployee.currentStatus ||
+                resolvedActiveEmployee.currentStatus === 'absent') && (
+                <Button
+                  variant="success"
+                  size="lg"
+                  fullWidth
+                  loading={submitting}
                   onClick={() => submitAttendance('check_in')}
-                  className={`sm:col-span-2 py-4 px-5 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.check_in.bg}`}
+                  className="sm:col-span-2"
                 >
-                  <span className="ms-icon filled text-2xl">waving_hand</span>
-                  <span>{ACTION_META.check_in.btnLabel}</span>
-                </button>
+                  تسجيل حضور
+                </Button>
               )}
 
-              {activeEmployee.currentStatus === 'present' && (
+              {resolvedActiveEmployee.currentStatus === 'present' && (
                 <>
-                  <div className="sm:col-span-2 py-2.5 px-4 rounded-2xl bg-[var(--g-green-bg)] text-[var(--g-green)] border border-[var(--g-green)]/30 font-extrabold text-sm flex items-center justify-center gap-1.5">
-                    <span className="ms-icon filled text-lg">check_circle</span>
-                    <span>الموظف حاضر حالياً في الشفت ✓ — يمكنك بدء بريك أو تسجيل انصراف</span>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={submitting}
+                  <Button
+                    variant="warning"
+                    size="lg"
+                    fullWidth
+                    loading={submitting}
                     onClick={() => submitAttendance('break_start')}
-                    className={`py-4 px-4 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.break_start.bg}`}
                   >
-                    <span className="ms-icon filled text-2xl">free_breakfast</span>
-                    <span>بداية بريك ({allowedBreakMins} د)</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={submitting}
+                    بريك ({allowedBreakMins}د)
+                  </Button>
+                  <Button
+                    variant="danger"
+                    size="lg"
+                    fullWidth
+                    loading={submitting}
                     onClick={() => submitAttendance('check_out')}
-                    className={`py-4 px-4 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.check_out.bg}`}
                   >
-                    <span className="ms-icon filled text-2xl">logout</span>
-                    <span>تسجيل انصراف</span>
-                  </button>
+                    انصراف
+                  </Button>
                 </>
               )}
 
-              {activeEmployee.currentStatus === 'on_break' && (
+              {resolvedActiveEmployee.currentStatus === 'on_break' && (
                 <>
-                  <div className="sm:col-span-2 py-2.5 px-4 rounded-2xl bg-[var(--g-yellow-bg)] text-[var(--g-yellow)] border border-[var(--g-yellow-border)]/40 font-extrabold text-sm flex items-center justify-center gap-1.5">
-                    <span className="ms-icon filled text-lg">coffee</span>
-                    <span>الموظف في بريك حالياً ☕ — لا يمكن إعطاء بريك جديد قبل العودة من البريك</span>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={submitting}
+                  <Button
+                    variant="primary"
+                    size="lg"
+                    fullWidth
+                    loading={submitting}
                     onClick={() => submitAttendance('break_end')}
-                    className={`py-4 px-4 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.break_end.bg}`}
                   >
-                    <span className="ms-icon filled text-2xl">play_arrow</span>
-                    <span>عودة من البريك</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={submitting}
+                    عودة من البريك
+                  </Button>
+                  <Button
+                    variant="danger"
+                    size="lg"
+                    fullWidth
+                    loading={submitting}
                     onClick={() => submitAttendance('check_out')}
-                    className={`py-4 px-4 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.check_out.bg}`}
                   >
-                    <span className="ms-icon filled text-2xl">logout</span>
-                    <span>تسجيل انصراف</span>
-                  </button>
+                    انصراف
+                  </Button>
                 </>
               )}
 
-              {activeEmployee.currentStatus === 'checked_out' && (
+              {resolvedActiveEmployee.currentStatus === 'checked_out' && (
                 <>
-                  {activeEmployee.nextCheckInAvailability?.allowed ? (
-                    <button
-                      type="button"
-                      disabled={submitting}
+                  {resolvedActiveEmployee.nextCheckInAvailability?.canCheckIn ? (
+                    <Button
+                      variant="success"
+                      size="lg"
+                      fullWidth
+                      loading={submitting}
                       onClick={() => submitAttendance('check_in')}
-                      className={`sm:col-span-2 py-4 px-5 rounded-full font-extrabold text-base flex items-center justify-center gap-2 shadow-sm ${ACTION_META.check_in.bg}`}
+                      className="sm:col-span-2"
                     >
-                      <span className="ms-icon filled text-2xl">waving_hand</span>
-                      <span>تسجيل حضور الشفت الجديد</span>
-                    </button>
+                      تسجيل حضور
+                    </Button>
                   ) : (
-                    <div className="sm:col-span-2 space-y-2.5">
-                      <div className="p-3.5 rounded-2xl bg-[var(--g-purple-bg)]/80 text-[var(--g-purple)] border border-[var(--g-purple)]/30 text-center space-y-1">
-                        <div className="font-extrabold text-sm flex items-center justify-center gap-1.5">
-                          <span className="ms-icon filled text-base">lock_clock</span>
-                          <span>تم تسجيل انصراف الموظف من هذا الشفت ✓</span>
-                        </div>
-                        <p className="text-xs font-bold m-0">
-                          {activeEmployee.nextCheckInAvailability?.reasonArabic ||
-                            `يفتح تسجيل الحضور للشفت القادم الساعة ${activeEmployee.nextCheckInAvailability?.nextWindowStartHHMM || activeEmployee.shift_start || '08:00'}`}
-                        </p>
-                      </div>
-                      {canManageRecords && (
-                        <button
-                          type="button"
-                          disabled={submitting}
-                          onClick={() => submitAttendance('check_in', true)}
-                          className="w-full py-3 px-4 rounded-full bg-[var(--g-surface-variant)] border border-[var(--g-border)] text-[var(--g-text)] font-extrabold text-xs flex items-center justify-center gap-1.5 hover:bg-[var(--g-primary)] hover:text-white transition-all"
-                        >
-                          <span className="ms-icon text-base">restart_alt</span>
-                          <span>إعادة فتح الشفت استثنائياً (تجاوز للأدمن فقط)</span>
-                        </button>
-                      )}
-                    </div>
+                    canManageRecords && (
+                      <Button
+                        variant="secondary"
+                        size="md"
+                        fullWidth
+                        loading={submitting}
+                        onClick={() => submitAttendance('check_in', null, true)}
+                        className="sm:col-span-2"
+                      >
+                        إعادة فتح الشفت
+                      </Button>
+                    )
                   )}
                 </>
               )}
             </div>
-          </div>
-        </div>
-      )}
+          ) : null;
 
-      {/* Admin Edit Attendance Log Modal */}
-      {editingLog && canManageRecords && (
-        <div onClick={() => setEditingLog(null)} className="g-modal-overlay">
-          <form
-            onClick={(e) => e.stopPropagation()}
-            onSubmit={handleSaveEditedLog}
-            className="g-dialog-sheet max-w-md space-y-4 animate-pop"
-          >
-            <div className="g-sheet-handle" />
-            <div className="flex items-center justify-between border-b border-[var(--g-border)] pb-3">
-              <h3 className="text-base font-extrabold m-0">
-                تعديل سجل حضور: {editingLog.employee_name}
-              </h3>
+          return (
+            <BottomSheet
+              open={Boolean(resolvedActiveEmployee)}
+              onClose={() => !submitting && setActiveEmployee(null)}
+              title={resolvedActiveEmployee.name || 'موظف'}
+              subtitle={`${resolvedActiveEmployee.department || '—'} · ${resolvedActiveEmployee.shift_start || '08:00'}–${resolvedActiveEmployee.shift_end || '20:00'} (${activeShiftLabel})`}
+              badge={
+                <StatusDot
+                  tone={activeStatusMeta.tone}
+                  label={activeStatusMeta.label}
+                  tintedText
+                />
+              }
+              maxWidth="max-w-lg"
+              footer={stickyFooter}
+            >
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {canCallPhone && resolvedActiveEmployee.phone && (
+                    <a
+                      href={`tel:${resolvedActiveEmployee.phone}`}
+                      className="min-h-[44px] sm:min-h-[36px] px-3 py-1.5 rounded-[var(--g-radius-btn)] bg-surface-2 border border-line text-xs font-semibold text-ink inline-flex items-center gap-1.5 no-underline"
+                    >
+                      <Icon name="call" size={16} className="text-primary" />
+                      <span className="num-ltr">{resolvedActiveEmployee.phone}</span>
+                    </a>
+                  )}
+                  {canReadLogs && onOpenPersonLog && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        const emp = resolvedActiveEmployee;
+                        setActiveEmployee(null);
+                        onOpenPersonLog(emp.id, emp.name);
+                      }}
+                    >
+                      السجل الكامل
+                    </Button>
+                  )}
+                </div>
+
+                {/* Flat 3-cell Summary */}
+                <CockpitMetricStrip
+                  columns={3}
+                  items={[
+                    {
+                      id: 'in',
+                      label: 'الحضور',
+                      value: resolvedActiveEmployee.checkInTime
+                        ? extractLocalHHMM(resolvedActiveEmployee.checkInTime)
+                        : '—',
+                    },
+                    {
+                      id: 'out',
+                      label: 'الانصراف',
+                      value: resolvedActiveEmployee.checkOutTime
+                        ? extractLocalHHMM(resolvedActiveEmployee.checkOutTime)
+                        : '—',
+                    },
+                    {
+                      id: 'late',
+                      label: 'التأخير',
+                      value:
+                        resolvedActiveEmployee.lateMinutes > 0
+                          ? `${resolvedActiveEmployee.lateMinutes}د`
+                          : '0',
+                      secondary:
+                        resolvedActiveEmployee.totalBreakMinutes > 0
+                          ? `بريك ${resolvedActiveEmployee.totalBreakMinutes}د`
+                          : '',
+                    },
+                  ]}
+                />
+
+                {/* CCTV Status & Review */}
+                {resolvedActiveEmployee.latestLogId && activeCctvStatus !== 'none' && (
+                  <div className="py-2.5 border-y border-line space-y-2">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <StatusDot
+                        tone={
+                          activeCctvStatus === 'confirmed'
+                            ? 'success'
+                            : activeCctvStatus === 'mismatch'
+                            ? 'danger'
+                            : 'warning'
+                        }
+                        label={
+                          activeCctvStatus === 'confirmed'
+                            ? 'مؤكد بالكاميرا'
+                            : activeCctvStatus === 'mismatch'
+                            ? 'تعارض كاميرا'
+                            : 'بانتظار الكاميرا'
+                        }
+                        tintedText
+                      />
+                      {resolvedActiveEmployee.latestCctvObservedTime && (
+                        <span className="num-ltr text-xs text-ink-muted">
+                          DVR {resolvedActiveEmployee.latestCctvObservedTime}
+                        </span>
+                      )}
+                    </div>
+
+                    {(resolvedActiveEmployee.latestVerifiedBy ||
+                      resolvedActiveEmployee.latestCctvNote) && (
+                      <div className="text-xs text-ink-muted">
+                        {[
+                          resolvedActiveEmployee.latestVerifiedBy,
+                          resolvedActiveEmployee.latestCctvNote,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </div>
+                    )}
+
+                    {canVerify && (
+                      <div className="flex items-center gap-2">
+                        {activeCctvStatus !== 'confirmed' && (
+                          <Button
+                            variant="success"
+                            size="sm"
+                            loading={verifyBusyLogId === resolvedActiveEmployee.latestLogId}
+                            onClick={(e) =>
+                              handleVerifyLog(resolvedActiveEmployee.latestLogId, e)
+                            }
+                          >
+                            تأكيد
+                          </Button>
+                        )}
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={(e) =>
+                            openCctvReviewForEmployee(resolvedActiveEmployee, e)
+                          }
+                        >
+                          مراجعة
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {canWrite && (
+                  <>
+                    {resolvedActiveEmployee.currentStatus === 'present' && (
+                      <div className="space-y-2.5 pt-1">
+                        <div className="flex items-center justify-between text-xs text-ink-muted">
+                          <span className="font-medium">مدة البريك</span>
+                          <span className="num-ltr font-semibold text-ink">
+                            {allowedBreakMins}د
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-4 gap-1.5">
+                          {BREAK_PRESETS.map((mins) => (
+                            <button
+                              key={mins}
+                              type="button"
+                              onClick={() => setAllowedBreakMins(mins)}
+                              className={`min-h-[42px] rounded-[var(--g-radius-btn)] text-xs font-medium border num-ltr transition-[background-color,color,border-color] duration-150 cursor-pointer ${
+                                Number(allowedBreakMins) === mins
+                                  ? 'bg-primary-solid text-on-primary border-transparent'
+                                  : 'bg-transparent text-ink border-line hover:border-line-strong'
+                              }`}
+                            >
+                              {mins}د
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-medium text-ink-muted">
+                            مدة مخصصة
+                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              disabled={(Number(allowedBreakMins) || 30) <= 5}
+                              aria-label="تقليل 5 دقائق"
+                              onClick={() =>
+                                setAllowedBreakMins((prev) =>
+                                  Math.max(5, (Number(prev) || 30) - 5)
+                                )
+                              }
+                              className="w-11 h-11 rounded-[var(--g-radius-btn)] bg-surface-2 border border-line text-ink hover:border-line-strong disabled:opacity-40 inline-flex items-center justify-center cursor-pointer transition-colors duration-150"
+                            >
+                              <Icon name="remove" size={18} />
+                            </button>
+                            <span
+                              className="min-w-[3.25rem] text-center text-sm font-semibold text-ink num-ltr"
+                              aria-live="polite"
+                            >
+                              {allowedBreakMins}د
+                            </span>
+                            <button
+                              type="button"
+                              disabled={(Number(allowedBreakMins) || 30) >= 240}
+                              aria-label="زيادة 5 دقائق"
+                              onClick={() =>
+                                setAllowedBreakMins((prev) =>
+                                  Math.min(240, (Number(prev) || 30) + 5)
+                                )
+                              }
+                              className="w-11 h-11 rounded-[var(--g-radius-btn)] bg-surface-2 border border-line text-ink hover:border-line-strong disabled:opacity-40 inline-flex items-center justify-center cursor-pointer transition-colors duration-150"
+                            >
+                              <Icon name="add" size={18} />
+                            </button>
+                          </div>
+                        </div>
+
+                        <FilterChipRail
+                          activeId={breakReason}
+                          onSelect={setBreakReason}
+                          items={BREAK_REASONS.map((r) => ({ id: r, label: r }))}
+                        />
+                      </div>
+                    )}
+
+                    {resolvedActiveEmployee.currentStatus === 'checked_out' &&
+                      !resolvedActiveEmployee.nextCheckInAvailability?.canCheckIn && (
+                        <div className="text-xs text-ink-muted">
+                          {resolvedActiveEmployee.nextCheckInAvailability?.lockReasonArabic ||
+                            `يفتح الشفت القادم الساعة ${resolvedActiveEmployee.nextCheckInAvailability?.windowOpenTimeStr || resolvedActiveEmployee.shift_start || '08:00'}`}
+                        </div>
+                      )}
+
+                    <ProofUploader
+                      value={proofDataUrl}
+                      onChange={setProofDataUrl}
+                      label="صورة إثبات"
+                      compact
+                    />
+
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-ink-muted">ملاحظة</span>
+                        <VoiceMicButton
+                          small
+                          onToast={onToast}
+                          onTranscript={(txt) =>
+                            setNote((prev) => (prev ? `${prev} ${txt}` : txt))
+                          }
+                        />
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {QUICK_ATTENDANCE_NOTES.map((chip) => (
+                          <button
+                            key={chip}
+                            type="button"
+                            onClick={() => setNote(note === chip ? '' : chip)}
+                            className={`min-h-[36px] text-xs px-2.5 py-1 rounded-[var(--g-radius-btn)] border transition-[background-color,color,border-color] duration-150 cursor-pointer ${
+                              note === chip
+                                ? 'bg-secondary-container text-on-secondary-container border-transparent font-semibold'
+                                : 'bg-transparent border-line text-ink-muted hover:text-ink'
+                            }`}
+                          >
+                            {chip}
+                          </button>
+                        ))}
+                      </div>
+                      <input
+                        type="text"
+                        value={note}
+                        onChange={(e) => setNote(e.target.value)}
+                        placeholder="ملاحظة..."
+                        className="g-input w-full"
+                      />
+                    </div>
+
+                    {canVerify && (
+                      <div className="space-y-2.5 pt-2 border-t border-line">
+                        <ToggleSwitch
+                          checked={confirmByCctv}
+                          onChange={setConfirmByCctv}
+                          label="تأكيد بالكاميرا"
+                        />
+
+                        {confirmByCctv && (
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                            <div>
+                              <label className="block text-xs font-medium text-ink-muted mb-1">
+                                وقت DVR
+                              </label>
+                              <input
+                                type="time"
+                                value={cctvObservedTime}
+                                onChange={(e) => setCctvObservedTime(e.target.value)}
+                                className="g-input num-ltr"
+                              />
+                            </div>
+                            <div className="sm:col-span-2">
+                              <label className="block text-xs font-medium text-ink-muted mb-1">
+                                ملاحظة الكاميرا
+                              </label>
+                              <input
+                                type="text"
+                                value={cctvNote}
+                                onChange={(e) => setCctvNote(e.target.value)}
+                                placeholder="ملاحظة..."
+                                className="g-input"
+                              />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {canManageRecords && (
+                      <div className="flex items-center justify-between gap-2.5 pt-2 border-t border-line">
+                        <label className="text-xs font-medium text-ink-muted">
+                          وقت مخصص
+                        </label>
+                        <input
+                          type="time"
+                          value={customTimeHHMM}
+                          onChange={(e) => setCustomTimeHHMM(e.target.value)}
+                          className="g-input w-36 num-ltr"
+                        />
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </BottomSheet>
+          );
+        })()}
+
+      {/* MODAL 2: CCTV Review BottomSheet */}
+      <BottomSheet
+        open={Boolean(reviewTarget && canVerify)}
+        onClose={() => !reviewSubmitting && setReviewTarget(null)}
+        title="مراجعة الكاميرا"
+        subtitle={
+          reviewTarget
+            ? `${reviewTarget.employeeName} · ${reviewTarget.actionLabel}${
+                reviewTarget.recordedTimeIso
+                  ? ` · ${formatTimeArabic(reviewTarget.recordedTimeIso)}`
+                  : ''
+              }`
+            : ''
+        }
+        maxWidth="max-w-md"
+        footer={
+          reviewTarget && (
+            <div className="flex items-center gap-2">
+              <Button
+                variant="secondary"
+                fullWidth
+                disabled={reviewSubmitting}
+                onClick={() => setReviewTarget(null)}
+              >
+                إلغاء
+              </Button>
+              <Button
+                variant={reviewTarget.status === 'mismatch' ? 'danger' : 'success'}
+                fullWidth
+                loading={reviewSubmitting}
+                onClick={handleSubmitCctvReview}
+              >
+                {reviewTarget.status === 'mismatch' ? 'تسجيل تعارض' : 'تأكيد'}
+              </Button>
+            </div>
+          )
+        }
+      >
+        {reviewTarget && (
+          <form onSubmit={handleSubmitCctvReview} className="space-y-4">
+            <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => setEditingLog(null)}
-                className="w-9 h-9 rounded-full bg-[var(--g-surface-variant)] flex items-center justify-center"
+                onClick={() => setReviewTarget((r) => ({ ...r, status: 'confirmed' }))}
+                className={`min-h-[48px] px-3 py-2.5 rounded-[var(--g-radius-md)] border text-xs sm:text-sm font-semibold transition-[background-color,border-color,color] duration-150 cursor-pointer ${
+                  reviewTarget.status === 'confirmed'
+                    ? 'bg-success-bg border-[var(--g-green-border)] text-success'
+                    : 'bg-transparent border-line text-ink'
+                }`}
               >
-                <span className="ms-icon">close</span>
+                مطابق
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setReviewTarget((r) => ({ ...r, status: 'mismatch' }))}
+                className={`min-h-[48px] px-3 py-2.5 rounded-[var(--g-radius-md)] border text-xs sm:text-sm font-semibold transition-[background-color,border-color,color] duration-150 cursor-pointer ${
+                  reviewTarget.status === 'mismatch'
+                    ? 'bg-danger-bg border-[var(--g-red-border)] text-danger'
+                    : 'bg-transparent border-line text-ink'
+                }`}
+              >
+                تعارض
               </button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-medium text-ink-muted mb-1">
+                وقت DVR
+              </label>
+              <input
+                type="time"
+                value={reviewTarget.observedTime || ''}
+                onChange={(e) =>
+                  setReviewTarget((r) => ({ ...r, observedTime: e.target.value }))
+                }
+                className="g-input num-ltr"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-xs font-medium text-ink-muted">ملاحظة</label>
+              <div className="flex flex-wrap gap-1.5">
+                {CCTV_NOTE_PRESETS.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() =>
+                      setReviewTarget((r) => ({
+                        ...r,
+                        note: r.note === preset ? '' : preset,
+                      }))
+                    }
+                    className={`min-h-[36px] text-xs px-2.5 py-1 rounded-[var(--g-radius-btn)] border transition-[background-color,border-color,color] duration-150 cursor-pointer ${
+                      reviewTarget.note === preset
+                        ? 'bg-secondary-container text-on-secondary-container border-transparent font-semibold'
+                        : 'bg-transparent border-line text-ink-muted hover:text-ink'
+                    }`}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+              <textarea
+                rows={2}
+                value={reviewTarget.note || ''}
+                onChange={(e) =>
+                  setReviewTarget((r) => ({ ...r, note: e.target.value }))
+                }
+                placeholder="ملاحظة الكاميرا..."
+                className="g-input w-full resize-none"
+              />
+            </div>
+          </form>
+        )}
+      </BottomSheet>
+
+      {/* MODAL 3: Admin Edit Attendance Log BottomSheet */}
+      <BottomSheet
+        open={Boolean(editingLog && canManageRecords)}
+        onClose={() => !editSubmitting && setEditingLog(null)}
+        title="تعديل الحركة"
+        subtitle={editingLog?.employee_name || ''}
+        maxWidth="max-w-md"
+        footer={
+          <div className="flex items-center gap-2">
+            <Button
+              variant="secondary"
+              fullWidth
+              disabled={editSubmitting}
+              onClick={() => setEditingLog(null)}
+            >
+              إلغاء
+            </Button>
+            <Button
+              variant="primary"
+              fullWidth
+              loading={editSubmitting}
+              onClick={handleSaveEditedLog}
+            >
+              حفظ
+            </Button>
+          </div>
+        }
+      >
+        {editingLog && (
+          <form onSubmit={handleSaveEditedLog} className="space-y-3.5">
+            <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-bold mb-1">نوع الحركة</label>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  الحركة
+                </label>
                 <select
                   value={editingLog.action_type}
                   onChange={(e) =>
                     setEditingLog((l) => ({ ...l, action_type: e.target.value }))
                   }
-                  className="g-input font-bold"
+                  className="g-input"
                 >
                   <option value="check_in">حضور</option>
-                  <option value="break_start">بداية استراحة</option>
-                  <option value="break_end">عودة من استراحة</option>
+                  <option value="break_start">بريك</option>
+                  <option value="break_end">عودة</option>
                   <option value="check_out">انصراف</option>
                 </select>
               </div>
               <div>
-                <label className="block text-xs font-bold mb-1">الوقت</label>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  الوقت
+                </label>
                 <input
                   type="time"
                   value={editingLog.hhmm}
-                  onChange={(e) => setEditingLog((l) => ({ ...l, hhmm: e.target.value }))}
-                  className="g-input num-ltr font-black"
+                  onChange={(e) =>
+                    setEditingLog((l) => ({ ...l, hhmm: e.target.value }))
+                  }
+                  className="g-input num-ltr"
                 />
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-bold mb-1">دقائق التأخير</label>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  التأخير (د)
+                </label>
                 <input
                   type="number"
                   min="0"
@@ -1458,54 +1900,157 @@ export default function AttendanceView({
                   onChange={(e) =>
                     setEditingLog((l) => ({ ...l, late_minutes: e.target.value }))
                   }
-                  className="g-input num-ltr font-bold"
+                  className="g-input num-ltr"
                 />
               </div>
               <div>
-                <label className="block text-xs font-bold mb-1">مدة الاستراحة الفعلية (د)</label>
+                <label className="block text-xs font-medium text-ink-muted mb-1">
+                  البريك (د)
+                </label>
                 <input
                   type="number"
                   min="0"
                   value={editingLog.break_duration_minutes ?? 0}
                   onChange={(e) =>
-                    setEditingLog((l) => ({ ...l, break_duration_minutes: e.target.value }))
+                    setEditingLog((l) => ({
+                      ...l,
+                      break_duration_minutes: e.target.value,
+                    }))
                   }
-                  className="g-input num-ltr font-bold"
+                  className="g-input num-ltr"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-bold mb-1">ملاحظة / سبب الاستراحة</label>
+              <label className="block text-xs font-medium text-ink-muted mb-1">
+                ملاحظة
+              </label>
               <input
                 type="text"
                 value={editingLog.note || ''}
-                onChange={(e) => setEditingLog((l) => ({ ...l, note: e.target.value }))}
+                onChange={(e) =>
+                  setEditingLog((l) => ({ ...l, note: e.target.value }))
+                }
                 className="g-input"
               />
             </div>
 
-            <label className="flex items-center gap-2 p-3 rounded-2xl bg-[var(--g-surface-variant)] text-xs font-extrabold cursor-pointer">
-              <input
-                type="checkbox"
+            <div className="border-y border-line">
+              <ToggleSwitch
                 checked={Boolean(editingLog.verified_by_cctv)}
-                onChange={(e) =>
-                  setEditingLog((l) => ({ ...l, verified_by_cctv: e.target.checked }))
+                onChange={(val) =>
+                  setEditingLog((l) => ({ ...l, verified_by_cctv: val }))
                 }
-                className="w-4 h-4 accent-[#146C2E]"
+                label="مؤكد بالكاميرا"
               />
-              <span>معتمد ومطابق بالكاميرا ✓</span>
-            </label>
-
-            <button
-              type="submit"
-              className="w-full py-3.5 rounded-full bg-[var(--g-primary)] text-white font-extrabold text-sm"
-            >
-              حفظ تعديل الحركة ✓
-            </button>
+            </div>
           </form>
-        </div>
-      )}
+        )}
+      </BottomSheet>
+
+      {/* MODAL 4: Mobile Export & Print QR BottomSheet */}
+      <BottomSheet
+        open={exportSheetOpen}
+        onClose={() => setExportSheetOpen(false)}
+        title="تصدير الحضور"
+        subtitle={dateKey || ''}
+        maxWidth="max-w-md"
+      >
+        <GroupedList>
+          {canPrintCards && (
+            <GroupedRow
+              onClick={() => {
+                setExportSheetOpen(false);
+                onOpenQrModal?.('cards');
+              }}
+            >
+              <span className="text-sm font-medium text-ink">
+                كروت QR ({employees.length})
+              </span>
+              <Icon name="print" size={18} className="text-ink-muted" />
+            </GroupedRow>
+          )}
+          {(canExport || canWrite || canVerify) && (
+            <>
+              <GroupedRow
+                onClick={async () => {
+                  await handleExportAttendanceExcel();
+                  setExportSheetOpen(false);
+                }}
+              >
+                <span className="text-sm font-medium text-ink">Excel (.xlsx)</span>
+                <Icon name="table_view" size={18} className="text-success" />
+              </GroupedRow>
+              <GroupedRow
+                onClick={async () => {
+                  await handleCopyAttendanceText();
+                  setExportSheetOpen(false);
+                }}
+              >
+                <span className="text-sm font-medium text-ink">نسخ النص</span>
+                <Icon name="content_copy" size={18} className="text-ink-muted" />
+              </GroupedRow>
+              <GroupedRow
+                onClick={() => {
+                  handleShareAttendanceWhatsApp();
+                  setExportSheetOpen(false);
+                }}
+              >
+                <span className="text-sm font-medium text-ink">واتساب</span>
+                <Icon name="send" size={18} className="text-[var(--g-whatsapp)]" />
+              </GroupedRow>
+            </>
+          )}
+        </GroupedList>
+      </BottomSheet>
+
+      <ConfirmSheet
+        open={Boolean(confirmCheckoutEmp)}
+        onClose={() => !submitting && setConfirmCheckoutEmp(null)}
+        onConfirm={async () => {
+          const emp = confirmCheckoutEmp;
+          if (!emp) return;
+          await handleQuickCardAction(emp, 'check_out');
+          setConfirmCheckoutEmp(null);
+        }}
+        loading={submitting}
+        tone="danger"
+        title="تأكيد الانصراف"
+        description={confirmCheckoutEmp ? `تسجيل انصراف "${confirmCheckoutEmp.name}"؟` : ''}
+        confirmLabel="انصراف"
+      />
+
+      <ConfirmSheet
+        open={Boolean(confirmReopenEmp)}
+        onClose={() => !submitting && setConfirmReopenEmp(null)}
+        onConfirm={async () => {
+          const emp = confirmReopenEmp;
+          if (!emp) return;
+          await handleQuickCardAction(emp, 'check_in', null, null, true);
+          setConfirmReopenEmp(null);
+        }}
+        loading={submitting}
+        tone="warning"
+        title="إعادة فتح الشفت"
+        description={confirmReopenEmp ? `إعادة فتح الشفت لـ "${confirmReopenEmp.name}"؟` : ''}
+        confirmLabel="إعادة فتح"
+      />
+
+      <ConfirmSheet
+        open={Boolean(deleteLogTarget)}
+        onClose={() => !deletingLogId && setDeleteLogTarget(null)}
+        onConfirm={handleConfirmDeleteLog}
+        loading={Boolean(deletingLogId)}
+        tone="danger"
+        title="حذف الحركة"
+        description={
+          deleteLogTarget
+            ? `حذف "${ACTION_META[deleteLogTarget.action_type]?.label || deleteLogTarget.action_type} · ${deleteLogTarget.employee_name}"؟`
+            : ''
+        }
+        confirmLabel="حذف"
+      />
     </div>
   );
 }

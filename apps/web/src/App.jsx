@@ -1,4 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import AmbientBackdrop from './components/AmbientBackdrop.jsx';
+import AppShell from './components/AppShell.jsx';
 import TopBar from './components/TopBar.jsx';
 import BottomNav from './components/BottomNav.jsx';
 import SmartAlertsAndHandoverBar from './components/SmartAlertsAndHandoverBar.jsx';
@@ -10,16 +13,21 @@ import ScheduleView from './components/ScheduleView.jsx';
 import CctvNotesView from './components/CctvNotesView.jsx';
 import TeamChatView from './components/TeamChatView.jsx';
 import AdminDashboard from './components/AdminDashboard.jsx';
+import SettingsView from './components/SettingsView.jsx';
 import KioskLockView from './components/KioskLockView.jsx';
 import AuthLoginScreen from './components/AuthLoginScreen.jsx';
 import ProfileModal from './components/ProfileModal.jsx';
 import PersonLogModal from './components/PersonLogModal.jsx';
 import WalkieFloatingDock from './components/WalkieFloatingDock.jsx';
 import WalkieTalkieConsole from './components/WalkieTalkieConsole.jsx';
+import { popModalLayer, pushModalLayer } from './components/ui/BottomSheet.jsx';
 import {
+  BrandLogo,
+  Icon,
   SkeletonKpiStrip,
   SkeletonList,
   SmartFab,
+  ToastHost,
 } from './components/ui/index.js';
 import {
   fetchBootstrap,
@@ -27,6 +35,7 @@ import {
   flushOfflineQueue,
   getOfflineQueue,
   getCachedAuthSession,
+  setAuthSession,
   onAuthInvalidated,
   logoutSession,
   lockDeviceToKiosk,
@@ -34,12 +43,12 @@ import {
   hasAnyPermission,
   resolveApiUrl,
   isDirectCloudToken,
-  getLiteModeEnabled,
-  setLiteModeEnabled,
 } from './lib/api.js';
 import { subscribeSyncState } from './lib/localDb.js';
 import { playSuccessChime } from './lib/audio.js';
+import { buildNavTabs, getPreferredAllowedTab } from './lib/navigation.js';
 import { subscribeGlobalStoreSync } from './lib/supabaseRealtime.js';
+import { useTheme } from './lib/themeContext.jsx';
 import { emitWalkieSseEvent, useWalkieTalkie } from './lib/useWalkieTalkie.js';
 
 function getTodayLocalKey() {
@@ -51,78 +60,49 @@ function getTodayLocalKey() {
   ].join('-');
 }
 
-function getPreferredAllowedTab(role, perms = []) {
-  const canAtt = hasAnyPermission(perms, role, [
-    'attendance:self',
-    'attendance:read',
-    'attendance:write',
-    'attendance:kiosk',
-  ]);
-  const canSht = hasAnyPermission(perms, role, [
-    'shortages:read',
-    'shortages:write',
-    'shortages:manage',
-  ]);
-  const canTrk = hasAnyPermission(perms, role, ['trucks:read', 'trucks:write']);
-  const canNot = hasAnyPermission(perms, role, ['notes:read', 'notes:write']);
-  const canSched = hasAnyPermission(perms, role, [
-    'schedule:read',
-    'schedule:manage',
-    'schedule:swap_request',
-  ]);
-  const canDash = hasAnyPermission(perms, role, [
-    'reports:view',
-    'staff:manage',
-    'suppliers:manage',
-    'users:manage',
-    'audit:view',
-    'settings:manage',
-    'backup:manage',
-  ]);
-
-  if (role === 'owner' && canDash) return 'dashboard';
-  if (role === 'hall' && canSht) return 'shortages';
-  if (canAtt) return 'attendance';
-  if (canSht) return 'shortages';
-  if (canSched) return 'schedule';
-  if (canTrk) return 'trucks';
-  if (canNot) return 'notes';
-  if (canDash) return 'dashboard';
-  return 'shortages';
-}
+const VALID_URL_TABS = [
+  'attendance',
+  'shortages',
+  'schedule',
+  'trucks',
+  'notes',
+  'chat',
+  'dashboard',
+  'settings',
+];
 
 export default function App() {
   const todayKey = getTodayLocalKey();
+  const {
+    darkMode,
+    toggleDarkMode,
+    fontScale,
+    cycleFontScale,
+    fontFamily,
+    cycleFontFamily,
+    liteMode,
+    setLiteMode,
+    setKioskLocked,
+    voiceConfirm: voiceConfirmEnabled,
+    setVoiceConfirm: setVoiceConfirmEnabled,
+    applyServerPrefs,
+  } = useTheme();
+
   const [authSession, setAuthSessionState] = useState(() => getCachedAuthSession());
   const [selectedDate, setSelectedDate] = useState(todayKey);
   const [activeTab, setActiveTab] = useState(() => {
     if (typeof window !== 'undefined') {
       const requestedTab = new URLSearchParams(window.location.search).get('tab');
-      if (
-        ['attendance', 'shortages', 'schedule', 'trucks', 'notes', 'chat', 'dashboard'].includes(
-          requestedTab
-        )
-      ) {
+      if (VALID_URL_TABS.includes(requestedTab)) {
         return requestedTab;
       }
     }
     const cached = getCachedAuthSession();
     return getPreferredAllowedTab(cached?.user?.role || '', cached?.permissions || []);
   });
-  const [darkMode, setDarkMode] = useState(
-    () => localStorage.getItem('zayed_dark_mode') === 'true'
-  );
-  const [fontScale, setFontScale] = useState(
-    () => localStorage.getItem('zayed_font_scale') || 'scale-normal'
-  );
-  const [fontFamily, setFontFamily] = useState(
-    () => localStorage.getItem('zayed_font_family_v2') || 'cairo'
-  );
-  const [voiceConfirmEnabled, setVoiceConfirmEnabled] = useState(
-    () => localStorage.getItem('zayed_voice_confirm') !== 'false'
-  );
-  const [liteMode, setLiteMode] = useState(() => getLiteModeEnabled());
+  const [settingsSection, setSettingsSection] = useState('profile');
   const lastBackPressRef = useRef(0);
+  const hydratedPrefsUserRef = useRef('');
 
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -154,11 +134,78 @@ export default function App() {
     }, 3400);
   }, []);
 
+  const handleOpenSettings = useCallback((section = 'profile') => {
+    setSettingsSection(typeof section === 'string' && section ? section : 'profile');
+    setShowProfileModal(false);
+    setActiveTab('settings');
+  }, []);
+
+  // Immediate (<50ms) state sync when a user updates their photo, username, display name, or password
+  const handleUserUpdated = useCallback((updatedUser, freshToken) => {
+    if (!updatedUser) return;
+    setAuthSessionState((prev) => {
+      const token = freshToken || prev?.token || '';
+      const perms = prev?.permissions || [];
+      const mergedUser = { ...(prev?.user || {}), ...updatedUser };
+      if (token && mergedUser.id) {
+        setAuthSession(token, mergedUser, perms);
+      }
+      return prev
+        ? {
+            ...prev,
+            token,
+            user: mergedUser,
+          }
+        : prev;
+    });
+
+    setData((prev) => {
+      if (!prev) return prev;
+      const mergedAuthUser = { ...(prev.auth?.user || {}), ...updatedUser };
+      const nextMyProfile = prev.myProfile
+        ? {
+            ...prev.myProfile,
+            ...updatedUser,
+            effective_avatar_url:
+              updatedUser.avatar_url ??
+              updatedUser.effective_avatar_url ??
+              prev.myProfile.effective_avatar_url,
+          }
+        : prev.myProfile;
+      const targetEmpId = updatedUser.employee_id || prev.myProfile?.employee_id || '';
+      const nextEmployees = Array.isArray(prev.employees)
+        ? prev.employees.map((e) =>
+            targetEmpId && e.id === targetEmpId
+              ? {
+                  ...e,
+                  name: updatedUser.display_name || e.name,
+                  avatar_url:
+                    updatedUser.avatar_url !== undefined ? updatedUser.avatar_url : e.avatar_url,
+                  avatar_preset:
+                    updatedUser.avatar_preset !== undefined
+                      ? updatedUser.avatar_preset
+                      : e.avatar_preset,
+                  avatar_color: updatedUser.avatar_color || e.avatar_color,
+                }
+              : e
+          )
+        : prev.employees;
+
+      return {
+        ...prev,
+        auth: prev.auth ? { ...prev.auth, user: mergedAuthUser } : prev.auth,
+        myProfile: nextMyProfile,
+        employees: nextEmployees,
+      };
+    });
+  }, []);
+
   // Listen for 401 session expiration / remote session revocation
   useEffect(() => {
     return onAuthInvalidated(() => {
       setAuthSessionState(null);
       setData(null);
+      hydratedPrefsUserRef.current = '';
     });
   }, []);
 
@@ -175,22 +222,37 @@ export default function App() {
     });
   }, []);
 
-  const applyBootstrapSnapshot = useCallback((snap) => {
-    if (!snap) return;
-    setData(snap);
-    if (snap.auth?.user) {
-      setAuthSessionState((prev) =>
-        prev
-          ? {
-              ...prev,
-              user: snap.auth.user,
-              permissions: snap.auth.permissions || [],
-            }
-          : prev
-      );
-    }
-    setOfflineQueueCount(getOfflineQueue().length);
-  }, []);
+  const applyBootstrapSnapshot = useCallback(
+    (snap) => {
+      if (!snap) return;
+      setData(snap);
+      if (snap.auth?.user) {
+        setAuthSessionState((prev) =>
+          prev
+            ? {
+                ...prev,
+                user: snap.auth.user,
+                permissions: snap.auth.permissions || [],
+              }
+            : prev
+        );
+        const userId = snap.auth.user.id || '';
+        const serverPrefs =
+          snap.myProfile?.preferences || snap.auth.user?.preferences || null;
+        if (
+          userId &&
+          hydratedPrefsUserRef.current !== userId &&
+          serverPrefs &&
+          Object.keys(serverPrefs).length > 0
+        ) {
+          hydratedPrefsUserRef.current = userId;
+          applyServerPrefs(serverPrefs);
+        }
+      }
+      setOfflineQueueCount(getOfflineQueue().length);
+    },
+    [applyServerPrefs]
+  );
 
   const loadData = useCallback(async () => {
     if (!authSession?.token) {
@@ -375,9 +437,9 @@ export default function App() {
           const flushed = await flushOfflineQueue();
           await loadData();
           if (flushed > 0) {
-            showToast(`تم استعادة الاتصال — تم رفع (${flushed}) حركات وتحديث البيانات تلقائياً ✓`);
+            showToast(`تم استعادة الاتصال ومزامنة (${flushed}) حركات`);
           } else if (liveConnectionMode === 'offline_cached') {
-            showToast('تم استعادة الاتصال وتحديث البيانات من السيرفر تلقائياً ✓');
+            showToast('تم استعادة الاتصال وتحديث البيانات');
           }
         } catch {
           // Still offline
@@ -390,9 +452,9 @@ export default function App() {
         const flushed = await flushOfflineQueue();
         await loadData();
         if (flushed > 0) {
-          showToast(`تم استعادة الاتصال — تم رفع (${flushed}) حركات وتحديث البيانات تلقائياً ✓`);
+          showToast(`تم استعادة الاتصال ومزامنة (${flushed}) حركات`);
         } else {
-          showToast('تم استعادة الاتصال وتحديث أحدث البيانات تلقائياً ✓');
+          showToast('تم استعادة الاتصال وتحديث البيانات');
         }
       } catch {
         // ignore
@@ -405,7 +467,7 @@ export default function App() {
       flushOfflineQueue()
         .then((flushed) => {
           if (flushed > 0) {
-            showToast(`تمت مزامنة (${flushed}) حركات محفوظة على الهاتف تلقائياً ✓`);
+            showToast(`تمت مزامنة (${flushed}) حركات`);
           }
           loadData();
         })
@@ -428,19 +490,22 @@ export default function App() {
       window.removeEventListener('focus', handleVisibilityOrFocus);
       document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
     };
-  }, [authSession?.token, liveConnectionMode, loadData, showToast]);
+  }, [authSession?.token, liveConnectionMode, loadData, loadDataIfChanged, showToast]);
 
   const handleManualFlushSync = useCallback(async () => {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-      showToast('الهاتف في وضع الأوفلاين حالياً — جميع حركاتك محفوظة بأمان على الجهاز وسيتم رفعها فور عودة الإنترنت', 'error');
+      showToast(
+        'الهاتف في وضع الأوفلاين حالياً — جميع حركاتك محفوظة بأمان على الجهاز وسيتم رفعها فور عودة الإنترنت',
+        'error'
+      );
       return;
     }
     const flushed = await flushOfflineQueue();
     await loadData();
     if (flushed > 0) {
-      showToast(`تم رفع ومزامنة (${flushed}) حركات مع السيرفر بنجاح ✓`);
+      showToast(`تمت مزامنة (${flushed}) حركات`);
     } else {
-      showToast('جميع البيانات محدثة ومتزامنة بالفعل ✓');
+      showToast('جميع البيانات محدثة');
     }
   }, [loadData, showToast]);
 
@@ -454,35 +519,26 @@ export default function App() {
     onToast: showToast,
   });
 
-  // Dark Mode applies to staff/admin, while Worker Kiosk ALWAYS stays in bright Daylight mode!
+  // Enforce bright Daylight Classic theme when locked to Worker Kiosk (unmounts AmbientBackdrop cleanly)
   useEffect(() => {
-    const shouldBeDark = darkMode && role !== 'kiosk';
-    document.body.classList.toggle('dark-theme', shouldBeDark);
-    localStorage.setItem('zayed_dark_mode', String(darkMode));
-  }, [darkMode, role]);
+    setKioskLocked(role === 'kiosk');
+    return () => setKioskLocked(false);
+  }, [role, setKioskLocked]);
 
+  // Close Lightbox Preview on Escape key + coordinate modal floating-chrome hide layer
+  const previewOpen = Boolean(previewModal);
   useEffect(() => {
-    document.body.classList.remove('font-cairo', 'font-tajawal', 'font-readex');
-    if (fontFamily === 'tajawal') {
-      document.body.classList.add('font-tajawal');
-    } else if (fontFamily === 'readex') {
-      document.body.classList.add('font-readex');
-    } else {
-      document.body.classList.add('font-cairo');
-    }
-    localStorage.setItem('zayed_font_family_v2', fontFamily);
-  }, [fontFamily]);
-
-  useEffect(() => {
-    const html = document.documentElement;
-    html.classList.remove('scale-normal', 'scale-large', 'scale-xlarge');
-    html.classList.add(fontScale);
-    localStorage.setItem('zayed_font_scale', fontScale);
-  }, [fontScale]);
-
-  useEffect(() => {
-    setLiteModeEnabled(liteMode);
-  }, [liteMode]);
+    if (!previewOpen) return undefined;
+    pushModalLayer();
+    const onKey = (e) => {
+      if (e.key === 'Escape') setPreviewModal(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      popModalLayer();
+    };
+  }, [previewOpen]);
 
   // Native Android Hardware Back Button handler (closes open sheets/modals before exiting)
   useEffect(() => {
@@ -604,6 +660,7 @@ export default function App() {
     'settings:manage',
     'backup:manage',
   ]);
+  const canSettings = Boolean(role && role !== 'kiosk');
 
   latestRealtimeMetaRef.current = {
     role,
@@ -626,7 +683,8 @@ export default function App() {
       (activeTab === 'trucks' && canTrucks) ||
       (activeTab === 'notes' && canNotes) ||
       (activeTab === 'chat' && canChat) ||
-      (activeTab === 'dashboard' && canDashboard);
+      (activeTab === 'dashboard' && canDashboard) ||
+      (activeTab === 'settings' && canSettings);
 
     if (!tabAllowed) {
       setActiveTab(getPreferredAllowedTab(role, permissions));
@@ -643,24 +701,17 @@ export default function App() {
     canNotes,
     canChat,
     canDashboard,
+    canSettings,
   ]);
-
-  function cycleFontScale() {
-    setFontScale((prev) =>
-      prev === 'scale-normal'
-        ? 'scale-large'
-        : prev === 'scale-large'
-        ? 'scale-xlarge'
-        : 'scale-normal'
-    );
-  }
 
   async function handleLogout() {
     await logoutSession();
     setQrModalTab(null);
     setShowHandoverModal(false);
+    setShowProfileModal(false);
     setAuthSessionState(null);
     setData(null);
+    hydratedPrefsUserRef.current = '';
   }
 
   async function handleLockToKiosk() {
@@ -668,59 +719,58 @@ export default function App() {
       const nextSession = await lockDeviceToKiosk();
       setQrModalTab(null);
       setShowHandoverModal(false);
+      setShowProfileModal(false);
       setAuthSessionState(nextSession);
-      showToast('تم قفل الجهاز بأمان على وضع كشك حضور العمال ✓');
+      showToast('تم قفل الجهاز على وضع الكشك');
     } catch (err) {
       showToast(err.message || 'تعذر تفعيل وضع الكشك', 'error');
     }
   }
 
-  // 1. Unauthenticated Gate -> Password Pad
+  // 1. Unauthenticated Gate -> Role Photo & Password Login Screen
   if (!authSession?.token) {
     return (
-      <AuthLoginScreen
-        darkMode={darkMode}
-        onToggleDarkMode={() => setDarkMode((d) => !d)}
-        liteMode={liteMode}
-        onToggleLiteMode={() => {
-          setLiteMode((l) => {
-            const next = !l;
-            showToast(
-              next
-                ? 'تم تفعيل وضع الأداء الخفيف للهواتف الاقتصادية ⚡'
-                : 'تم تفعيل الوضع البصري الكامل'
+      <>
+        <AmbientBackdrop />
+        <AuthLoginScreen
+          darkMode={darkMode}
+          onToggleDarkMode={toggleDarkMode}
+          liteMode={liteMode}
+          onToggleLiteMode={() => {
+            setLiteMode((l) => {
+              const next = !l;
+              showToast(next ? 'تم تفعيل الأداء الخفيف' : 'تم تفعيل الوضع الكامل');
+              return next;
+            });
+          }}
+          onToast={showToast}
+          onLoginSuccess={(session) => {
+            setAuthSessionState(session);
+            if (session.user?.preferences) {
+              hydratedPrefsUserRef.current = session.user.id || '';
+              applyServerPrefs(session.user.preferences);
+            }
+            setActiveTab(
+              getPreferredAllowedTab(session.user?.role || '', session.permissions || [])
             );
-            return next;
-          });
-        }}
-        onLoginSuccess={(session) => {
-          setAuthSessionState(session);
-          setActiveTab(getPreferredAllowedTab(session.user?.role || '', session.permissions || []));
-        }}
-      />
+          }}
+        />
+        <ToastHost toast={toast} onDismiss={() => setToast(null)} />
+      </>
     );
   }
 
   if (loading && !data) {
     return (
-      <div className="min-h-[100dvh] bg-[var(--g-bg)] px-3 sm:px-6 py-4 space-y-5 max-w-7xl mx-auto">
-        <div className="h-14 rounded-2xl bg-[var(--g-surface)] border border-[var(--g-border)] px-4 flex items-center gap-3">
-          <img
-            src="/Logo.png"
-            onError={(e) => {
-              if (e.currentTarget.src.endsWith('/Logo.png')) {
-                e.currentTarget.src = '/logo.jpeg';
-              }
-            }}
-            alt="زايد مارت"
-            className="w-9 h-9 rounded-xl object-cover border border-[var(--g-border)] bg-white"
-          />
-          <div className="font-extrabold text-sm sm:text-base text-[var(--g-text)]">
+      <div className="min-h-[100dvh] bg-canvas px-3 sm:px-6 py-4 space-y-5 max-w-7xl mx-auto">
+        <div className="h-14 rounded-2xl bg-surface border border-line px-4 flex items-center gap-3">
+          <BrandLogo alt="زايد مارت" size="sm" />
+          <div className="font-extrabold text-sm sm:text-base text-ink">
             جاري تجهيز لوحة زايد مارت...
           </div>
         </div>
         <SkeletonKpiStrip count={4} />
-        <SkeletonList rows={5} />
+        <SkeletonList count={5} />
       </div>
     );
   }
@@ -748,16 +798,14 @@ export default function App() {
           onRefresh={loadData}
           onToast={showToast}
         />
+        <ToastHost toast={toast} onDismiss={() => setToast(null)} />
       </>
     );
   }
 
   const actorName = authUser?.display_name || 'المستخدم';
   const canVerify = hasPermission(permissions, role, 'attendance:verify');
-  const canWriteAttendance = hasAnyPermission(permissions, role, [
-    'attendance:write',
-    'attendance:kiosk',
-  ]);
+  const canWriteAttendance = hasPermission(permissions, role, 'attendance:write');
   const canSelfAttendance = hasPermission(permissions, role, 'attendance:self');
   const canReadAttendance = hasPermission(permissions, role, 'attendance:read');
   const canPrintCards = hasAnyPermission(permissions, role, [
@@ -776,15 +824,15 @@ export default function App() {
   const canExportReports = hasPermission(permissions, role, 'reports:export');
   const canManageRecords = hasPermission(permissions, role, 'records:manage');
 
-  const permittedTabsCount = [
-    canAttendance,
-    canShortages,
-    canSchedule,
-    canTrucks,
-    canNotes,
-    canChat,
-    canDashboard,
-  ].filter(Boolean).length;
+  const navTabs = buildNavTabs({
+    role,
+    permissions,
+    summary: data?.summary,
+    includeSettings: true,
+  });
+  const hasBottomNav = navTabs.length > 1;
+  const resolvedConnMode =
+    liveConnectionMode === 'offline_cached' ? 'offline_cached' : data?.connectionMode;
 
   function handleJumpToRealData(subTabId = 'staff') {
     setDashboardSubTab(subTabId);
@@ -792,96 +840,238 @@ export default function App() {
   }
 
   function handleSmartJumpTab(tabId, filterOpts = null) {
+    if (tabId === 'settings') {
+      handleOpenSettings(filterOpts?.section || 'profile');
+      return;
+    }
     setActiveTab(tabId);
     if (tabId === 'attendance' && filterOpts?.status) {
       setAttendanceFilterRequest({
         status: filterOpts.status,
         ts: Date.now(),
       });
+    } else if (tabId === 'dashboard' && filterOpts?.subTab) {
+      setDashboardSubTab(filterOpts.subTab);
     }
   }
 
   return (
-    <div
-      className={`min-h-[100dvh] w-full flex flex-col overflow-x-hidden ${
-        permittedTabsCount > 1
-          ? walkie.canUseWalkie
-            ? 'pb-38 md:pb-24'
-            : 'pb-24 md:pb-6'
-          : walkie.canUseWalkie
-          ? 'pb-24'
-          : 'pb-6'
-      }`}
-    >
-      <TopBar
-        storeName={data?.settings?.store_name}
-        branchName={data?.settings?.branch_name}
-        authUser={authUser}
-        permissions={permissions}
-        onLockToKiosk={handleLockToKiosk}
-        onLogout={handleLogout}
-        activeTab={activeTab}
-        onSelectTab={setActiveTab}
-        summary={data?.summary}
-        connectionMode={liveConnectionMode === 'offline_cached' ? 'offline_cached' : data?.connectionMode}
-        offlineQueueCount={offlineQueueCount}
-        isSyncing={isSyncing}
-        onFlushOfflineQueue={handleManualFlushSync}
-        onToast={showToast}
-        darkMode={darkMode}
-        onToggleDarkMode={() => setDarkMode((d) => !d)}
-        liteMode={liteMode}
-        onToggleLiteMode={() => {
-          setLiteMode((l) => {
-            const next = !l;
-            showToast(
-              next
-                ? 'تم تفعيل وضع الأداء الخفيف للهواتف الاقتصادية ⚡'
-                : 'تم تفعيل الوضع البصري الكامل'
-            );
-            return next;
-          });
-        }}
-        fontScale={fontScale}
-        onCycleFontScale={cycleFontScale}
-        fontFamily={fontFamily}
-        onToggleFontFamily={() =>
-          setFontFamily((f) =>
-            f === 'cairo' ? 'tajawal' : f === 'tajawal' ? 'readex' : 'cairo'
-          )
-        }
-        selectedDate={selectedDate}
-        onChangeDate={setSelectedDate}
-        todayKey={todayKey}
-        onOpenQrModal={() => setQrModalTab('code')}
-        onOpenHandoverModal={() => setShowHandoverModal(true)}
-        onOpenProfileModal={() => setShowProfileModal(true)}
-        canUseWalkie={walkie.canUseWalkie}
-        walkieActive={walkie.radioEnabled}
-        onOpenWalkieModal={() => walkie.setConsoleOpen(true)}
-      />
-
-      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-5">
-        {/* Live Shift Handover + Smart Timers + Buddy-Punching Verification Strip (Strictly Filtered by Role!) */}
-        <SmartAlertsAndHandoverBar
-          data={data}
-          canAttendance={canAttendance}
-          canTrucks={canTrucks}
-          canHandover={canHandover}
-          canVerify={canVerify}
-          actorName={actorName}
-          actorRole={role}
-          showHandoverModal={showHandoverModal}
-          onCloseHandoverModal={() => setShowHandoverModal(false)}
-          onJumpTab={handleSmartJumpTab}
-          onRefresh={loadData}
+    <AppShell
+      hasBottomNav={hasBottomNav}
+      header={
+        <TopBar
+          storeName={data?.settings?.store_name}
+          branchName={data?.settings?.branch_name}
+          authUser={authUser}
+          permissions={permissions}
+          onLockToKiosk={handleLockToKiosk}
+          onLogout={handleLogout}
+          activeTab={activeTab}
+          onSelectTab={setActiveTab}
+          summary={data?.summary}
+          connectionMode={resolvedConnMode}
+          offlineQueueCount={offlineQueueCount}
+          isSyncing={isSyncing}
+          onFlushOfflineQueue={handleManualFlushSync}
           onToast={showToast}
+          darkMode={darkMode}
+          onToggleDarkMode={toggleDarkMode}
+          liteMode={liteMode}
+          onToggleLiteMode={() => {
+            setLiteMode((l) => {
+              const next = !l;
+              showToast(next ? 'تم تفعيل الأداء الخفيف' : 'تم تفعيل الوضع الكامل');
+              return next;
+            });
+          }}
+          fontScale={fontScale}
+          onCycleFontScale={cycleFontScale}
+          fontFamily={fontFamily}
+          onToggleFontFamily={cycleFontFamily}
+          selectedDate={selectedDate}
+          onChangeDate={setSelectedDate}
+          todayKey={todayKey}
+          onOpenQrModal={() => setQrModalTab('code')}
+          onOpenHandoverModal={() => setShowHandoverModal(true)}
+          onOpenProfileModal={() => setShowProfileModal(true)}
+          onOpenSettings={handleOpenSettings}
+          canUseWalkie={walkie.canUseWalkie}
+          walkieActive={walkie.radioEnabled}
+          onOpenWalkieModal={() => walkie.setConsoleOpen(true)}
         />
+      }
+      footer={
+        <>
+          {/* Mobile Adaptive Bottom Dock */}
+          <BottomNav
+            activeTab={activeTab}
+            onSelectTab={setActiveTab}
+            onOpenSettings={handleOpenSettings}
+            authUser={authUser}
+            permissions={permissions}
+            summary={data?.summary}
+            onOpenQrModal={() => setQrModalTab('code')}
+            onOpenHandoverModal={() => setShowHandoverModal(true)}
+            onOpenWalkieModal={() => walkie.setConsoleOpen(true)}
+            canUseWalkie={walkie.canUseWalkie}
+          />
+
+          {/* Context-Aware Single Mobile FAB (hidden on Dashboard, Settings & Chat) */}
+          {activeTab !== 'settings' && activeTab !== 'dashboard' && (
+            <SmartFab
+              activeTab={activeTab}
+              hasBottomNav={hasBottomNav}
+              canWriteAttendance={canWriteAttendance}
+              canQr={canWriteAttendance}
+              canWriteShortages={canWriteShortages}
+              canWriteTrucks={canWriteTrucks}
+              canWriteNotes={canWriteNotes}
+              canHandover={canHandover}
+              canSwapSchedule={canSwapSchedule}
+              onOpenQr={() => setQrModalTab('code')}
+              onOpenHandover={() => setShowHandoverModal(true)}
+              onPrimaryAction={(action) => {
+                const tabMap = {
+                  shortage_add: 'shortages',
+                  truck_arrive: 'trucks',
+                  note_add: 'notes',
+                  schedule_swap: 'schedule',
+                };
+                const targetTab = tabMap[action];
+                if (targetTab && activeTab !== targetTab) {
+                  setActiveTab(targetTab);
+                  setTimeout(() => {
+                    window.dispatchEvent(
+                      new CustomEvent('zayed:open-composer', { detail: { action, type: action } })
+                    );
+                  }, 60);
+                } else if (action) {
+                  window.dispatchEvent(
+                    new CustomEvent('zayed:open-composer', { detail: { action, type: action } })
+                  );
+                }
+              }}
+            />
+          )}
+
+          {/* Floating Tactical Walkie-Talkie Quick-PTT Dock */}
+          <WalkieFloatingDock
+            walkie={walkie}
+            hasBottomNav={hasBottomNav}
+            compactOnDesktop={activeTab === 'settings'}
+          />
+
+          {/* Full Walkie-Talkie Tactical Console Modal */}
+          <WalkieTalkieConsole
+            open={walkie.consoleOpen}
+            onClose={() => walkie.setConsoleOpen(false)}
+            walkie={walkie}
+            authUser={authUser}
+            canManageRecords={canManageRecords}
+          />
+
+          {/* QR Card & Quick Code Modal */}
+          <QrQuickModal
+            open={Boolean(qrModalTab)}
+            initialTab={qrModalTab || 'code'}
+            onClose={() => setQrModalTab(null)}
+            employees={data?.employees || []}
+            storeName={data?.settings?.store_name || 'زايد مارت'}
+            actorName={actorName}
+            voiceConfirmEnabled={voiceConfirmEnabled}
+            canPrintCards={canPrintCards}
+            onRefresh={loadData}
+            onToast={showToast}
+          />
+
+          {/* Personal Profile Modal */}
+          <ProfileModal
+            open={showProfileModal}
+            onClose={() => setShowProfileModal(false)}
+            authUser={authUser}
+            onOpenSettings={handleOpenSettings}
+            onToast={showToast}
+          />
+
+          {/* Individual Employee / User Full Log Modal */}
+          <PersonLogModal
+            open={Boolean(personLogTarget)}
+            personId={personLogTarget?.id}
+            personName={personLogTarget?.name}
+            onClose={() => setPersonLogTarget(null)}
+            onToast={showToast}
+          />
+
+          {/* Lightbox Image Preview Modal (Portaled above all shells) */}
+          {previewModal &&
+            (typeof document !== 'undefined'
+              ? createPortal(
+                  <div
+                    onClick={() => setPreviewModal(null)}
+                    style={{ zIndex: 75 }}
+                    className="g-modal-overlay"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label={previewModal.title || 'معاينة الصورة'}
+                  >
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="g-dialog-sheet max-w-3xl p-0 overflow-hidden animate-pop"
+                    >
+                      <div className="p-4 flex items-center justify-between border-b border-line">
+                        <h3 className="text-sm sm:text-base font-semibold text-ink m-0 truncate">
+                          {previewModal.title}
+                        </h3>
+                        <button
+                          type="button"
+                          aria-label="إغلاق المعاينة"
+                          onClick={() => setPreviewModal(null)}
+                          className="w-11 h-11 rounded-full bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink flex items-center justify-center shrink-0 transition-colors active:scale-95"
+                        >
+                          <Icon name="close" size={20} />
+                        </button>
+                      </div>
+                      <div className="p-3 sm:p-4 bg-black/95 flex items-center justify-center">
+                        <img
+                          src={previewModal.url}
+                          alt={previewModal.title}
+                          className="max-h-[72dvh] w-auto object-contain rounded-xl"
+                        />
+                      </div>
+                    </div>
+                  </div>,
+                  document.body
+                )
+              : null)}
+
+          {/* Theme-Aware Snackbar Toast Host */}
+          <ToastHost toast={toast} onDismiss={() => setToast(null)} />
+        </>
+      }
+    >
+      <SmartAlertsAndHandoverBar
+        data={data}
+        showBanners={activeTab !== 'dashboard' && activeTab !== 'settings'}
+        canAttendance={canAttendance}
+        canTrucks={canTrucks}
+        canHandover={canHandover}
+        canVerify={canVerify}
+        actorName={actorName}
+        actorRole={role}
+        showHandoverModal={showHandoverModal}
+        onCloseHandoverModal={() => setShowHandoverModal(false)}
+        onJumpTab={handleSmartJumpTab}
+        onRefresh={loadData}
+        onToast={showToast}
+      />
 
         {activeTab === 'attendance' && canAttendance && (
           <AttendanceView
             employees={data?.employees || []}
             attendanceLogs={data?.attendanceLogs || []}
+            storeName={data?.settings?.store_name || 'زايد مارت'}
+            branchName={data?.settings?.branch_name || ''}
+            dateKey={data?.dateKey || selectedDate}
             maxBreakMinutes={data?.settings?.max_break_minutes || 30}
             actorName={actorName}
             actorRole={role}
@@ -892,6 +1082,7 @@ export default function App() {
             canVerify={canVerify}
             canReadLogs={canReadAttendance}
             canPrintCards={canPrintCards}
+            canExport={canExportReports || canWriteAttendance || canVerify}
             canManageStaff={canManageStaff}
             canManageRecords={canManageRecords}
             onJumpToRealData={handleJumpToRealData}
@@ -932,6 +1123,8 @@ export default function App() {
             canManage={canManageSchedule}
             canSwap={canSwapSchedule}
             canExport={canExportReports || canManageSchedule}
+            canVerify={canVerify}
+            canWriteAttendance={canWriteAttendance}
             onRefreshBootstrap={loadData}
             onToast={showToast}
           />
@@ -993,163 +1186,44 @@ export default function App() {
             requestedSubTab={dashboardSubTab}
             onClearRequestedSubTab={() => setDashboardSubTab(null)}
             voiceConfirmEnabled={voiceConfirmEnabled}
-            onToggleVoiceConfirm={() => {
-              setVoiceConfirmEnabled((v) => {
-                localStorage.setItem('zayed_voice_confirm', String(!v));
-                return !v;
-              });
-            }}
+            onToggleVoiceConfirm={() => setVoiceConfirmEnabled((v) => !v)}
+            onSelectTab={setActiveTab}
+            onSmartJumpTab={handleSmartJumpTab}
+            onOpenSettings={handleOpenSettings}
+            onOpenHandoverModal={() => setShowHandoverModal(true)}
             onOpenQrModal={(tab) => setQrModalTab(tab || 'cards')}
             onOpenPersonLog={(id, name) => setPersonLogTarget({ id, name })}
+            walkie={walkie}
             onRefresh={loadData}
             onToast={showToast}
             onPreviewImage={(url, title) => setPreviewModal({ url, title })}
           />
         )}
-      </main>
 
-      {/* Mobile Google Material 3 Bottom Navigation Bar */}
-      <BottomNav
-        activeTab={activeTab}
-        onSelectTab={setActiveTab}
-        authUser={authUser}
-        permissions={permissions}
-        summary={data?.summary}
-        onOpenQrModal={() => setQrModalTab('code')}
-        onOpenHandoverModal={() => setShowHandoverModal(true)}
-        onOpenWalkieModal={() => walkie.setConsoleOpen(true)}
-        canUseWalkie={walkie.canUseWalkie}
-      />
-
-      {/* Context-Aware Smart FAB + Quick Dial (right thumb-zone, opposite WalkieFloatingDock) */}
-      <SmartFab
-        activeTab={activeTab}
-        hasBottomNav={permittedTabsCount > 1}
-        canWriteAttendance={canWriteAttendance}
-        canQr={canWriteAttendance || canSelfAttendance || canPrintCards}
-        canWriteShortages={canWriteShortages}
-        canWriteTrucks={canWriteTrucks}
-        canWriteNotes={canWriteNotes}
-        canHandover={canHandover}
-        canSwapSchedule={canSwapSchedule}
-        onOpenQr={() => setQrModalTab('code')}
-        onOpenHandover={() => setShowHandoverModal(true)}
-        onPrimaryAction={(action) => {
-          const tabMap = {
-            shortage_add: 'shortages',
-            truck_arrive: 'trucks',
-            note_add: 'notes',
-            schedule_swap: 'schedule',
-          };
-          const targetTab = tabMap[action];
-          if (targetTab && activeTab !== targetTab) {
-            setActiveTab(targetTab);
-            setTimeout(() => {
-              window.dispatchEvent(
-                new CustomEvent('zayed:open-composer', { detail: { action, type: action } })
-              );
-            }, 60);
-          } else if (action) {
-            window.dispatchEvent(
-              new CustomEvent('zayed:open-composer', { detail: { action, type: action } })
-            );
-          }
-        }}
-      />
-
-      {/* Floating Tactical Walkie-Talkie Quick-PTT Dock */}
-      <WalkieFloatingDock
-        walkie={walkie}
-        hasBottomNav={permittedTabsCount > 1}
-      />
-
-      {/* Full Walkie-Talkie Tactical Console Modal */}
-      <WalkieTalkieConsole
-        open={walkie.consoleOpen}
-        onClose={() => walkie.setConsoleOpen(false)}
-        walkie={walkie}
-        authUser={authUser}
-        canManageRecords={canManageRecords}
-      />
-
-      {/* QR Card & Quick Code Modal */}
-      <QrQuickModal
-        open={Boolean(qrModalTab)}
-        initialTab={qrModalTab || 'code'}
-        onClose={() => setQrModalTab(null)}
-        employees={data?.employees || []}
-        storeName={data?.settings?.store_name || 'زايد مارت'}
-        actorName={actorName}
-        voiceConfirmEnabled={voiceConfirmEnabled}
-        canPrintCards={canPrintCards}
-        onRefresh={loadData}
-        onToast={showToast}
-      />
-
-      {/* Personal Profile Modal (Password, Personal QR & Personal Activity Log) */}
-      <ProfileModal
-        open={showProfileModal}
-        onClose={() => setShowProfileModal(false)}
-        authUser={authUser}
-        onToast={showToast}
-      />
-
-      {/* Individual Employee / User Full Log Modal */}
-      <PersonLogModal
-        open={Boolean(personLogTarget)}
-        personId={personLogTarget?.id}
-        personName={personLogTarget?.name}
-        onClose={() => setPersonLogTarget(null)}
-        onToast={showToast}
-      />
-
-      {/* Lightbox Image Preview Modal */}
-      {previewModal && (
-        <div onClick={() => setPreviewModal(null)} className="g-modal-overlay">
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="g-dialog-sheet max-w-3xl p-0 overflow-hidden animate-pop"
-          >
-            <div className="p-4 flex items-center justify-between border-b border-[var(--g-border)]">
-              <h3 className="text-sm sm:text-base font-extrabold m-0 truncate">
-                {previewModal.title}
-              </h3>
-              <button
-                type="button"
-                onClick={() => setPreviewModal(null)}
-                className="w-9 h-9 rounded-full bg-[var(--g-surface-variant)] flex items-center justify-center shrink-0"
-              >
-                <span className="ms-icon">close</span>
-              </button>
-            </div>
-            <div className="p-3 sm:p-4 bg-black/95 flex items-center justify-center">
-              <img
-                src={previewModal.url}
-                alt={previewModal.title}
-                className="max-h-[72dvh] w-auto object-contain rounded-xl"
-              />
-            </div>
-          </div>
-        </div>
+        {activeTab === 'settings' && canSettings && (
+          <SettingsView
+            data={data}
+            authUser={authUser}
+            myProfile={data?.myProfile}
+            permissions={permissions}
+            connectionMode={resolvedConnMode}
+            offlineQueueCount={offlineQueueCount}
+            isSyncing={isSyncing}
+            initialSection={settingsSection}
+            section={settingsSection}
+            onChangeSection={setSettingsSection}
+            onFlushOfflineQueue={handleManualFlushSync}
+            onUserUpdated={handleUserUpdated}
+            onOpenPersonLog={(id, name) => setPersonLogTarget({ id, name })}
+            onJumpToRbacMatrix={() => {
+              setDashboardSubTab('rbac');
+              setActiveTab('dashboard');
+            }}
+            onLogout={handleLogout}
+            onRefresh={loadData}
+            onToast={showToast}
+          />
       )}
-
-      {/* Google Material Snackbar Toast */}
-      {toast && (
-        <div
-          className={`fixed ${
-            permittedTabsCount > 1 ? 'bottom-20 md:bottom-6' : 'bottom-6'
-          } left-1/2 -translate-x-1/2 z-50 w-[92vw] max-w-md px-4 py-3.5 rounded-2xl shadow-lg flex items-center gap-2.5 text-xs sm:text-sm font-bold animate-pop bg-[#1F1F1F] text-white`}
-        >
-          <span
-            className={`ms-icon filled text-lg shrink-0 ${
-              toast.type === 'error' ? 'text-[#F28B82]' : 'text-[#81C995]'
-            }`}
-          >
-            {toast.type === 'error' ? 'error' : 'check_circle'}
-          </span>
-          <span className="leading-snug">{toast.message}</span>
-        </div>
-      )}
-    </div>
+    </AppShell>
   );
 }

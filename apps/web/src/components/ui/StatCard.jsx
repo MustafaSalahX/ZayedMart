@@ -1,90 +1,86 @@
 import React from 'react';
+import { useThemeArchitecture } from '../../lib/themeContext.jsx';
+import Icon from './Icon.jsx';
 
-const TONE_MAP = {
-  neutral: {
-    wrap: 'bg-[var(--g-surface)] border-[var(--g-border)]',
-    iconBox: 'bg-[var(--g-surface-variant)] text-[var(--g-text)]',
-    value: 'text-[var(--g-text)]',
-  },
-  primary: {
-    wrap: 'bg-[var(--g-surface)] border-[var(--g-primary)]/30',
-    iconBox: 'bg-[var(--g-primary-container)] text-[var(--g-primary)]',
-    value: 'text-[var(--g-primary)]',
-  },
-  success: {
-    wrap: 'bg-[var(--g-surface)] border-[var(--g-green-border)]/40',
-    iconBox: 'bg-[var(--g-green-bg)] text-[var(--g-green)]',
-    value: 'text-[var(--g-green)]',
-  },
-  warning: {
-    wrap: 'bg-[var(--g-surface)] border-[var(--g-yellow-border)]/40',
-    iconBox: 'bg-[var(--g-yellow-bg)] text-[var(--g-yellow)]',
-    value: 'text-[var(--g-yellow)]',
-  },
-  danger: {
-    wrap: 'bg-[var(--g-surface)] border-[var(--g-red-border)]/40',
-    iconBox: 'bg-[var(--g-red-bg)] text-[var(--g-red)]',
-    value: 'text-[var(--g-red)]',
-  },
-  purple: {
-    wrap: 'bg-[var(--g-surface)] border-[var(--g-purple-border)]/40',
-    iconBox: 'bg-[var(--g-purple-bg)] text-[var(--g-purple)]',
-    value: 'text-[var(--g-purple)]',
-  },
+const TONE_DOT = {
+  neutral: '',
+  primary: 'bg-primary-solid',
+  success: 'bg-success-solid',
+  warning: 'bg-warning-solid',
+  danger: 'bg-danger-solid',
+  purple: 'bg-purple-solid',
+};
+
+const TONE_VALUE = {
+  neutral: 'text-ink',
+  primary: 'text-ink',
+  success: 'text-success',
+  warning: 'text-warning',
+  danger: 'text-danger',
+  purple: 'text-purple',
 };
 
 /**
- * Compact KPI metric card with tabular numerals and optional interactive filter toggle.
+ * Detoxed Compact Metric Tile (`StatCard`):
+ * Strips colored icon squares, progress bars, and badge clutter so every caller inherits
+ * the clean 3-datum Apple / Linear metric aesthetic across all 5 theme architectures.
  */
 export default function StatCard({
   label,
   value,
   sublabel = '',
-  icon = '',
   tone = 'neutral',
   active = false,
+  chevron = undefined,
   onClick,
   className = '',
+  children,
 }) {
-  const t = TONE_MAP[tone] || TONE_MAP.neutral;
+  const arch = useThemeArchitecture();
   const Comp = onClick ? 'button' : 'div';
+  const showChevron = chevron !== undefined ? chevron : Boolean(onClick);
+  const dotCls = TONE_DOT[tone] || '';
+  const valueCls = TONE_VALUE[tone] || TONE_VALUE.neutral;
+  const surfaceCls = arch.id === 'liquid-glass' ? 'g-glass-pane rounded-[20px]' : 'g-card';
 
   return (
     <Comp
       type={onClick ? 'button' : undefined}
       onClick={onClick}
-      className={`text-right rounded-2xl border p-3 sm:p-3.5 min-h-[76px] flex items-center justify-between gap-2.5 transition-all duration-150 ${
-        t.wrap
-      } ${
+      className={`${surfaceCls} text-start p-3.5 sm:p-4 min-h-[82px] flex flex-col justify-between gap-2 min-w-0 transition-[transform,background-color,border-color,box-shadow] duration-150 ease-[var(--g-ease-out)] ${
         onClick
-          ? 'cursor-pointer hover:border-[var(--g-primary)] active:scale-[0.98]'
+          ? 'g-card-interactive g-glass-interactive cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--g-ring-focus)]'
           : ''
-      } ${
-        active
-          ? 'ring-2 ring-[var(--g-primary)] bg-[var(--g-surface-tint)] shadow-xs'
-          : ''
-      } ${className}`}
+      } ${active ? 'ring-2 ring-[var(--g-primary)] bg-surface-tint' : ''} ${className}`}
     >
-      <div className="min-w-0 flex-1">
-        <div className="text-[11px] sm:text-xs font-bold text-[var(--g-muted)] truncate">
-          {label}
-        </div>
-        <div className={`text-xl sm:text-2xl font-black num-ltr leading-tight mt-0.5 ${t.value}`}>
+      <div className="flex items-center justify-between gap-2 w-full min-w-0">
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-muted truncate">
+          {dotCls && (
+            <span className={`w-2 h-2 rounded-full shrink-0 ${dotCls}`} aria-hidden="true" />
+          )}
+          <span className="truncate">{label}</span>
+        </span>
+        {showChevron && (
+          <Icon
+            name="chevron_left"
+            size={16}
+            className="text-ink-muted opacity-65 ltr:rotate-180"
+          />
+        )}
+      </div>
+
+      <div className="space-y-0.5 min-w-0">
+        <div
+          className={`text-2xl sm:text-3xl font-semibold tracking-tight num-ltr leading-none ${valueCls}`}
+        >
           {value}
         </div>
         {sublabel && (
-          <div className="text-[10px] font-semibold text-[var(--g-muted)] truncate mt-0.5">
-            {sublabel}
-          </div>
+          <div className="text-xs font-normal text-ink-muted truncate">{sublabel}</div>
         )}
       </div>
-      {icon && (
-        <span
-          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${t.iconBox}`}
-        >
-          <span className="ms-icon filled text-xl">{icon}</span>
-        </span>
-      )}
+
+      {children}
     </Comp>
   );
 }

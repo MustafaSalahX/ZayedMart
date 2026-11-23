@@ -325,7 +325,9 @@ describe('ZayedMart NestJS API + Global Walkie-Talkie + Zero-Conflict Sync E2E',
     assert.ok(resetRes.json.permissions.includes('shortages:write'));
     assert.ok(resetRes.json.permissions.includes('notes:write'));
     assert.ok(resetRes.json.permissions.includes('walkie:use'));
-    assert.ok(resetRes.json.permissions.includes('attendance:self'));
+    assert.equal(resetRes.json.permissions.includes('attendance:self'), false);
+    assert.equal(resetRes.json.permissions.includes('attendance:kiosk'), false);
+    assert.equal(resetRes.json.permissions.includes('attendance:write'), false);
   });
 
   it('6. provides lightweight /api/sync-check digest and idempotent offline replay', async () => {
@@ -1245,5 +1247,918 @@ describe('ZayedMart NestJS API + Global Walkie-Talkie + Zero-Conflict Sync E2E',
     assert.equal(hallWorked.workedOnDayOff, true);
     assert.equal(hallWorked.currentStatus, 'present');
     assert.equal(bootWorked.json.summary.scheduledOffCount, offBefore);
+  });
+
+  let cctvToken = '';
+  let supervisorToken = '';
+  let warehouseToken = '';
+  let deliveryToken = '';
+  let cctvEmpId = '';
+  let supervisorEmpId = '';
+  let warehouseEmpId = '';
+  let deliveryEmpId = '';
+  let targetEmpId = '';
+  let nightHallEmpId = '';
+
+  it('14. enforces strict attendance RBAC (only owner/manager/supervisor/security/cctv can record)', async () => {
+    const overview = await api('/api/rbac/overview', 'GET', undefined, ownerToken);
+    assert.equal(overview.status, 200);
+    const { policies } = overview.json;
+
+    for (const nonKioskRole of [
+      'manager',
+      'supervisor',
+      'cctv',
+      'security',
+      'cashier',
+      'hall',
+      'warehouse',
+      'delivery',
+    ]) {
+      assert.equal(
+        policies[nonKioskRole].includes('attendance:self'),
+        false,
+        `${nonKioskRole} must not have attendance:self`
+      );
+      assert.equal(
+        policies[nonKioskRole].includes('attendance:kiosk'),
+        false,
+        `${nonKioskRole} must not have attendance:kiosk`
+      );
+    }
+
+    for (const restrictedRole of ['cashier', 'hall', 'warehouse', 'delivery', 'kiosk']) {
+      assert.equal(
+        policies[restrictedRole].includes('attendance:write'),
+        false,
+        `${restrictedRole} must not have attendance:write`
+      );
+      assert.equal(
+        policies[restrictedRole].includes('attendance:verify'),
+        false,
+        `${restrictedRole} must not have attendance:verify`
+      );
+    }
+
+    for (const authRole of ['owner', 'manager', 'supervisor', 'security', 'cctv']) {
+      assert.ok(policies[authRole].includes('attendance:write'));
+    }
+    for (const verifyRole of ['owner', 'manager', 'supervisor', 'cctv']) {
+      assert.ok(policies[verifyRole].includes('attendance:verify'));
+    }
+    assert.equal(policies.security.includes('attendance:verify'), false);
+    assert.ok(policies.kiosk.includes('attendance:kiosk'));
+
+    const cctvEmp = await api(
+      '/api/employees',
+      'POST',
+      { name: 'رامي مراقب الكاميرات', emp_code: '701', department: 'كاميرات', system_role: 'cctv' },
+      ownerToken
+    );
+    assert.equal(cctvEmp.status, 201);
+    cctvEmpId = cctvEmp.json.employee.id;
+
+    const supEmp = await api(
+      '/api/employees',
+      'POST',
+      { name: 'هاني مشرف الصالة', emp_code: '702', department: 'إدارة وإشراف', system_role: 'supervisor' },
+      ownerToken
+    );
+    assert.equal(supEmp.status, 201);
+    supervisorEmpId = supEmp.json.employee.id;
+
+    const whEmp = await api(
+      '/api/employees',
+      'POST',
+      { name: 'خالد أمين المخزن', emp_code: '703', department: 'مخزن', system_role: 'warehouse' },
+      ownerToken
+    );
+    assert.equal(whEmp.status, 201);
+    warehouseEmpId = whEmp.json.employee.id;
+
+    const delEmp = await api(
+      '/api/employees',
+      'POST',
+      { name: 'يوسف طيار التوصيل', emp_code: '704', department: 'دليفري', system_role: 'delivery' },
+      ownerToken
+    );
+    assert.equal(delEmp.status, 201);
+    deliveryEmpId = delEmp.json.employee.id;
+
+    const targetEmp = await api(
+      '/api/employees',
+      'POST',
+      {
+        name: 'وليد موظف صباحي',
+        emp_code: '705',
+        department: 'منسقي ممرات',
+        system_role: 'hall',
+        shift_start: '08:00',
+        shift_end: '20:00',
+        phone: '01000000705',
+      },
+      ownerToken
+    );
+    assert.equal(targetEmp.status, 201);
+    targetEmpId = targetEmp.json.employee.id;
+
+    const nightHallEmp = await api(
+      '/api/employees',
+      'POST',
+      {
+        name: 'باسم موظف ليلي',
+        emp_code: '706',
+        department: 'منسقي ممرات',
+        system_role: 'hall',
+        shift_start: '22:00',
+        shift_end: '06:00',
+      },
+      ownerToken
+    );
+    assert.equal(nightHallEmp.status, 201);
+    nightHallEmpId = nightHallEmp.json.employee.id;
+
+    cctvToken = (await api('/api/auth/login', 'POST', { password: '701' })).json.token;
+    supervisorToken = (await api('/api/auth/login', 'POST', { password: '702' })).json.token;
+    warehouseToken = (await api('/api/auth/login', 'POST', { password: '703' })).json.token;
+    deliveryToken = (await api('/api/auth/login', 'POST', { password: '704' })).json.token;
+
+    // Restricted roles CANNOT record attendance even for themselves or via quick-scan
+    for (const [label, tok, ownEmpId, ownCode] of [
+      ['cashier', cashier1Token, cashier1Id, '601'],
+      ['hall', hallToken, hallEmpId, '502'],
+      ['warehouse', warehouseToken, warehouseEmpId, '703'],
+      ['delivery', deliveryToken, deliveryEmpId, '704'],
+    ]) {
+      const attRes = await api(
+        '/api/attendance',
+        'POST',
+        { employee_id: ownEmpId, action_type: 'check_in' },
+        tok
+      );
+      assert.equal(attRes.status, 403, `${label} must get 403 on POST /api/attendance`);
+
+      const scanRes = await api(
+        '/api/attendance/quick-scan',
+        'POST',
+        { code_or_qr: ownCode, preferred_action: 'check_in' },
+        tok
+      );
+      assert.equal(scanRes.status, 403, `${label} must get 403 on POST /api/attendance/quick-scan`);
+    }
+
+    // Authorized roles succeed
+    const supCheckIn = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: supervisorEmpId, action_type: 'check_in' },
+      supervisorToken
+    );
+    assert.equal(supCheckIn.status, 201);
+
+    const mgrBreak = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: supervisorEmpId, action_type: 'break_start', allowed_break_minutes: 15 },
+      managerToken
+    );
+    assert.equal(mgrBreak.status, 201);
+
+    const ownerBreakEnd = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: supervisorEmpId, action_type: 'break_end' },
+      ownerToken
+    );
+    assert.equal(ownerBreakEnd.status, 201);
+
+    const secCheckOut = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: supervisorEmpId, action_type: 'check_out' },
+      securityToken
+    );
+    assert.equal(secCheckOut.status, 201);
+
+    const cctvCheckIn = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: cctvEmpId, action_type: 'check_in' },
+      cctvToken
+    );
+    assert.equal(cctvCheckIn.status, 201);
+  });
+
+  it('15. supports CCTV confirm + mismatch verification, verify-all mismatch skip, and range report fields', async () => {
+    // Security records check_in -> pending CCTV verification
+    const secIn = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: targetEmpId, action_type: 'check_in' },
+      securityToken
+    );
+    assert.equal(secIn.status, 201);
+    assert.equal(secIn.json.log.cctv_status, 'pending');
+    assert.equal(secIn.json.log.verified_by_cctv, 0);
+    const targetLogId = secIn.json.log.id;
+
+    // Security cannot verify (403)
+    const secVerifyAttempt = await api(
+      `/api/attendance/${targetLogId}/verify`,
+      'POST',
+      { status: 'confirmed' },
+      securityToken
+    );
+    assert.equal(secVerifyAttempt.status, 403);
+
+    // CCTV confirms attendance with observed time and note
+    const cctvConfirm = await api(
+      `/api/attendance/${targetLogId}/verify`,
+      'POST',
+      { status: 'confirmed', observed_time: '08:05', note: 'شوهد عند البوابة الرئيسية' },
+      cctvToken
+    );
+    assert.equal(cctvConfirm.status, 200);
+    assert.equal(cctvConfirm.json.ok, true);
+    assert.equal(cctvConfirm.json.log.cctv_status, 'confirmed');
+    assert.equal(cctvConfirm.json.log.verified_by_cctv, 1);
+    assert.equal(cctvConfirm.json.log.cctv_observed_time, '08:05');
+    assert.equal(cctvConfirm.json.log.cctv_note, 'شوهد عند البوابة الرئيسية');
+    assert.ok(cctvConfirm.json.log.verified_by);
+
+    // Security records check-in for cashier1 (pending) and cashier2 (to mark mismatch)
+    const c1In = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: cashier1Id, action_type: 'check_in' },
+      securityToken
+    );
+    assert.equal(c1In.status, 201);
+    const pendingLogId = c1In.json.log.id;
+
+    const c2In = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: cashier2Id, action_type: 'check_in' },
+      securityToken
+    );
+    assert.equal(c2In.status, 201);
+    const mismatchLogId = c2In.json.log.id;
+
+    // CCTV marks cashier2 log as mismatch via PATCH
+    const mismatchRes = await api(
+      `/api/attendance/${mismatchLogId}/verify`,
+      'PATCH',
+      { status: 'mismatch', observed_time: '09:15', note: 'لم يظهر بالكاميرا في هذا التوقيت' },
+      cctvToken
+    );
+    assert.equal(mismatchRes.status, 200);
+    assert.equal(mismatchRes.json.log.cctv_status, 'mismatch');
+    assert.equal(mismatchRes.json.log.verified_by_cctv, 0);
+
+    // CCTV records cashier3 check-in with confirm_by_cctv: false -> pending
+    const c3Pending = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: cashier3Id, action_type: 'check_in', confirm_by_cctv: false },
+      cctvToken
+    );
+    assert.equal(c3Pending.status, 201);
+    assert.equal(c3Pending.json.log.cctv_status, 'pending');
+    assert.equal(c3Pending.json.log.verified_by_cctv, 0);
+
+    // CCTV records warehouse check-in with default confirm_by_cctv -> auto-confirmed
+    const whAuto = await api(
+      '/api/attendance',
+      'POST',
+      {
+        employee_id: warehouseEmpId,
+        action_type: 'check_in',
+        cctv_observed_time: '08:02',
+        cctv_note: 'مطابقة فورية',
+      },
+      cctvToken
+    );
+    assert.equal(whAuto.status, 201);
+    assert.equal(whAuto.json.log.cctv_status, 'confirmed');
+    assert.equal(whAuto.json.log.verified_by_cctv, 1);
+    assert.equal(whAuto.json.log.cctv_observed_time, '08:02');
+
+    // Check bootstrap summary & enriched employee CCTV fields
+    const bootBeforeVerifyAll = await api('/api/bootstrap', 'GET', undefined, cctvToken);
+    assert.equal(bootBeforeVerifyAll.status, 200);
+    assert.ok(bootBeforeVerifyAll.json.summary.mismatchAttendanceCount >= 1);
+    const c2Emp = bootBeforeVerifyAll.json.employees.find((e) => e.id === cashier2Id);
+    assert.equal(c2Emp.latestCctvStatus, 'mismatch');
+    assert.equal(c2Emp.latestCctvObservedTime, '09:15');
+    assert.equal(c2Emp.latestCctvNote, 'لم يظهر بالكاميرا في هذا التوقيت');
+    assert.ok(c2Emp.latestVerifiedBy);
+    const delEmpBoot = bootBeforeVerifyAll.json.employees.find((e) => e.id === deliveryEmpId);
+    assert.equal(delEmpBoot.latestCctvStatus, 'none');
+
+    // Create a supplier + truck delivery so supplierStats is populated in /api/reports/range
+    const supRes = await api(
+      '/api/suppliers',
+      'POST',
+      { name: 'شركة المراعي', category: 'ألبان' },
+      ownerToken
+    );
+    assert.equal(supRes.status, 201);
+    const arriveRes = await api(
+      '/api/trucks/arrive',
+      'POST',
+      { supplier_id: supRes.json.supplier.id, supplier_name: 'شركة المراعي', category: 'ألبان' },
+      securityToken
+    );
+    assert.equal(arriveRes.status, 201);
+
+    const rangeRes = await api('/api/reports/range', 'GET', undefined, cctvToken);
+    assert.equal(rangeRes.status, 200);
+    assert.ok(rangeRes.json.totals.mismatchCount >= 1);
+    const targetStat = rangeRes.json.employeeStats.find((e) => e.id === targetEmpId);
+    assert.equal(targetStat.shift_start, '08:00');
+    assert.equal(targetStat.shift_end, '20:00');
+    assert.equal(typeof targetStat.breaksCount, 'number');
+    assert.equal(typeof targetStat.checkOutsCount, 'number');
+    assert.equal(targetStat.checkInsCount, 1);
+    const maraiStat = rangeRes.json.supplierStats.find((s) => s.name === 'شركة المراعي');
+    assert.ok(maraiStat);
+    assert.ok(maraiStat.id);
+
+    // verify-all confirms pending rows and strictly SKIPS mismatch row
+    const verifyAllRes = await api('/api/attendance/verify-all', 'POST', {}, cctvToken);
+    assert.equal(verifyAllRes.status, 200);
+    assert.ok(verifyAllRes.json.count >= 2);
+
+    const bootAfterVerifyAll = await api('/api/bootstrap', 'GET', undefined, cctvToken);
+    const pendingLogAfter = bootAfterVerifyAll.json.attendanceLogs.find((l) => l.id === pendingLogId);
+    const mismatchLogAfter = bootAfterVerifyAll.json.attendanceLogs.find((l) => l.id === mismatchLogId);
+    assert.equal(pendingLogAfter.cctv_status, 'confirmed');
+    assert.equal(pendingLogAfter.verified_by_cctv, 1);
+    assert.equal(mismatchLogAfter.cctv_status, 'mismatch');
+    assert.equal(mismatchLogAfter.verified_by_cctv, 0);
+  });
+
+  it('16. exposes shiftRoster in GET /api/schedules/week with strict visibility & privacy controls', async () => {
+    // Security sees full shift visibility across all 3 groups, canVerify: false, no emp_code
+    const secSched = await api('/api/schedules/week', 'GET', undefined, securityToken);
+    assert.equal(secSched.status, 200);
+    assert.equal(secSched.json.hasFullShiftVisibility, true);
+    assert.equal(secSched.json.canVerify, false);
+    assert.deepEqual(secSched.json.visibleGroups, ['cashiers', 'hall', 'security_cctv']);
+    assert.equal(secSched.json.groups.length, 3);
+    assert.equal('emp_code' in secSched.json.groups[0].employees[0], false);
+
+    const secTargetItem = secSched.json.shiftRoster.find((e) => e.id === targetEmpId);
+    assert.ok(secTargetItem);
+    assert.equal(secTargetItem.currentStatus, 'present');
+    assert.equal(secTargetItem.latestCctvStatus, 'confirmed');
+    assert.equal(secTargetItem.phone, '01000000705');
+    assert.ok(secTargetItem.checkInTime);
+    assert.ok(secTargetItem.latestLogId);
+    assert.equal(typeof secTargetItem.lateMinutes, 'number');
+
+    // CCTV sees full shift visibility and canVerify: true
+    const cctvSched = await api('/api/schedules/week', 'GET', undefined, cctvToken);
+    assert.equal(cctvSched.status, 200);
+    assert.equal(cctvSched.json.hasFullShiftVisibility, true);
+    assert.equal(cctvSched.json.canVerify, true);
+    assert.ok(cctvSched.json.shiftRoster.some((e) => e.id === cashier2Id && e.latestCctvStatus === 'mismatch'));
+
+    // Manager sees emp_code in groups[].employees[]
+    const mgrSched = await api('/api/schedules/week', 'GET', undefined, managerToken);
+    assert.equal(mgrSched.status, 200);
+    assert.ok('emp_code' in mgrSched.json.groups[0].employees[0]);
+
+    // Cashier1 sees hasFullShiftVisibility: false, overlapsMyShift, NO sensitive/oversight fields, and NO non-overlapping night hall worker
+    const c1Sched = await api('/api/schedules/week', 'GET', undefined, cashier1Token);
+    assert.equal(c1Sched.status, 200);
+    assert.equal(c1Sched.json.hasFullShiftVisibility, false);
+    assert.equal(c1Sched.json.canVerify, false);
+    assert.deepEqual(c1Sched.json.visibleGroups, ['cashiers']);
+    assert.equal('emp_code' in c1Sched.json.groups[0].employees[0], false);
+
+    const c1Me = c1Sched.json.shiftRoster.find((e) => e.id === cashier1Id);
+    assert.ok(c1Me);
+    assert.equal(c1Me.isMe, true);
+    assert.equal(c1Me.overlapsMyShift, true);
+
+    const c1TargetOverlap = c1Sched.json.shiftRoster.find((e) => e.id === targetEmpId);
+    assert.ok(c1TargetOverlap, 'Overlapping morning hall employee should appear in cashier shiftRoster');
+    assert.equal(c1TargetOverlap.overlapsMyShift, true);
+    assert.equal('phone' in c1TargetOverlap, false);
+    assert.equal('emp_code' in c1TargetOverlap, false);
+    assert.equal('lateMinutes' in c1TargetOverlap, false);
+    assert.equal('checkInTime' in c1TargetOverlap, false);
+    assert.equal('latestLogId' in c1TargetOverlap, false);
+    assert.equal('latestCctvStatus' in c1TargetOverlap, false);
+
+    const c1NightExcluded = c1Sched.json.shiftRoster.find((e) => e.id === nightHallEmpId);
+    assert.equal(
+      c1NightExcluded,
+      undefined,
+      'Non-overlapping night-shift employee from another group must not appear in cashier shiftRoster'
+    );
+  });
+
+  // Valid 1x1 PNG base64 fixture (genuine PNG magic bytes: 89 50 4E 47 0D 0A 1A 0A)
+  const VALID_TINY_PNG_DATA_URL =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+  it('17. supports self-service role profile photo upload, magic-byte/512KB/SVG validation, preset selection, and cleanup', async () => {
+    // Public GET /api/auth/profiles returns safe role cards without leaking username, pin_hash, pin_cipher, emp_code, or phone
+    const pubProfilesBefore = await api('/api/auth/profiles');
+    assert.equal(pubProfilesBefore.status, 200);
+    assert.equal(pubProfilesBefore.json.ok, true);
+    assert.equal(pubProfilesBefore.json.login_show_role_cards, true);
+    assert.ok(Array.isArray(pubProfilesBefore.json.profiles));
+    assert.ok(pubProfilesBefore.json.profiles.length >= 3);
+    for (const p of pubProfilesBefore.json.profiles) {
+      assert.equal('username' in p, false, 'Public profiles must never leak username');
+      assert.equal('pin_hash' in p, false);
+      assert.equal('pin_cipher' in p, false);
+      assert.equal('emp_code' in p, false);
+      assert.equal('phone' in p, false);
+    }
+
+    // Reject SVG/XSS data URI, corrupted magic bytes, and >512KB payload
+    const svgAttempt = await api(
+      '/api/profile/me/avatar',
+      'POST',
+      { dataUrl: 'data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9ImFsZXJ0KDEpIj48L3N2Zz4=' },
+      cashier1Token
+    );
+    assert.equal(svgAttempt.status, 400);
+
+    const badMagicAttempt = await api(
+      '/api/profile/me/avatar',
+      'POST',
+      { dataUrl: 'data:image/png;base64,dGVzdC1ub3QtYS1wbmc=' },
+      cashier1Token
+    );
+    assert.equal(badMagicAttempt.status, 400);
+
+    const oversizedBuffer = Buffer.alloc(530 * 1024, 0xff);
+    oversizedBuffer[0] = 0x89;
+    oversizedBuffer[1] = 0x50;
+    oversizedBuffer[2] = 0x4e;
+    oversizedBuffer[3] = 0x47;
+    const oversizedAttempt = await api(
+      '/api/profile/me/avatar',
+      'POST',
+      { dataUrl: `data:image/png;base64,${oversizedBuffer.toString('base64')}` },
+      cashier1Token
+    );
+    assert.equal(oversizedAttempt.status, 400);
+
+    // Valid PNG upload succeeds for Cashier (even without trucks:write / attendance:write!)
+    const uploadRes = await api(
+      '/api/profile/me/avatar',
+      'POST',
+      { dataUrl: VALID_TINY_PNG_DATA_URL },
+      cashier1Token
+    );
+    assert.equal(uploadRes.status, 200);
+    assert.equal(uploadRes.json.ok, true);
+    assert.ok(uploadRes.json.avatar_url);
+    assert.equal(uploadRes.json.user.avatar_url, uploadRes.json.avatar_url);
+
+    // Normalized GET /api/profile/me returns updated avatar_url + both flat and nested employee fields
+    const myProf = await api('/api/profile/me', 'GET', undefined, cashier1Token);
+    assert.equal(myProf.status, 200);
+    assert.equal(myProf.json.profile.avatar_url, uploadRes.json.avatar_url);
+    assert.equal(myProf.json.profile.employee_id, cashier1Id);
+    assert.ok(myProf.json.profile.employee);
+    assert.equal(myProf.json.profile.employee.id, cashier1Id);
+    assert.equal(myProf.json.profile.employee.avatar_url, uploadRes.json.avatar_url);
+
+    // Selecting an avatar preset via PUT /api/profile/me clears custom photo and sets preset
+    const presetRes = await api(
+      '/api/profile/me',
+      'PUT',
+      {
+        display_name: 'سارة كاشير 1',
+        avatar_preset: 'badge_cashier',
+        avatar_color: '#007B83',
+      },
+      cashier1Token
+    );
+    assert.equal(presetRes.status, 200);
+    assert.equal(presetRes.json.user.avatar_preset, 'badge_cashier');
+    assert.equal(presetRes.json.user.avatar_color, '#007B83');
+    assert.equal(presetRes.json.user.own_avatar_url, '');
+
+    // Re-upload photo and delete via DELETE /api/profile/me/avatar
+    const reupload = await api(
+      '/api/profile/me/avatar',
+      'POST',
+      { dataUrl: VALID_TINY_PNG_DATA_URL },
+      cashier1Token
+    );
+    assert.equal(reupload.status, 200);
+    assert.ok(reupload.json.avatar_url);
+
+    const delRes = await api('/api/profile/me/avatar', 'DELETE', undefined, cashier1Token);
+    assert.equal(delRes.status, 200);
+    assert.equal(delRes.json.user.own_avatar_url, '');
+  });
+
+  it('18. supports self-service username availability, password-verified username change, and triple-mode login', async () => {
+    // Live availability checks
+    const availOk = await api(
+      '/api/profile/username-available?username=Sara.Cashier_1',
+      'GET',
+      undefined,
+      cashier1Token
+    );
+    assert.equal(availOk.status, 200);
+    assert.equal(availOk.json.available, true);
+    assert.equal(availOk.json.normalized, 'sara.cashier_1');
+
+    const availTaken = await api(
+      '/api/profile/username-available?username=ADMIN',
+      'GET',
+      undefined,
+      cashier1Token
+    );
+    assert.equal(availTaken.status, 200);
+    assert.equal(availTaken.json.available, false);
+
+    const availReserved = await api(
+      '/api/profile/username-available?username=root',
+      'GET',
+      undefined,
+      cashier1Token
+    );
+    assert.equal(availReserved.status, 200);
+    assert.equal(availReserved.json.available, false);
+
+    // Wrong current_password rejected
+    const wrongPassRes = await api(
+      '/api/profile/me/username',
+      'PUT',
+      { new_username: 'sara.cashier_1', current_password: '999' },
+      cashier1Token
+    );
+    assert.equal(wrongPassRes.status, 400);
+
+    // Correct current_password ('601') updates username
+    const changeUserRes = await api(
+      '/api/profile/me/username',
+      'PUT',
+      { new_username: 'Sara.Cashier_1', current_password: '601' },
+      cashier1Token
+    );
+    assert.equal(changeUserRes.status, 200);
+    assert.equal(changeUserRes.json.user.username, 'sara.cashier_1');
+    const c1UserId = changeUserRes.json.user.id;
+
+    // Duplicate username rejected for another user with 409
+    const dupUserRes = await api(
+      '/api/profile/me/username',
+      'PUT',
+      { new_username: 'SARA.CASHIER_1', current_password: '602' },
+      cashier2Token
+    );
+    assert.equal(dupUserRes.status, 409);
+
+    // Triple-mode login verification:
+    // Mode 1: Username + Password (case-insensitive username)
+    const loginByUsername = await api('/api/auth/login', 'POST', {
+      username: 'SARA.CASHIER_1',
+      password: '601',
+    });
+    assert.equal(loginByUsername.status, 200);
+    assert.equal(loginByUsername.json.user.id, c1UserId);
+    assert.equal(loginByUsername.json.user.username, 'sara.cashier_1');
+
+    // Mode 2: Role Photo Card Tap (user_id + password)
+    const loginByUserId = await api('/api/auth/login', 'POST', {
+      user_id: c1UserId,
+      password: '601',
+    });
+    assert.equal(loginByUserId.status, 200);
+    assert.equal(loginByUserId.json.user.id, c1UserId);
+
+    // Mode 3: Fast PIN / Password-only keypad
+    const loginByPinOnly = await api('/api/auth/login', 'POST', {
+      password: '601',
+    });
+    assert.equal(loginByPinOnly.status, 200);
+    assert.equal(loginByPinOnly.json.user.id, c1UserId);
+    cashier1Token = loginByPinOnly.json.token;
+  });
+
+  it('19. enforces self-service password change, session_version revocation, blocks old emp_code bypass, and hides conflict display_name', async () => {
+    // Open two concurrent sessions for Security Guard (emp_code = '501')
+    const secSessionA = await api('/api/auth/login', 'POST', { password: '501' });
+    const secSessionB = await api('/api/auth/login', 'POST', { password: '501' });
+    assert.equal(secSessionA.status, 200);
+    assert.equal(secSessionB.status, 200);
+    const tokenA = secSessionA.json.token;
+    const tokenB = secSessionB.json.token;
+
+    // Verify GET /api/profile/me/sessions lists active sessions
+    const sessionsList = await api('/api/profile/me/sessions', 'GET', undefined, tokenA);
+    assert.equal(sessionsList.status, 200);
+    assert.ok(sessionsList.json.sessions.length >= 2);
+    assert.ok(sessionsList.json.sessions.some((s) => s.is_current === true));
+
+    // Attempt password change to an already-used password ('123' used by Owner)
+    // MUST return 400 and NEVER leak the conflicting user's display_name!
+    const conflictAttempt = await api(
+      '/api/profile/me/password',
+      'PUT',
+      {
+        current_password: '501',
+        new_password: '123',
+        confirm_password: '123',
+      },
+      tokenA
+    );
+    assert.equal(conflictAttempt.status, 400);
+    assert.equal(
+      conflictAttempt.json.error.includes('Admin') || conflictAttempt.json.error.includes('إدارة'),
+      false,
+      'Self-service password conflict must not leak the other account display_name'
+    );
+
+    // Change Security password from '501' to 'Sec#2026' on tokenA
+    const pwdChange = await api(
+      '/api/profile/me/password',
+      'PUT',
+      {
+        current_password: '501',
+        new_password: 'Sec#2026',
+        confirm_password: 'Sec#2026',
+      },
+      tokenA
+    );
+    assert.equal(pwdChange.status, 200);
+    assert.equal(pwdChange.json.ok, true);
+    assert.ok(pwdChange.json.token, 'Must issue fresh session token for active device');
+    const freshTokenA = pwdChange.json.token;
+
+    // Old tokenB AND old tokenA (v1) must now be rejected with 401
+    const checkOldB = await api('/api/auth/me', 'GET', undefined, tokenB);
+    assert.equal(checkOldB.status, 401);
+    const checkOldA = await api('/api/auth/me', 'GET', undefined, tokenA);
+    assert.equal(checkOldA.status, 401);
+
+    // Fresh token (v2) remains authenticated seamlessly
+    const checkFreshA = await api('/api/auth/me', 'GET', undefined, freshTokenA);
+    assert.equal(checkFreshA.status, 200);
+
+    // CRITICAL SECURITY ASSERTION: Old emp_code '501' MUST NOT bypass the new password via employees table fallback!
+    const bypassAttempt = await api('/api/auth/login', 'POST', { password: '501' });
+    assert.equal(
+      bypassAttempt.status,
+      401,
+      'Old emp_code must be rejected after employee changes their password'
+    );
+
+    // New password logs in cleanly
+    const loginNewPass = await api('/api/auth/login', 'POST', { password: 'Sec#2026' });
+    assert.equal(loginNewPass.status, 200);
+    assert.equal(loginNewPass.json.user.role, 'security');
+
+    // Restore Security password to '5015' ( >= 4 chars) or admin reset back to '501' for subsequent tests
+    const adminRestore = await api(
+      `/api/settings/role-accounts/${loginNewPass.json.user.id}/credentials`,
+      'PUT',
+      { new_password: '501' },
+      ownerToken
+    );
+    assert.equal(adminRestore.status, 200);
+    const reloginSec = await api('/api/auth/login', 'POST', { password: '501' });
+    assert.equal(reloginSec.status, 200);
+    securityToken = reloginSec.json.token;
+  });
+
+  it('20. supports admin role-level default photos, account credential/photo management, RBAC/kiosk guards, and preferences sync', async () => {
+    // Non-admin (cashier) blocked from admin role-accounts endpoints
+    const forbiddenList = await api('/api/settings/role-accounts', 'GET', undefined, cashier1Token);
+    assert.equal(forbiddenList.status, 403);
+
+    const forbiddenRoleAvatar = await api(
+      '/api/settings/roles/cashier/avatar',
+      'POST',
+      { dataUrl: VALID_TINY_PNG_DATA_URL },
+      cashier1Token
+    );
+    assert.equal(forbiddenRoleAvatar.status, 403);
+
+    // Owner fetches full role-accounts directory
+    const dirRes = await api('/api/settings/role-accounts', 'GET', undefined, ownerToken);
+    assert.equal(dirRes.status, 200);
+    assert.equal(dirRes.json.roles.length, 10);
+    assert.ok(dirRes.json.accounts.length >= 5);
+
+    // Owner sets default photo for 'cashier' role -> Cashier without custom photo inherits it!
+    const roleAvatarRes = await api(
+      '/api/settings/roles/cashier/avatar',
+      'POST',
+      { dataUrl: VALID_TINY_PNG_DATA_URL },
+      ownerToken
+    );
+    assert.equal(roleAvatarRes.status, 200);
+    assert.ok(roleAvatarRes.json.avatar_url);
+
+    const c2Prof = await api('/api/profile/me', 'GET', undefined, cashier2Token);
+    assert.equal(c2Prof.status, 200);
+    assert.equal(c2Prof.json.profile.own_avatar_url, '');
+    assert.equal(c2Prof.json.profile.role_default_avatar_url, roleAvatarRes.json.avatar_url);
+    assert.equal(c2Prof.json.profile.effective_avatar_url, roleAvatarRes.json.avatar_url);
+
+    // Owner updates Hall account credentials (username + password) -> invalidates old hallToken
+    const hallAccount = dirRes.json.accounts.find((a) => a.employee_id === hallEmpId);
+    assert.ok(hallAccount);
+    const adminCredUpdate = await api(
+      `/api/settings/role-accounts/${hallAccount.id}/credentials`,
+      'PUT',
+      {
+        username: 'karim.hall',
+        display_name: 'كريم منسق الممر',
+        new_password: '5029',
+      },
+      ownerToken
+    );
+    assert.equal(adminCredUpdate.status, 200);
+    assert.equal(adminCredUpdate.json.account.username, 'karim.hall');
+
+    const oldHallCheck = await api('/api/auth/me', 'GET', undefined, hallToken);
+    assert.equal(oldHallCheck.status, 401);
+
+    const newHallLogin = await api('/api/auth/login', 'POST', {
+      username: 'karim.hall',
+      password: '5029',
+    });
+    assert.equal(newHallLogin.status, 200);
+    hallToken = newHallLogin.json.token;
+
+    // Last-owner lockout guard prevents deactivating or demoting sole owner
+    const ownerAccount = dirRes.json.accounts.find((a) => a.role === 'owner');
+    assert.ok(ownerAccount);
+    const demoteOwnerAttempt = await api(
+      `/api/settings/role-accounts/${ownerAccount.id}/credentials`,
+      'PUT',
+      { role: 'manager' },
+      ownerToken
+    );
+    assert.equal(demoteOwnerAttempt.status, 400);
+
+    // Preferences sync (canonical + alias fields)
+    const prefRes = await api(
+      '/api/profile/me/preferences',
+      'PUT',
+      {
+        theme: 'liquid-glass',
+        mode: 'dark',
+        reducedBlur: true,
+        fontFamily: 'ibm-plex',
+        fontScale: 'scale-large',
+        density: 'compact',
+        liteMode: false,
+        voiceConfirm: true,
+        uiSounds: true,
+        walkieChimes: false,
+      },
+      cashier1Token
+    );
+    assert.equal(prefRes.status, 200);
+    assert.equal(prefRes.json.preferences.theme, 'liquid-glass');
+    assert.equal(prefRes.json.preferences.modePref, 'dark');
+    assert.equal(prefRes.json.preferences.glassMode, 'reduced');
+    assert.equal(prefRes.json.preferences.fontFamily, 'ibm-plex');
+    assert.equal(prefRes.json.preferences.walkieChimes, false);
+
+    const c1Boot = await api('/api/bootstrap', 'GET', undefined, cashier1Token);
+    assert.equal(c1Boot.status, 200);
+    assert.equal(c1Boot.json.myProfile.preferences.theme, 'liquid-glass');
+    assert.equal(c1Boot.json.myProfile.preferences.modePref, 'dark');
+
+    // Canonical 'ibm' & 'auto' fontFamily and 'auto' glassMode round-trip cleanly
+    const prefCanonicalIbm = await api(
+      '/api/profile/me/preferences',
+      'PUT',
+      { fontFamily: 'ibm', glassMode: 'auto' },
+      cashier1Token
+    );
+    assert.equal(prefCanonicalIbm.status, 200);
+    assert.equal(prefCanonicalIbm.json.preferences.fontFamily, 'ibm');
+    assert.equal(prefCanonicalIbm.json.preferences.glassMode, 'auto');
+
+    const prefCanonicalAuto = await api(
+      '/api/profile/me/preferences',
+      'PUT',
+      { fontFamily: 'auto', glassMode: 'auto' },
+      cashier1Token
+    );
+    assert.equal(prefCanonicalAuto.status, 200);
+    assert.equal(prefCanonicalAuto.json.preferences.fontFamily, 'auto');
+    assert.equal(prefCanonicalAuto.json.preferences.glassMode, 'auto');
+
+    // Legacy 8-theme -> 5-theme alias migration & invalid theme rejection (preserves previous valid theme)
+    const prefLegacyNordic = await api(
+      '/api/profile/me/preferences',
+      'PUT',
+      { theme: 'nordic' },
+      cashier1Token
+    );
+    assert.equal(prefLegacyNordic.status, 200);
+    assert.equal(prefLegacyNordic.json.preferences.theme, 'minimal');
+
+    const bootAfterNordic = await api('/api/bootstrap', 'GET', undefined, cashier1Token);
+    assert.equal(bootAfterNordic.status, 200);
+    assert.equal(bootAfterNordic.json.myProfile.preferences.theme, 'minimal');
+
+    const prefLegacyCyber = await api(
+      '/api/profile/me/preferences',
+      'PUT',
+      { theme: 'cyber-ops' },
+      cashier1Token
+    );
+    assert.equal(prefLegacyCyber.status, 200);
+    assert.equal(prefLegacyCyber.json.preferences.theme, 'modern');
+
+    const prefLegacyDesert = await api(
+      '/api/profile/me/preferences',
+      'PUT',
+      { theme: 'desert-sand' },
+      cashier1Token
+    );
+    assert.equal(prefLegacyDesert.status, 200);
+    assert.equal(prefLegacyDesert.json.preferences.theme, 'elegant');
+
+    const prefInvalidTheme = await api(
+      '/api/profile/me/preferences',
+      'PUT',
+      { theme: 'invalid-theme-xyz' },
+      cashier1Token
+    );
+    assert.equal(prefInvalidTheme.status, 200);
+    assert.equal(
+      prefInvalidTheme.json.preferences.theme,
+      'elegant',
+      'Invalid theme string must be ignored while preserving previous valid theme'
+    );
+
+    // Self-healing on read for legacy DB rows across /api/bootstrap, /api/profile/me, and /api/auth/me
+    const { DatabaseService } = require('../dist/database/database.service.js');
+    const dbService = nestApp.get(DatabaseService);
+    const c1UserId = c1Boot.json.myProfile.user_id;
+
+    for (const [legacyTheme, expectedCanonical] of [
+      ['nordic', 'minimal'],
+      ['cyber-ops', 'modern'],
+      ['desert-sand', 'elegant'],
+    ]) {
+      await dbService.execute(
+        'UPDATE system_users SET preferences_json = ? WHERE id = ?',
+        [JSON.stringify({ theme: legacyTheme, modePref: 'dark' }), c1UserId]
+      );
+      const healedBoot = await api('/api/bootstrap', 'GET', undefined, cashier1Token);
+      assert.equal(healedBoot.status, 200);
+      assert.equal(healedBoot.json.myProfile.preferences.theme, expectedCanonical);
+
+      const healedProfile = await api('/api/profile/me', 'GET', undefined, cashier1Token);
+      assert.equal(healedProfile.status, 200);
+      assert.equal(healedProfile.json.profile.preferences.theme, expectedCanonical);
+
+      const healedAuthMe = await api('/api/auth/me', 'GET', undefined, cashier1Token);
+      assert.equal(healedAuthMe.status, 200);
+      assert.equal(healedAuthMe.json.user.preferences.theme, expectedCanonical);
+    }
+
+    // Corrupt/unknown theme in legacy DB row is stripped cleanly on read
+    await dbService.execute(
+      'UPDATE system_users SET preferences_json = ? WHERE id = ?',
+      [JSON.stringify({ theme: 'corrupt-removed-theme', modePref: 'light' }), c1UserId]
+    );
+    const healedCorruptBoot = await api('/api/bootstrap', 'GET', undefined, cashier1Token);
+    assert.equal(healedCorruptBoot.status, 200);
+    assert.equal(healedCorruptBoot.json.myProfile.preferences.theme, undefined);
+    assert.equal(healedCorruptBoot.json.myProfile.preferences.modePref, 'light');
+
+    // Kiosk token is strictly blocked (403) from self-service profile & preferences mutations
+    const kioskLock = await api('/api/auth/lock-to-kiosk', 'POST', {}, ownerToken);
+    assert.equal(kioskLock.status, 200);
+    const kioskToken = kioskLock.json.token;
+
+    const kioskPrefAttempt = await api(
+      '/api/profile/me/preferences',
+      'PUT',
+      { theme: 'modern' },
+      kioskToken
+    );
+    assert.equal(kioskPrefAttempt.status, 403);
+
+    const kioskPassAttempt = await api(
+      '/api/profile/me/password',
+      'PUT',
+      { current_password: '123', new_password: '9999' },
+      kioskToken
+    );
+    assert.equal(kioskPassAttempt.status, 403);
   });
 });

@@ -1,0 +1,220 @@
+/*
+ * ZayedMart V2 — Base Semantic Tokens, Dynamic Safe-Area Chrome Geometry,
+ * View Transitions Optical Crossfade & Tactical Radio Tokens.
+ * Compatible with Chrome 64+ / Capacitor Android WebViews (sRGB hex + explicit rgba only).
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Safe-Area & Dynamic Per-Theme Chrome Geometry Contract */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --topbar-h: calc(3.75rem + var(--safe-top));
+  --bottom-nav-h: calc(4.5rem + var(--safe-bottom));
+
+  /* Motion Scale (Emil Kowalski strong ease-out + Apple fluid spring) */
+  --g-motion-fast: 130ms;
+  --g-motion-base: 190ms;
+  --g-motion-slow: 260ms;
+  --g-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --g-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --g-ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* Density Controls */
+  --g-card-pad-y: 1rem;
+  --g-card-pad-x: 1rem;
+  --g-section-gap: 1.25rem;
+
+  /* Default Shape Tokens (overridden per theme) */
+  --g-radius-sm: 0.5rem;
+  --g-radius-md: 0.75rem;
+  --g-radius-card: 1.125rem;
+  --g-radius-sheet: 1.5rem;
+  --g-radius-btn: 0.875rem;
+  --g-radius-pill: 9999px;
+  --g-border-width: 1px;
+
+  /* Default Glass, Optical Specular & Ambient Orb Tokens (overridden per theme) */
+  --g-bg-mesh: none;
+  --g-bg-canvas-wash: none;
+  --g-orb-1: transparent;
+  --g-orb-1-mid: transparent;
+  --g-orb-2: transparent;
+  --g-orb-2-mid: transparent;
+  --g-orb-3: transparent;
+  --g-orb-3-mid: transparent;
+  --g-orb-4: transparent;
+  --g-orb-4-mid: transparent;
+  --g-blur-sm: 0px;
+  --g-blur-md: 10px;
+  --g-blur-lg: 14px;
+  --g-glass-saturate: 110%;
+  --g-glass-specular: none;
+  --g-glass-border: var(--g-border);
+  --g-glass-rim-gradient: none;
+  --g-glass-control: var(--g-surface-variant);
+  --g-glass-pill-active: var(--g-secondary-container);
+  --g-glass-pill-specular: none;
+  --g-surface-glass-press: var(--g-surface-variant);
+  --g-shadow-press: var(--g-shadow-sm);
+
+  /* Top Brand Accent Hairline (Classic only; 0px in Minimal/Liquid/Elegant/Modern) */
+  --g-brand-bar-height: 2px;
+  --g-brand-bar-bg: var(--g-primary-solid);
+
+  /* Overlay, Chip Counter & WhatsApp Semantic Tokens */
+  --g-overlay-scrim: rgba(8, 14, 24, 0.48);
+  --g-chip-count-bg: rgba(255, 255, 255, 0.78);
+  --g-chip-count-text: var(--g-text);
+  --g-whatsapp: #117A42;
+  --g-whatsapp-bg: #E2F7EC;
+  --g-whatsapp-border: #34A853;
+  --g-whatsapp-solid: #117A42;
+  --g-on-whatsapp: #FFFFFF;
+
+  /* Snackbar Status Icon Colors */
+  --g-snackbar-success: #6EE7A8;
+  --g-snackbar-error: #FF8A8A;
+
+  /* Dedicated Tactical Walkie-Talkie Radio Console Tokens (Refined Studio Hardware Surface) */
+  --g-radio-bg: #111317;
+  --g-radio-surface: #1A1E26;
+  --g-radio-surface-2: #232833;
+  --g-radio-border: #2D3442;
+  --g-radio-text: #EDF4FC;
+  --g-radio-muted: #9AB0C9;
+  --g-radio-signal: #10B981;
+  --g-radio-signal-bright: #34D399;
+  --g-radio-signal-bg: rgba(16, 185, 129, 0.16);
+  --g-radio-signal-border: rgba(52, 211, 153, 0.45);
+  --g-radio-on-signal: #041E0F;
+  --g-radio-emergency: #DC2626;
+  --g-radio-emergency-bright: #F43F5E;
+  --g-radio-emergency-bg: #3B0A0D;
+  --g-radio-emergency-text: #FFD5D2;
+
+  /* Short aliases for cross-component convenience */
+  --radio-bg: var(--g-radio-bg);
+  --radio-surface: var(--g-radio-surface);
+  --radio-border: var(--g-radio-border);
+  --radio-text: var(--g-radio-text);
+  --radio-muted: var(--g-radio-muted);
+  --radio-signal: var(--g-radio-signal);
+  --radio-emergency: var(--g-radio-emergency);
+
+  /* Legacy & Convenience Token Aliases */
+  --g-surface-2: var(--g-surface-variant);
+  --g-text-muted: var(--g-muted);
+  --g-primary-subtle: var(--g-primary-container);
+  --g-amber: var(--g-yellow);
+  --g-amber-bg: var(--g-yellow-bg);
+  --g-amber-border: var(--g-yellow-border);
+  --g-ring-focus: var(--g-primary);
+}
+
+[data-mode='dark'] {
+  color-scheme: dark;
+  --g-overlay-scrim: rgba(0, 0, 0, 0.68);
+  --g-chip-count-bg: rgba(0, 0, 0, 0.28);
+  --g-chip-count-text: currentColor;
+  --g-whatsapp: #4ADE80;
+  --g-whatsapp-bg: #103322;
+  --g-whatsapp-border: #22C55E;
+  --g-whatsapp-solid: #15803D;
+  --g-on-whatsapp: #FFFFFF;
+  --g-snackbar-success: #137333;
+  --g-snackbar-error: #B3261E;
+}
+
+/* Compact Density Override */
+html[data-density='compact'] {
+  --g-card-pad-y: 0.75rem;
+  --g-card-pad-x: 0.85rem;
+  --g-section-gap: 0.75rem;
+}
+
+/*
+ * View Transitions API — 220ms Optical Crossfade with 2px Blur Bridge
+ * Makes switching between architectures (e.g. Minimalism <-> Liquid Glass) seamless.
+ */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 220ms;
+  animation-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+::view-transition-old(root) {
+  animation-name: gThemeFadeOut;
+}
+
+::view-transition-new(root) {
+  animation-name: gThemeFadeIn;
+}
+
+@keyframes gThemeFadeOut {
+  from {
+    opacity: 1;
+    filter: blur(0px);
+  }
+  to {
+    opacity: 0;
+    filter: blur(2px);
+  }
+}
+
+@keyframes gThemeFadeIn {
+  from {
+    opacity: 0;
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0px);
+  }
+}
+
+/* Atomic 1-Frame Hard Style Reset Fallback (Chrome 64-110 / Lite Mode) */
+html.theme-switching *,
+html.theme-switching *::before,
+html.theme-switching *::after {
+  transition: none !important;
+}
+
+/*
+ * Defense-in-Depth Dark-Mode Safety Net for Legacy Hardcoded `text-white` Buttons/Pills.
+ * Prevents unreadable badges or Minimalism Dark white-on-white buttons.
+ */
+[data-mode='dark'] .bg-\[var\(--g-primary\)\].text-white,
+[data-mode='dark'] .bg-\[var\(--g-primary-solid\)\].text-white,
+.dark-theme .bg-\[var\(--g-primary\)\].text-white,
+.dark-theme .bg-\[var\(--g-primary-solid\)\].text-white {
+  background-color: var(--g-primary-solid);
+  color: var(--g-on-primary) !important;
+}
+
+[data-mode='dark'] .bg-\[var\(--g-red\)\].text-white,
+.dark-theme .bg-\[var\(--g-red\)\].text-white {
+  background-color: var(--g-danger-solid);
+  color: var(--g-on-danger) !important;
+}
+
+[data-mode='dark'] .bg-\[var\(--g-yellow\)\].text-white,
+.dark-theme .bg-\[var\(--g-yellow\)\].text-white {
+  background-color: var(--g-warning-solid);
+  color: var(--g-on-warning) !important;
+}
+
+[data-mode='dark'] .bg-\[var\(--g-green\)\].text-white,
+.dark-theme .bg-\[var\(--g-green\)\].text-white {
+  background-color: var(--g-success-solid);
+  color: var(--g-on-success) !important;
+}
+
+[data-mode='dark'] .bg-\[var\(--g-purple\)\].text-white,
+.dark-theme .bg-\[var\(--g-purple\)\].text-white {
+  background-color: var(--g-purple-solid);
+  color: var(--g-on-purple) !important;
+}

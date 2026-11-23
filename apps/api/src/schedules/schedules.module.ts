@@ -12,7 +12,11 @@ import {
   Res,
 } from '@nestjs/common';
 import {
+  computeShiftDurationHours,
+  formatShiftDurationArabic,
   getCairoDateKey,
+  getLocalDateKey,
+  getPreviousDateKey,
   getSaturdayWeekStart,
   getScheduleWeekdayLabel,
   getWeekDateKeys,
@@ -50,6 +54,42 @@ const VALID_SWAP_STATUSES = [
   'cancelled',
   'reverted',
 ] as const;
+
+function parseShiftTimeToMinutes(hhmm?: string, fallback = 8 * 60): number {
+  const clean = String(hhmm || '').trim();
+  if (!/^\d{1,2}:\d{2}$/.test(clean)) return fallback;
+  const [h, m] = clean.split(':').map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m) || h < 0 || h > 23 || m < 0 || m > 59) {
+    return fallback;
+  }
+  return h * 60 + m;
+}
+
+function doShiftsOverlap(startA?: string, endA?: string, startB?: string, endB?: string): boolean {
+  const sA = parseShiftTimeToMinutes(startA, 8 * 60);
+  let eA = parseShiftTimeToMinutes(endA, 20 * 60);
+  if (eA <= sA) eA += 24 * 60;
+
+  const sB = parseShiftTimeToMinutes(startB, 8 * 60);
+  let eB = parseShiftTimeToMinutes(endB, 20 * 60);
+  if (eB <= sB) eB += 24 * 60;
+
+  const dayMinutes = 24 * 60;
+  for (const offset of [-dayMinutes, 0, dayMinutes]) {
+    if (Math.max(sA, sB + offset) < Math.min(eA, eB + offset)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function classifyShiftPeriod(shiftStart?: string): 'morning' | 'evening' | 'night' {
+  const minutes = parseShiftTimeToMinutes(shiftStart, 8 * 60);
+  const hour = Math.floor(minutes / 60);
+  if (hour >= 4 && hour < 13) return 'morning';
+  if (hour >= 13 && hour < 20) return 'evening';
+  return 'night';
+}
 
 @Controller('api/schedules')
 export class SchedulesController {
@@ -157,9 +197,28 @@ export class SchedulesController {
       const weekStartDate = getSaturdayWeekStart(trimmedWeek || todayDateKey);
       const weekDates = getWeekDateKeys(weekStartDate);
 
+      const targetAttDate = getLocalDateKey();
+      const prevAttDate = getPreviousDateKey(targetAttDate);
+
       const canManage = auth.has('schedule:manage');
       const canSwap = auth.has('schedule:swap_request') || canManage;
-      const [myEmployee, effectiveList, settings, weekSwapsRaw] = await Promise.all([
+      const canVerify = auth.has('attendance:verify');
+      const hasFullShiftVisibility =
+        auth.user.role === 'owner' ||
+        canManage ||
+        auth.has('attendance:write') ||
+        canVerify;
+      const canSeeEmpCode = canManage || auth.user.role === 'owner';
+
+      const [
+        myEmployee,
+        effectiveList,
+        settings,
+        weekSwapsRaw,
+        directLogs,
+        prevShiftLogs,
+        settingsMap,
+      ] = await Promise.all([
         this.db.resolveEmployeeForAuth(auth),
         this.db.getEffectiveWeekSchedule(weekStartDate),
         this.db.getScheduleSettings(),
@@ -167,6 +226,15 @@ export class SchedulesController {
           'SELECT * FROM dayoff_swap_requests WHERE week_start_date = ? ORDER BY created_at DESC',
           [weekStartDate]
         ),
+        this.db.queryAll<any>(
+          'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp DESC',
+          [targetAttDate, targetAttDate]
+        ),
+        this.db.queryAll<any>(
+          'SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp ASC',
+          [prevAttDate, prevAttDate]
+        ),
+        this.db.getSettingsMap(),
       ]);
       const myEmployeeId = myEmployee?.id || '';
       const myEffectiveEmp = myEmployeeId
@@ -175,13 +243,64 @@ export class SchedulesController {
       const userTeamGroup: ScheduleTeamGroup = myEffectiveEmp?.team_group
         ? myEffectiveEmp.team_group
         : await this.db.resolveTeamGroupForAuth(auth);
-      const visibleGroups: ScheduleTeamGroup[] = canManage
+      const visibleGroups: ScheduleTeamGroup[] = hasFullShiftVisibility
         ? [...SCHEDULE_TEAM_GROUP_IDS]
         : [userTeamGroup];
 
       const empNameById = new Map<string, string>(
         effectiveList.map((e) => [e.id, String(e.name || '')])
       );
+      const groupLabelById = new Map<ScheduleTeamGroup, string>(
+        SCHEDULE_TEAM_GROUPS.map((g) => [g.id, g.label])
+      );
+
+      // Merge today's logs with active cross-day shifts from yesterday
+      const prevByEmp = new Map<string, any[]>();
+      for (const l of prevShiftLogs) {
+        if (!prevByEmp.has(l.employee_id)) prevByEmp.set(l.employee_id, []);
+        prevByEmp.get(l.employee_id)!.push(l);
+      }
+      const mergedById = new Map<string, any>();
+      for (const l of directLogs) {
+        mergedById.set(l.id, l);
+      }
+      const nowMs = Date.now();
+      for (const [, empPrevLogs] of prevByEmp.entries()) {
+        const lastPrev = empPrevLogs[empPrevLogs.length - 1];
+        if (!lastPrev) continue;
+        const touchedTargetDate = empPrevLogs.some((l) => l.date_key === targetAttDate);
+        const lastPrevDateObj = new Date(lastPrev.timestamp);
+        const isNightOrEveningOnPrev = lastPrevDateObj.getHours() >= 14;
+        const isStillOpenFromYesterday =
+          lastPrev.action_type !== 'check_out' &&
+          ((nowMs - lastPrevDateObj.getTime()) / (3600 * 1000) <= 22 || isNightOrEveningOnPrev);
+        if (touchedTargetDate || isStillOpenFromYesterday) {
+          const lastShiftKey = lastPrev.shift_date_key || lastPrev.date_key;
+          for (const l of empPrevLogs) {
+            if ((l.shift_date_key || l.date_key) === lastShiftKey) {
+              mergedById.set(l.id, l);
+            }
+          }
+        }
+      }
+      const attendanceLogs = Array.from(mergedById.values()).sort((a, b) =>
+        String(b.timestamp).localeCompare(String(a.timestamp))
+      );
+      const logsByEmp = new Map<string, any[]>();
+      for (let i = attendanceLogs.length - 1; i >= 0; i--) {
+        const log = attendanceLogs[i];
+        if (!logsByEmp.has(log.employee_id)) logsByEmp.set(log.employee_id, []);
+        logsByEmp.get(log.employee_id)!.push(log);
+      }
+      const defaultMaxBreak = Number(settingsMap.max_break_minutes || 30);
+
+      const resolveLogCctvStatus = (log: any): 'confirmed' | 'mismatch' | 'pending' => {
+        if (log?.cctv_status === 'mismatch') return 'mismatch';
+        if (log?.cctv_status === 'confirmed' || Number(log?.verified_by_cctv) === 1) {
+          return 'confirmed';
+        }
+        return 'pending';
+      };
 
       const groups = visibleGroups.map((groupId) => {
         const meta = SCHEDULE_TEAM_GROUPS.find((g) => g.id === groupId)!;
@@ -189,7 +308,7 @@ export class SchedulesController {
           .filter((e) => e.team_group === groupId)
           .map((e) => ({
             id: e.id,
-            emp_code: e.emp_code,
+            ...(canSeeEmpCode ? { emp_code: e.emp_code } : {}),
             name: e.name,
             department: e.department,
             role_title: e.role_title || '',
@@ -252,6 +371,128 @@ export class SchedulesController {
         };
       });
 
+      const myShiftStart = myEffectiveEmp?.shift_start || '08:00';
+      const myShiftEnd = myEffectiveEmp?.shift_end || '20:00';
+
+      const shiftRoster = effectiveList
+        .map((e) => {
+          const shiftStart = e.shift_start || '08:00';
+          const shiftEnd = e.shift_end || '20:00';
+          const isMe = Boolean(myEmployeeId && e.id === myEmployeeId);
+          const overlapsMyShift = myEffectiveEmp
+            ? doShiftsOverlap(shiftStart, shiftEnd, myShiftStart, myShiftEnd)
+            : false;
+
+          if (!hasFullShiftVisibility && e.team_group !== userTeamGroup && !overlapsMyShift) {
+            return null;
+          }
+
+          const allEmpLogs = logsByEmp.get(e.id) || [];
+          const latestLog = allEmpLogs[allEmpLogs.length - 1] || null;
+          const activeShiftKey = latestLog?.shift_date_key || latestLog?.date_key || targetAttDate;
+          const empLogs = allEmpLogs.filter(
+            (l) => (l.shift_date_key || l.date_key) === activeShiftKey
+          );
+          const firstCheckIn =
+            empLogs.find((l) => l.action_type === 'check_in') ||
+            allEmpLogs.find((l) => l.action_type === 'check_in');
+          const checkOutLog = empLogs.filter((l) => l.action_type === 'check_out').pop() || null;
+
+          let currentStatus: 'present' | 'on_break' | 'checked_out' | 'absent' = 'absent';
+          if (latestLog) {
+            if (latestLog.action_type === 'check_in' || latestLog.action_type === 'break_end') {
+              currentStatus = 'present';
+            } else if (latestLog.action_type === 'break_start') {
+              currentStatus = 'on_break';
+            } else if (latestLog.action_type === 'check_out') {
+              currentStatus = 'checked_out';
+            }
+          }
+
+          const isScheduledOffToday = Boolean(
+            e.effective_day_of_week && e.effective_day_of_week === todayWeekday
+          );
+          const hasCheckInToday = allEmpLogs.some(
+            (l) =>
+              l.action_type === 'check_in' &&
+              (l.date_key === targetAttDate ||
+                l.shift_date_key === targetAttDate ||
+                l.date_key === todayDateKey ||
+                l.shift_date_key === todayDateKey)
+          );
+          const workedOnDayOff = Boolean(isScheduledOffToday && hasCheckInToday);
+
+          const shiftDurationHours = computeShiftDurationHours(shiftStart, shiftEnd);
+          const shiftDurationLabel = formatShiftDurationArabic(shiftDurationHours);
+
+          const baseItem = {
+            id: e.id,
+            name: e.name,
+            department: e.department,
+            role_title: e.role_title || '',
+            avatar_color: e.avatar_color || '#1A73E8',
+            team_group: e.team_group,
+            team_group_label: groupLabelById.get(e.team_group) || e.team_group,
+            shift_start: shiftStart,
+            shift_end: shiftEnd,
+            shiftDurationHours,
+            shiftDurationLabel,
+            shiftPeriod: classifyShiftPeriod(shiftStart),
+            effective_day_of_week: e.effective_day_of_week,
+            default_day_of_week: e.default_day_of_week,
+            is_override: e.is_override,
+            currentStatus,
+            isScheduledOffToday,
+            workedOnDayOff,
+            overlapsMyShift,
+            isMe,
+          };
+
+          if (!hasFullShiftVisibility) {
+            return baseItem;
+          }
+
+          const breakEnds = empLogs.filter((l) => l.action_type === 'break_end');
+          let totalBreakMinutes = breakEnds.reduce(
+            (sum, l) => sum + (Number(l.break_duration_minutes) || 0),
+            0
+          );
+          if (currentStatus === 'on_break' && latestLog) {
+            const currentBreakElapsed = Math.max(
+              0,
+              Math.round((nowMs - new Date(latestLog.timestamp).getTime()) / 60000)
+            );
+            totalBreakMinutes += currentBreakElapsed;
+          }
+          const allowedBreakMinutes =
+            currentStatus === 'on_break' && latestLog
+              ? Number(latestLog.allowed_break_minutes) || defaultMaxBreak
+              : defaultMaxBreak;
+          const activeBreakStart =
+            currentStatus === 'on_break' && latestLog ? latestLog.timestamp : null;
+          const lateMinutes = firstCheckIn ? Number(firstCheckIn.late_minutes || 0) : 0;
+
+          return {
+            ...baseItem,
+            checkInTime: firstCheckIn ? firstCheckIn.timestamp : null,
+            checkOutTime: checkOutLog ? checkOutLog.timestamp : null,
+            latestActionTime: latestLog ? latestLog.timestamp : null,
+            lateMinutes,
+            totalBreakMinutes,
+            allowedBreakMinutes,
+            activeBreakStart,
+            latestLogId: latestLog ? latestLog.id : null,
+            latestRecordedBy: latestLog ? latestLog.recorded_by : null,
+            latestVerified: latestLog ? Boolean(Number(latestLog.verified_by_cctv)) : true,
+            latestCctvStatus: latestLog ? resolveLogCctvStatus(latestLog) : ('none' as const),
+            latestVerifiedBy: latestLog ? latestLog.verified_by || '' : '',
+            latestCctvObservedTime: latestLog ? latestLog.cctv_observed_time || '' : '',
+            latestCctvNote: latestLog ? latestLog.cctv_note || '' : '',
+            phone: e.phone || '',
+          };
+        })
+        .filter((item): item is NonNullable<typeof item> => item !== null);
+
       const filteredSwaps = canManage
         ? weekSwapsRaw
         : myEmployeeId
@@ -274,11 +515,14 @@ export class SchedulesController {
         todayWeekday,
         canManage,
         canSwap,
+        canVerify,
+        hasFullShiftVisibility,
         myEmployeeId,
         userTeamGroup,
         visibleGroups,
         settings,
         groups,
+        shiftRoster,
         swaps,
       });
     } catch (err: any) {
