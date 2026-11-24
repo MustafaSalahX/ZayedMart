@@ -48,16 +48,19 @@ export class RbacController {
     const secretHex = await this.db.getSessionSecret();
     const rawUsers = canManageUsers
       ? await this.db.queryAll<any>(
-          `SELECT id, username, display_name, role, pin_cipher, avatar_color, avatar_url, avatar_preset,
-                  is_active, employee_id, custom_permissions_json, last_login_at,
-                  password_changed_at, username_changed_at, created_at
-           FROM system_users
-           ORDER BY is_active DESC, created_at ASC`
+          `SELECT * FROM system_users ORDER BY is_active DESC, created_at ASC`
         )
       : [];
 
     const users = rawUsers.map((u) => {
-      const { pin_cipher, custom_permissions_json, ...rest } = u;
+      const {
+        pin_salt: _pinSalt,
+        pin_hash: _pinHash,
+        pin_cipher,
+        custom_permissions_json,
+        preferences_json: _prefs,
+        ...rest
+      } = u;
       let customPerms: string[] = [];
       try {
         customPerms = JSON.parse(custom_permissions_json || '[]');
@@ -66,6 +69,10 @@ export class RbacController {
       }
       return {
         ...rest,
+        avatar_url: String(u.avatar_url || '').trim(),
+        avatar_preset: String(u.avatar_preset || '').trim(),
+        password_changed_at: u.password_changed_at || '',
+        username_changed_at: u.username_changed_at || '',
         custom_permissions: Array.isArray(customPerms) ? customPerms : [],
         password_value: decryptPasswordForAdmin(pin_cipher, secretHex),
       };
@@ -164,26 +171,47 @@ export class RbacController {
       const id = body?.id ? String(body.id) : crypto.randomUUID();
       const now = new Date().toISOString();
 
-      await this.db.execute(
-        `INSERT INTO system_users (
-          id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, avatar_url, avatar_preset, is_active, custom_permissions_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
-        [
-          id,
-          cleanUsername,
-          display_name.trim(),
-          role,
-          saltHex,
-          hashHex,
-          cipher,
-          avatar_color,
-          String(avatar_url || '').trim(),
-          String(avatar_preset || '').trim(),
-          JSON.stringify(cleanCustomPerms),
-          now,
-          now,
-        ]
-      );
+      if (this.db.schemaCaps.systemUsersRoleProfiles) {
+        await this.db.execute(
+          `INSERT INTO system_users (
+            id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, avatar_url, avatar_preset, is_active, custom_permissions_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+          [
+            id,
+            cleanUsername,
+            display_name.trim(),
+            role,
+            saltHex,
+            hashHex,
+            cipher,
+            avatar_color,
+            String(avatar_url || '').trim(),
+            String(avatar_preset || '').trim(),
+            JSON.stringify(cleanCustomPerms),
+            now,
+            now,
+          ]
+        );
+      } else {
+        await this.db.execute(
+          `INSERT INTO system_users (
+            id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, is_active, custom_permissions_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+          [
+            id,
+            cleanUsername,
+            display_name.trim(),
+            role,
+            saltHex,
+            hashHex,
+            cipher,
+            avatar_color,
+            JSON.stringify(cleanCustomPerms),
+            now,
+            now,
+          ]
+        );
+      }
 
       await this.db.recordAuditLog({
         userId: auth.user.id,
@@ -310,54 +338,96 @@ export class RbacController {
         nextSessionVersion += 1;
       }
 
-      await this.db.execute(
-        `UPDATE system_users
-         SET username = ?, display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?,
-             avatar_color = ?, avatar_url = ?, avatar_preset = ?, is_active = ?,
-             custom_permissions_json = ?, session_version = ?, password_changed_at = ?, username_changed_at = ?, updated_at = ?
-         WHERE id = ?`,
-        [
-          nextUsername,
-          display_name.trim(),
-          role,
-          saltHex,
-          hashHex,
-          cipher,
-          avatar_color,
-          String(avatar_url || '').trim(),
-          String(avatar_preset || '').trim(),
-          is_active ? 1 : 0,
-          nextCustomPermsJson,
-          nextSessionVersion,
-          passwordChangedAt,
-          usernameChangedAt,
-          nowIso,
-          target.id,
-        ]
-      );
-
-      if (target.employee_id) {
+      if (this.db.schemaCaps.systemUsersRoleProfiles) {
         await this.db.execute(
-          `UPDATE employees
-           SET name = ?,
-               system_role = ?,
-               login_enabled = ?,
-               avatar_color = ?,
-               avatar_url = ?,
-               avatar_preset = ?,
-               updated_at = ?
+          `UPDATE system_users
+           SET username = ?, display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?,
+               avatar_color = ?, avatar_url = ?, avatar_preset = ?, is_active = ?,
+               custom_permissions_json = ?, session_version = ?, password_changed_at = ?, username_changed_at = ?, updated_at = ?
            WHERE id = ?`,
           [
+            nextUsername,
             display_name.trim(),
             role,
-            is_active ? 1 : 0,
+            saltHex,
+            hashHex,
+            cipher,
             avatar_color,
             String(avatar_url || '').trim(),
             String(avatar_preset || '').trim(),
+            is_active ? 1 : 0,
+            nextCustomPermsJson,
+            nextSessionVersion,
+            passwordChangedAt,
+            usernameChangedAt,
             nowIso,
-            target.employee_id,
+            target.id,
           ]
         );
+      } else {
+        await this.db.execute(
+          `UPDATE system_users
+           SET username = ?, display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?,
+               avatar_color = ?, is_active = ?, custom_permissions_json = ?, updated_at = ?
+           WHERE id = ?`,
+          [
+            nextUsername,
+            display_name.trim(),
+            role,
+            saltHex,
+            hashHex,
+            cipher,
+            avatar_color,
+            is_active ? 1 : 0,
+            nextCustomPermsJson,
+            nowIso,
+            target.id,
+          ]
+        );
+      }
+
+      if (target.employee_id) {
+        if (this.db.schemaCaps.employeesAvatars) {
+          await this.db.execute(
+            `UPDATE employees
+             SET name = ?,
+                 system_role = ?,
+                 login_enabled = ?,
+                 avatar_color = ?,
+                 avatar_url = ?,
+                 avatar_preset = ?,
+                 updated_at = ?
+             WHERE id = ?`,
+            [
+              display_name.trim(),
+              role,
+              is_active ? 1 : 0,
+              avatar_color,
+              String(avatar_url || '').trim(),
+              String(avatar_preset || '').trim(),
+              nowIso,
+              target.employee_id,
+            ]
+          );
+        } else {
+          await this.db.execute(
+            `UPDATE employees
+             SET name = ?,
+                 system_role = ?,
+                 login_enabled = ?,
+                 avatar_color = ?,
+                 updated_at = ?
+             WHERE id = ?`,
+            [
+              display_name.trim(),
+              role,
+              is_active ? 1 : 0,
+              avatar_color,
+              nowIso,
+              target.employee_id,
+            ]
+          );
+        }
       }
 
       let freshToken: string | undefined;

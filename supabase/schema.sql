@@ -300,6 +300,52 @@ CREATE TABLE IF NOT EXISTS public.dayoff_swap_requests (
   updated_at TEXT NOT NULL
 );
 
+-- Idempotent Column Upgrades for Existing Deployments (v4.2 CCTV Verification + v4.3 Role Profiles)
+ALTER TABLE public.system_users
+  ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT '',
+  ADD COLUMN IF NOT EXISTS avatar_preset TEXT DEFAULT '',
+  ADD COLUMN IF NOT EXISTS preferences_json TEXT DEFAULT '{}',
+  ADD COLUMN IF NOT EXISTS session_version INTEGER DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS password_changed_at TEXT DEFAULT '',
+  ADD COLUMN IF NOT EXISTS username_changed_at TEXT DEFAULT '';
+
+ALTER TABLE public.role_policies
+  ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT '',
+  ADD COLUMN IF NOT EXISTS avatar_preset TEXT DEFAULT '',
+  ADD COLUMN IF NOT EXISTS avatar_color TEXT DEFAULT '';
+
+ALTER TABLE public.employees
+  ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT '',
+  ADD COLUMN IF NOT EXISTS avatar_preset TEXT DEFAULT '';
+
+ALTER TABLE public.walkie_presence
+  ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT '';
+
+ALTER TABLE public.attendance_logs
+  ADD COLUMN IF NOT EXISTS verified_by TEXT DEFAULT '',
+  ADD COLUMN IF NOT EXISTS cctv_status TEXT DEFAULT 'pending',
+  ADD COLUMN IF NOT EXISTS cctv_observed_time TEXT DEFAULT '',
+  ADD COLUMN IF NOT EXISTS cctv_note TEXT DEFAULT '';
+
+UPDATE public.attendance_logs
+SET cctv_status = 'confirmed'
+WHERE verified_by_cctv = 1
+  AND COALESCE(cctv_status, 'pending') <> 'confirmed';
+
+UPDATE public.attendance_logs
+SET cctv_status = 'pending'
+WHERE cctv_status IS NULL OR cctv_status = '';
+
+UPDATE public.system_users
+SET
+  avatar_url = COALESCE(avatar_url, ''),
+  avatar_preset = COALESCE(avatar_preset, ''),
+  preferences_json = COALESCE(NULLIF(preferences_json, ''), '{}'),
+  session_version = COALESCE(session_version, 1),
+  password_changed_at = COALESCE(password_changed_at, ''),
+  username_changed_at = COALESCE(username_changed_at, ''),
+  username = LOWER(TRIM(username));
+
 CREATE INDEX IF NOT EXISTS idx_dayoff_defaults_team
   ON public.employee_dayoff_defaults(team_group, day_of_week);
 CREATE INDEX IF NOT EXISTS idx_dayoff_overrides_week_team
@@ -319,6 +365,14 @@ CREATE INDEX IF NOT EXISTS idx_attendance_logs_cctv_status
   WHERE cctv_status <> 'confirmed';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_system_users_username_lower
   ON public.system_users (LOWER(username));
+
+INSERT INTO public.settings (key, value)
+VALUES
+  ('login_show_role_cards', 'true'),
+  ('password_min_length', '4'),
+  ('migration_cctv_verify_v42', 'done'),
+  ('migration_role_profiles_v43', 'done')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 
 DO $$
 DECLARE

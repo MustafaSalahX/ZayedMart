@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { after, before, describe, it } from 'node:test';
 import { createRequire } from 'node:module';
 
@@ -2160,5 +2161,220 @@ describe('ZayedMart NestJS API + Global Walkie-Talkie + Zero-Conflict Sync E2E',
       kioskToken
     );
     assert.equal(kioskPassAttempt.status, 403);
+  });
+});
+
+describe('Legacy Unmigrated Schema Compatibility E2E (missing v4.2 CCTV & v4.3 avatar_url columns)', () => {
+  let legacyApp;
+  let baseUrl = '';
+  let tempDir = '';
+
+  before(async () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zayed-legacy-schema-e2e-'));
+    const dbPath = path.join(tempDir, 'legacy_zayed.db');
+
+    // Pre-create the exact pre-v42/v43 table definitions (WITHOUT avatar_url, session_version, preferences_json, verified_by, cctv_status)
+    const rawDb = new DatabaseSync(dbPath);
+    rawDb.exec(`
+      CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE system_users (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        pin_salt TEXT NOT NULL,
+        pin_hash TEXT NOT NULL,
+        pin_cipher TEXT DEFAULT '',
+        avatar_color TEXT DEFAULT '#0B57D0',
+        is_active INTEGER DEFAULT 1,
+        employee_id TEXT DEFAULT '',
+        custom_permissions_json TEXT DEFAULT '[]',
+        last_login_at TEXT DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE role_policies (
+        role TEXT PRIMARY KEY,
+        permissions_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE employees (
+        id TEXT PRIMARY KEY,
+        emp_code TEXT DEFAULT '',
+        name TEXT NOT NULL,
+        department TEXT NOT NULL,
+        role_title TEXT DEFAULT '',
+        shift_start TEXT DEFAULT '08:00',
+        shift_end TEXT DEFAULT '20:00',
+        avatar_color TEXT DEFAULT '#0B57D0',
+        phone TEXT DEFAULT '',
+        is_active INTEGER DEFAULT 1,
+        system_role TEXT DEFAULT '',
+        login_enabled INTEGER DEFAULT 1,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE attendance_logs (
+        id TEXT PRIMARY KEY,
+        employee_id TEXT NOT NULL,
+        employee_name TEXT NOT NULL,
+        department TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        date_key TEXT NOT NULL,
+        shift_date_key TEXT DEFAULT '',
+        late_minutes INTEGER DEFAULT 0,
+        allowed_break_minutes INTEGER DEFAULT 0,
+        break_duration_minutes INTEGER DEFAULT 0,
+        break_reason TEXT DEFAULT '',
+        note TEXT DEFAULT '',
+        proof_url TEXT DEFAULT '',
+        recorded_by TEXT NOT NULL,
+        verified_by_cctv INTEGER DEFAULT 0,
+        verified_at TEXT DEFAULT '',
+        synced INTEGER DEFAULT 1
+      );
+      CREATE TABLE walkie_presence (
+        presence_key TEXT PRIMARY KEY,
+        peer_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        role_label TEXT DEFAULT '',
+        avatar_color TEXT DEFAULT '#146C2E',
+        channel TEXT NOT NULL DEFAULT 'security',
+        status TEXT NOT NULL DEFAULT 'listening',
+        live_on INTEGER DEFAULT 1,
+        mic_mode TEXT DEFAULT 'vad',
+        updated_at_ms BIGINT NOT NULL
+      );
+    `);
+    rawDb.close();
+
+    process.env.ZAYED_TEST_DB_PATH = dbPath;
+    process.env.ZAYED_UPLOADS_DIR = path.join(tempDir, 'uploads');
+    process.env.ZAYED_DISABLE_CLOUD_BROADCAST = '1';
+    process.env.ZAYED_SKIP_AUTO_SCHEMA_ALTER = '1';
+    delete process.env.DATABASE_URL;
+    delete process.env.POSTGRES_URL;
+    delete process.env.POSTGRES_PRISMA_URL;
+
+    const { createZayedNestApp } = require('../dist/app.factory.js');
+    legacyApp = await createZayedNestApp({ serveSpa: false, quietLogs: true });
+    await legacyApp.listen(0, '127.0.0.1');
+    const addr = legacyApp.getHttpServer().address();
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
+
+  after(async () => {
+    delete process.env.ZAYED_SKIP_AUTO_SCHEMA_ALTER;
+    if (legacyApp) {
+      await legacyApp.close();
+    }
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore Windows file lock delay
+    }
+  });
+
+  async function api(endpoint, method = 'GET', body = undefined, token = '') {
+    const headers = {};
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${baseUrl}${endpoint}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const json = await res.json();
+    return { status: res.status, json };
+  }
+
+  it('supports login (123), profiles, bootstrap, schedule, attendance, verify, preferences, and rbac without v42/v43 columns', async () => {
+    const health = await api('/api/health');
+    assert.equal(health.status, 200);
+    assert.equal(health.json.pendingSchemaMigration, true);
+    assert.equal(health.json.schemaCaps.systemUsersRoleProfiles, false);
+    assert.equal(health.json.schemaCaps.attendanceCctvMeta, false);
+
+    const profiles = await api('/api/auth/profiles');
+    assert.equal(profiles.status, 200);
+    assert.equal(profiles.json.ok, true);
+    assert.ok(Array.isArray(profiles.json.profiles) && profiles.json.profiles.length >= 1);
+
+    const login = await api('/api/auth/login', 'POST', { password: '123' });
+    assert.equal(login.status, 200);
+    assert.equal(login.json.ok, true);
+    assert.equal(login.json.user.role, 'owner');
+    const token = login.json.token;
+
+    const boot = await api('/api/bootstrap', 'GET', undefined, token);
+    assert.equal(boot.status, 200);
+    assert.equal(boot.json.auth.user.role, 'owner');
+
+    const schedule = await api('/api/schedules/week', 'GET', undefined, token);
+    assert.equal(schedule.status, 200);
+    assert.equal(schedule.json.ok, true);
+    assert.ok(Array.isArray(schedule.json.groups));
+    assert.ok(Array.isArray(schedule.json.shiftRoster));
+
+    const empRes = await api(
+      '/api/employees',
+      'POST',
+      { name: 'كاشير تجريبي', emp_code: '777', department: 'كاشير', system_role: 'cashier' },
+      token
+    );
+    assert.equal(empRes.status, 201);
+    const empId = empRes.json.employee.id;
+
+    const checkIn = await api(
+      '/api/attendance',
+      'POST',
+      { employee_id: empId, action_type: 'check_in', confirm_by_cctv: false },
+      token
+    );
+    assert.equal(checkIn.status, 201);
+    assert.ok(checkIn.json.log?.id);
+
+    const verifyOne = await api(
+      `/api/attendance/${checkIn.json.log.id}/verify`,
+      'POST',
+      { status: 'confirmed', note: 'ظاهر بالكاميرا' },
+      token
+    );
+    assert.equal(verifyOne.status, 200);
+    assert.equal(verifyOne.json.ok, true);
+
+    const verifyAll = await api('/api/attendance/verify-all', 'POST', {}, token);
+    assert.equal(verifyAll.status, 200);
+
+    const editLog = await api(
+      `/api/attendance/${checkIn.json.log.id}`,
+      'PUT',
+      { note: 'ملاحظة معدلة' },
+      token
+    );
+    assert.equal(editLog.status, 200);
+
+    const prefSave = await api(
+      '/api/profile/me/preferences',
+      'PUT',
+      { theme: 'modern', modePref: 'dark' },
+      token
+    );
+    assert.equal(prefSave.status, 200);
+    assert.equal(prefSave.json.preferences.theme, 'modern');
+
+    const profileMe = await api('/api/profile/me', 'GET', undefined, token);
+    assert.equal(profileMe.status, 200);
+    assert.equal(profileMe.json.profile.preferences.theme, 'modern');
+
+    const roleAccounts = await api('/api/settings/role-accounts', 'GET', undefined, token);
+    assert.equal(roleAccounts.status, 200);
+    assert.equal(roleAccounts.json.ok, true);
+
+    const rbacOverview = await api('/api/rbac/overview', 'GET', undefined, token);
+    assert.equal(rbacOverview.status, 200);
+    assert.ok(Array.isArray(rbacOverview.json.users));
   });
 });

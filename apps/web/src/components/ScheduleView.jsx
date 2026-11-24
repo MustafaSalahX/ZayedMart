@@ -763,6 +763,7 @@ export default function ScheduleView({
     return (
       <EmptyState
         title="تعذر تحميل الجدول"
+        description={loadError !== 'تعذر تحميل الجدول' ? loadError : undefined}
         actionLabel="إعادة المحاولة"
         actionIcon="refresh"
         onAction={() => loadSchedule()}

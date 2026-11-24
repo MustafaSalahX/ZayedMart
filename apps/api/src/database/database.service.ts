@@ -154,6 +154,14 @@ export interface EffectiveScheduleEmployee {
   swap_request_id: string | null;
 }
 
+export interface SchemaCapabilities {
+  systemUsersRoleProfiles: boolean;
+  rolePoliciesAvatars: boolean;
+  employeesAvatars: boolean;
+  attendanceCctvMeta: boolean;
+  walkiePresenceAvatar: boolean;
+}
+
 function convertPlaceholdersToPg(sql: string): string {
   let idx = 0;
   let inSingleQuote = false;
@@ -194,6 +202,23 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   public readonly isServerless: boolean;
   public mutationSeq = 0;
   public lastMutationAt: string = new Date().toISOString();
+  public schemaCaps: SchemaCapabilities = {
+    systemUsersRoleProfiles: true,
+    rolePoliciesAvatars: true,
+    employeesAvatars: true,
+    attendanceCctvMeta: true,
+    walkiePresenceAvatar: true,
+  };
+
+  public get hasPendingSchemaMigration(): boolean {
+    return !(
+      this.schemaCaps.systemUsersRoleProfiles &&
+      this.schemaCaps.rolePoliciesAvatars &&
+      this.schemaCaps.employeesAvatars &&
+      this.schemaCaps.attendanceCctvMeta &&
+      this.schemaCaps.walkiePresenceAvatar
+    );
+  }
 
   constructor() {
     this.isServerless = Boolean(
@@ -830,8 +855,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           // ignore
         }
       }
-      this.ensureCctvColumnsOnSqlite();
-      this.ensureRoleProfilesColumnsOnSqlite();
+      if (process.env.ZAYED_SKIP_AUTO_SCHEMA_ALTER !== '1') {
+        this.ensureCctvColumnsOnSqlite();
+        this.ensureRoleProfilesColumnsOnSqlite();
+      }
     }
 
     if (this.useSupabaseRpc || this.pgPool) {
@@ -849,6 +876,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         if (secretRow?.value) {
           this.cachedSessionSecret = secretRow.value;
           this.storageMode = 'supabase_postgres';
+          await this.refreshSchemaCapabilities();
+
           const scheduleTablesMigrated = rows.find(
             (r) => r.key === 'migration_schedule_tables_v41'
           );
@@ -861,11 +890,17 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
             }
           }
           const cctvMigrated = rows.find((r) => r.key === 'migration_cctv_verify_v42');
-          if (cctvMigrated?.value !== 'done') {
+          if (cctvMigrated?.value !== 'done' || !this.schemaCaps.attendanceCctvMeta) {
             await this.ensureCctvVerifyV42Migration().catch(() => {});
           }
           const roleProfilesMigrated = rows.find((r) => r.key === 'migration_role_profiles_v43');
-          if (roleProfilesMigrated?.value !== 'done') {
+          if (
+            roleProfilesMigrated?.value !== 'done' ||
+            !this.schemaCaps.systemUsersRoleProfiles ||
+            !this.schemaCaps.rolePoliciesAvatars ||
+            !this.schemaCaps.employeesAvatars ||
+            !this.schemaCaps.walkiePresenceAvatar
+          ) {
             await this.ensureRoleProfilesV43Migration().catch(() => {});
           }
           const migratedWalkie = rows.find((r) => r.key === 'migration_rbac_walkie_v38');
@@ -884,6 +919,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           ) {
             await this.ensureRolePoliciesUpToDate(new Date().toISOString()).catch(() => {});
           }
+          await this.refreshSchemaCapabilities();
           return;
         }
       } catch {
@@ -898,6 +934,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         await this.execute(stmt);
       }
     }
+
+    await this.refreshSchemaCapabilities();
 
     const defaultSessionSecret = crypto
       .createHash('sha256')
@@ -942,6 +980,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     const nowIso = new Date().toISOString();
     await this.ensureCctvVerifyV42Migration();
     await this.ensureRoleProfilesV43Migration();
+    await this.refreshSchemaCapabilities();
     await this.ensureRolePoliciesUpToDate(nowIso);
 
     // Ensure default Owner ('123') exists
@@ -974,8 +1013,74 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  public async refreshSchemaCapabilities(): Promise<SchemaCapabilities> {
+    const hasAll = (set: Set<string> | undefined, cols: string[]): boolean => {
+      if (!set) return false;
+      return cols.every((c) => set.has(c));
+    };
+
+    try {
+      const colsByTable = new Map<string, Set<string>>();
+      if (this.pgPool || (this.useSupabaseRpc && this.storageMode === 'supabase_postgres')) {
+        const sql =
+          "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name IN ('system_users', 'role_policies', 'employees', 'attendance_logs', 'walkie_presence')";
+        const rows = this.pgPool
+          ? await this.queryAll<{ table_name: string; column_name: string }>(sql)
+          : (await execSupabaseRpcSql<{ table_name: string; column_name: string }>(sql)).rows;
+        for (const r of rows) {
+          if (!colsByTable.has(r.table_name)) colsByTable.set(r.table_name, new Set());
+          colsByTable.get(r.table_name)!.add(r.column_name);
+        }
+      } else if (this.sqliteDb) {
+        for (const tbl of [
+          'system_users',
+          'role_policies',
+          'employees',
+          'attendance_logs',
+          'walkie_presence',
+        ]) {
+          const info = this.sqliteDb.prepare(`PRAGMA table_info(${tbl})`).all() as Array<{
+            name: string;
+          }>;
+          colsByTable.set(tbl, new Set(info.map((c) => c.name)));
+        }
+      } else {
+        return this.schemaCaps;
+      }
+
+      if (colsByTable.size > 0) {
+        this.schemaCaps = {
+          systemUsersRoleProfiles: hasAll(colsByTable.get('system_users'), [
+            'avatar_url',
+            'avatar_preset',
+            'preferences_json',
+            'session_version',
+            'password_changed_at',
+            'username_changed_at',
+          ]),
+          rolePoliciesAvatars: hasAll(colsByTable.get('role_policies'), [
+            'avatar_url',
+            'avatar_preset',
+            'avatar_color',
+          ]),
+          employeesAvatars: hasAll(colsByTable.get('employees'), ['avatar_url', 'avatar_preset']),
+          attendanceCctvMeta: hasAll(colsByTable.get('attendance_logs'), [
+            'verified_by',
+            'cctv_status',
+            'cctv_observed_time',
+            'cctv_note',
+          ]),
+          walkiePresenceAvatar: hasAll(colsByTable.get('walkie_presence'), ['avatar_url']),
+        };
+      }
+    } catch {
+      // Keep existing capabilities on transient introspection failure
+    }
+    return this.schemaCaps;
+  }
+
   private ensureCctvColumnsOnSqlite(): void {
-    if (!this.sqliteDb) return;
+    if (!this.sqliteDb || process.env.ZAYED_SKIP_AUTO_SCHEMA_ALTER === '1') return;
     try {
       const cols = this.sqliteDb.prepare('PRAGMA table_info(attendance_logs)').all() as Array<{
         name: string;
@@ -1006,9 +1111,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     const migratedRow = await this.queryOne<{ value: string }>(
       "SELECT value FROM settings WHERE key = 'migration_cctv_verify_v42'"
     );
-    if (migratedRow?.value === 'done') return;
+    if (migratedRow?.value === 'done' && this.schemaCaps.attendanceCctvMeta) return;
 
-    if (this.pgPool || (this.useSupabaseRpc && this.storageMode === 'supabase_postgres')) {
+    if (this.pgPool) {
       const pgStatements = [
         `ALTER TABLE attendance_logs
            ADD COLUMN IF NOT EXISTS verified_by TEXT DEFAULT '',
@@ -1026,25 +1131,40 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
          WHERE cctv_status <> 'confirmed'`,
       ];
       for (const sql of pgStatements) {
-        if (this.pgPool) {
-          await this.execute(sql);
-        } else {
-          await execSupabaseRpcSql(sql);
-        }
+        await this.execute(sql);
       }
-      if (this.sqliteDb) {
-        try {
-          this.sqliteDb.exec(
-            "UPDATE attendance_logs SET cctv_status = 'confirmed' WHERE verified_by_cctv = 1 AND COALESCE(cctv_status, 'pending') <> 'confirmed'"
-          );
-          this.sqliteDb.exec(
-            "UPDATE attendance_logs SET cctv_status = 'pending' WHERE cctv_status IS NULL OR cctv_status = ''"
-          );
-        } catch {
-          // ignore
-        }
+      await this.refreshSchemaCapabilities();
+      if (this.schemaCaps.attendanceCctvMeta) {
+        await this.upsertSetting('migration_cctv_verify_v42', 'done');
       }
-    } else {
+      return;
+    }
+
+    if (this.useSupabaseRpc && this.storageMode === 'supabase_postgres') {
+      // NOTE: zayed_rpc_exec intentionally blocks ALTER TABLE DDL for security.
+      // Only run backfill & index once columns exist on Supabase (via SQL migration).
+      if (!this.schemaCaps.attendanceCctvMeta) {
+        return;
+      }
+      const postAlterStatements = [
+        `UPDATE attendance_logs
+         SET cctv_status = 'confirmed'
+         WHERE verified_by_cctv = 1 AND COALESCE(cctv_status, 'pending') <> 'confirmed'`,
+        `UPDATE attendance_logs
+         SET cctv_status = 'pending'
+         WHERE cctv_status IS NULL OR cctv_status = ''`,
+        `CREATE INDEX IF NOT EXISTS idx_attendance_logs_cctv_status
+         ON attendance_logs (date_key, cctv_status)
+         WHERE cctv_status <> 'confirmed'`,
+      ];
+      for (const sql of postAlterStatements) {
+        await execSupabaseRpcSql(sql).catch(() => {});
+      }
+      await this.upsertSetting('migration_cctv_verify_v42', 'done');
+      return;
+    }
+
+    if (this.schemaCaps.attendanceCctvMeta) {
       await this.execute(
         `UPDATE attendance_logs
          SET cctv_status = 'confirmed'
@@ -1060,13 +1180,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
          ON attendance_logs (date_key, cctv_status)
          WHERE cctv_status <> 'confirmed'`
       );
+      await this.upsertSetting('migration_cctv_verify_v42', 'done');
     }
-
-    await this.upsertSetting('migration_cctv_verify_v42', 'done');
   }
 
   private ensureRoleProfilesColumnsOnSqlite(): void {
-    if (!this.sqliteDb) return;
+    if (!this.sqliteDb || process.env.ZAYED_SKIP_AUTO_SCHEMA_ALTER === '1') return;
     const ensureCols = (table: string, alterations: Array<[string, string]>) => {
       try {
         const cols = this.sqliteDb!.prepare(`PRAGMA table_info(${table})`).all() as Array<{
@@ -1117,12 +1236,25 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private async ensureRoleProfilesV43Migration(): Promise<void> {
     this.ensureRoleProfilesColumnsOnSqlite();
 
+    const allRoleProfileColsReady =
+      this.schemaCaps.systemUsersRoleProfiles &&
+      this.schemaCaps.rolePoliciesAvatars &&
+      this.schemaCaps.employeesAvatars &&
+      this.schemaCaps.walkiePresenceAvatar;
+
     const migratedRow = await this.queryOne<{ value: string }>(
       "SELECT value FROM settings WHERE key = 'migration_role_profiles_v43'"
     );
-    if (migratedRow?.value === 'done') return;
+    if (migratedRow?.value === 'done' && allRoleProfileColsReady) return;
 
-    if (this.pgPool || (this.useSupabaseRpc && this.storageMode === 'supabase_postgres')) {
+    await this.execute(
+      `INSERT INTO settings (key, value) VALUES ('login_show_role_cards', 'true') ON CONFLICT (key) DO NOTHING`
+    ).catch(() => {});
+    await this.execute(
+      `INSERT INTO settings (key, value) VALUES ('password_min_length', '4') ON CONFLICT (key) DO NOTHING`
+    ).catch(() => {});
+
+    if (this.pgPool) {
       const pgStatements = [
         `ALTER TABLE system_users
            ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT '',
@@ -1153,24 +1285,50 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       ];
       for (const sql of pgStatements) {
         try {
-          if (this.pgPool) {
-            await this.execute(sql);
-          } else {
-            await execSupabaseRpcSql(sql);
-          }
+          await this.execute(sql);
         } catch {
           // ignore non-fatal DDL if already applied
         }
       }
+      await this.refreshSchemaCapabilities();
+      if (
+        this.schemaCaps.systemUsersRoleProfiles &&
+        this.schemaCaps.rolePoliciesAvatars &&
+        this.schemaCaps.employeesAvatars &&
+        this.schemaCaps.walkiePresenceAvatar
+      ) {
+        await this.upsertSetting('migration_role_profiles_v43', 'done');
+      }
+      return;
     }
 
-    await this.execute(
-      `INSERT INTO settings (key, value) VALUES ('login_show_role_cards', 'true') ON CONFLICT (key) DO NOTHING`
-    );
-    await this.execute(
-      `INSERT INTO settings (key, value) VALUES ('password_min_length', '4') ON CONFLICT (key) DO NOTHING`
-    );
-    await this.upsertSetting('migration_role_profiles_v43', 'done');
+    if (this.useSupabaseRpc && this.storageMode === 'supabase_postgres') {
+      // NOTE: zayed_rpc_exec intentionally forbids ALTER TABLE.
+      // Never mark v43 done unless the columns actually exist in information_schema.
+      if (!allRoleProfileColsReady) {
+        return;
+      }
+      await execSupabaseRpcSql(
+        `UPDATE system_users
+         SET avatar_url = COALESCE(avatar_url, ''),
+             avatar_preset = COALESCE(avatar_preset, ''),
+             preferences_json = COALESCE(NULLIF(preferences_json, ''), '{}'),
+             session_version = COALESCE(session_version, 1),
+             password_changed_at = COALESCE(password_changed_at, ''),
+             username_changed_at = COALESCE(username_changed_at, ''),
+             username = LOWER(TRIM(username))`
+      ).catch(() => {});
+      await execSupabaseRpcSql(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_system_users_username_lower
+         ON system_users (LOWER(username))`
+      ).catch(() => {});
+      await this.upsertSetting('migration_role_profiles_v43', 'done');
+      return;
+    }
+
+    if (allRoleProfileColsReady) {
+      await this.upsertSetting('migration_role_profiles_v43', 'done');
+    }
   }
 
   private async mergeRolePolicyPermissions(
@@ -1477,6 +1635,33 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     return parsed;
   }
 
+  async loadUserPreferences(userRow: any): Promise<Record<string, any>> {
+    if (userRow?.preferences_json !== undefined && userRow?.preferences_json !== null) {
+      return this.parsePreferencesJson(userRow.preferences_json);
+    }
+    if (!this.schemaCaps.systemUsersRoleProfiles && userRow?.id) {
+      const fallbackRow = await this.queryOne<{ value: string }>(
+        'SELECT value FROM settings WHERE key = ? LIMIT 1',
+        [`user_prefs:${userRow.id}`]
+      );
+      if (fallbackRow?.value) {
+        return this.parsePreferencesJson(fallbackRow.value);
+      }
+    }
+    return {};
+  }
+
+  async saveUserPreferences(userId: string, serialized: string, nowIso: string): Promise<void> {
+    if (this.schemaCaps.systemUsersRoleProfiles) {
+      await this.execute(
+        'UPDATE system_users SET preferences_json = ?, updated_at = ? WHERE id = ?',
+        [serialized, nowIso, userId]
+      );
+      return;
+    }
+    await this.upsertSetting(`user_prefs:${userId}`, serialized);
+  }
+
   resolveEffectiveAvatarUrl(user?: any, emp?: any, rolePolicy?: any): string {
     const uUrl = String(user?.avatar_url || '').trim();
     if (uUrl) return uUrl;
@@ -1519,7 +1704,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     durationHours = 24 * 365 * 5
   ): Promise<string> {
     let version = Number(user.session_version || 0);
-    if (!version && user.id !== '__DEVICE_KIOSK__') {
+    if (!version && user.id !== '__DEVICE_KIOSK__' && this.schemaCaps.systemUsersRoleProfiles) {
       const row = await this.queryOne<{ session_version?: number }>(
         'SELECT session_version FROM system_users WHERE id = ? LIMIT 1',
         [user.id]
@@ -1566,8 +1751,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       if (new Date(session.expires_at).getTime() <= Date.now()) return null;
     } else if (embeddedUserId) {
       if (embeddedUserId !== '__DEVICE_KIOSK__') {
-        const activeUser = await this.queryOne<{ id: string; session_version?: number }>(
-          'SELECT id, session_version FROM system_users WHERE id = ? AND is_active = 1',
+        const activeUser = await this.queryOne<any>(
+          'SELECT * FROM system_users WHERE id = ? AND is_active = 1',
           [embeddedUserId]
         );
         if (!activeUser) return null;
@@ -1631,18 +1816,13 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
 
-    const [permissions, rolePolicyRow, empRow] = await Promise.all([
+    const [permissions, rolePolicyRow, empRow, preferences] = await Promise.all([
       this.getRolePermissions(user.role, user.custom_permissions_json),
-      this.queryOne<any>(
-        'SELECT role, avatar_url, avatar_preset, avatar_color FROM role_policies WHERE role = ? LIMIT 1',
-        [user.role]
-      ),
+      this.queryOne<any>('SELECT * FROM role_policies WHERE role = ? LIMIT 1', [user.role]),
       user.employee_id
-        ? this.queryOne<any>(
-            'SELECT id, avatar_url, avatar_preset FROM employees WHERE id = ? LIMIT 1',
-            [user.employee_id]
-          )
+        ? this.queryOne<any>('SELECT * FROM employees WHERE id = ? LIMIT 1', [user.employee_id])
         : Promise.resolve(null),
+      this.loadUserPreferences(user),
     ]);
 
     const roleMeta = ROLES_METADATA[user.role] || { shortLabel: user.role, label: user.role };
@@ -1664,7 +1844,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         avatar_url: effectiveAvatarUrl,
         avatar_preset: String(user.avatar_preset || empRow?.avatar_preset || rolePolicyRow?.avatar_preset || '').trim(),
         employee_id: user.employee_id || '',
-        preferences: this.parsePreferencesJson(user.preferences_json),
+        preferences,
       },
       permissions,
       actorLabel,
@@ -1780,23 +1960,41 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       const nextAvatarPreset = existingLinked.avatar_preset || emp.avatar_preset || '';
       const nextAvatarColor = existingLinked.avatar_color || emp.avatar_color || '#0B57D0';
 
-      await this.execute(
-        `UPDATE system_users
-         SET display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?, avatar_color = ?, avatar_url = ?, avatar_preset = ?, is_active = 1, updated_at = ?
-         WHERE id = ?`,
-        [
-          emp.name.trim(),
-          resolvedRole,
-          saltHex,
-          hashHex,
-          cipher,
-          nextAvatarColor,
-          nextAvatarUrl,
-          nextAvatarPreset,
-          nowIso,
-          existingLinked.id,
-        ]
-      );
+      if (this.schemaCaps.systemUsersRoleProfiles) {
+        await this.execute(
+          `UPDATE system_users
+           SET display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?, avatar_color = ?, avatar_url = ?, avatar_preset = ?, is_active = 1, updated_at = ?
+           WHERE id = ?`,
+          [
+            emp.name.trim(),
+            resolvedRole,
+            saltHex,
+            hashHex,
+            cipher,
+            nextAvatarColor,
+            nextAvatarUrl,
+            nextAvatarPreset,
+            nowIso,
+            existingLinked.id,
+          ]
+        );
+      } else {
+        await this.execute(
+          `UPDATE system_users
+           SET display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?, avatar_color = ?, is_active = 1, updated_at = ?
+           WHERE id = ?`,
+          [
+            emp.name.trim(),
+            resolvedRole,
+            saltHex,
+            hashHex,
+            cipher,
+            nextAvatarColor,
+            nowIso,
+            existingLinked.id,
+          ]
+        );
+      }
       return this.queryOne('SELECT * FROM system_users WHERE id = ?', [existingLinked.id]);
     }
 
@@ -1831,26 +2029,47 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       ? `${baseUsername}_${crypto.randomBytes(2).toString('hex')}`
       : baseUsername;
 
-    await this.execute(
-      `INSERT INTO system_users (
-        id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, avatar_url, avatar_preset, is_active, employee_id, custom_permissions_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, '[]', ?, ?)`,
-      [
-        newUserId,
-        finalUsername,
-        emp.name.trim(),
-        resolvedRole,
-        saltHex,
-        hashHex,
-        cipher,
-        emp.avatar_color || '#0B57D0',
-        emp.avatar_url || '',
-        emp.avatar_preset || '',
-        emp.id,
-        nowIso,
-        nowIso,
-      ]
-    );
+    if (this.schemaCaps.systemUsersRoleProfiles) {
+      await this.execute(
+        `INSERT INTO system_users (
+          id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, avatar_url, avatar_preset, is_active, employee_id, custom_permissions_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, '[]', ?, ?)`,
+        [
+          newUserId,
+          finalUsername,
+          emp.name.trim(),
+          resolvedRole,
+          saltHex,
+          hashHex,
+          cipher,
+          emp.avatar_color || '#0B57D0',
+          emp.avatar_url || '',
+          emp.avatar_preset || '',
+          emp.id,
+          nowIso,
+          nowIso,
+        ]
+      );
+    } else {
+      await this.execute(
+        `INSERT INTO system_users (
+          id, username, display_name, role, pin_salt, pin_hash, pin_cipher, avatar_color, is_active, employee_id, custom_permissions_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, '[]', ?, ?)`,
+        [
+          newUserId,
+          finalUsername,
+          emp.name.trim(),
+          resolvedRole,
+          saltHex,
+          hashHex,
+          cipher,
+          emp.avatar_color || '#0B57D0',
+          emp.id,
+          nowIso,
+          nowIso,
+        ]
+      );
+    }
 
     return this.queryOne('SELECT * FROM system_users WHERE id = ?', [newUserId]);
   }
@@ -2095,37 +2314,66 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     const finalCctvNote = isAutoConfirmed ? String(cctv_note || '').trim().slice(0, 300) : '';
 
     const attLogId = requestedId ? String(requestedId) : crypto.randomUUID();
-    await this.execute(
-      `INSERT INTO attendance_logs (
-        id, employee_id, employee_name, department, action_type, timestamp, date_key, shift_date_key,
-        late_minutes, allowed_break_minutes, break_duration_minutes, break_reason,
-        note, proof_url, recorded_by, verified_by_cctv, verified_at,
-        verified_by, cctv_status, cctv_observed_time, cctv_note, synced
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-      [
-        attLogId,
-        emp.id,
-        emp.name,
-        emp.department,
-        action_type,
-        isoTime,
-        dateKey,
-        shiftDateKey,
-        lateMinutes,
-        finalAllowedBreak,
-        finalBreakDuration,
-        finalBreakReason,
-        finalNote,
-        proof_url,
-        recorded_by,
-        finalVerifiedFlag,
-        finalVerifiedAt,
-        finalVerifiedBy,
-        finalCctvStatus,
-        finalObservedTime,
-        finalCctvNote,
-      ]
-    );
+    if (this.schemaCaps.attendanceCctvMeta) {
+      await this.execute(
+        `INSERT INTO attendance_logs (
+          id, employee_id, employee_name, department, action_type, timestamp, date_key, shift_date_key,
+          late_minutes, allowed_break_minutes, break_duration_minutes, break_reason,
+          note, proof_url, recorded_by, verified_by_cctv, verified_at,
+          verified_by, cctv_status, cctv_observed_time, cctv_note, synced
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [
+          attLogId,
+          emp.id,
+          emp.name,
+          emp.department,
+          action_type,
+          isoTime,
+          dateKey,
+          shiftDateKey,
+          lateMinutes,
+          finalAllowedBreak,
+          finalBreakDuration,
+          finalBreakReason,
+          finalNote,
+          proof_url,
+          recorded_by,
+          finalVerifiedFlag,
+          finalVerifiedAt,
+          finalVerifiedBy,
+          finalCctvStatus,
+          finalObservedTime,
+          finalCctvNote,
+        ]
+      );
+    } else {
+      await this.execute(
+        `INSERT INTO attendance_logs (
+          id, employee_id, employee_name, department, action_type, timestamp, date_key, shift_date_key,
+          late_minutes, allowed_break_minutes, break_duration_minutes, break_reason,
+          note, proof_url, recorded_by, verified_by_cctv, verified_at, synced
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [
+          attLogId,
+          emp.id,
+          emp.name,
+          emp.department,
+          action_type,
+          isoTime,
+          dateKey,
+          shiftDateKey,
+          lateMinutes,
+          finalAllowedBreak,
+          finalBreakDuration,
+          finalBreakReason,
+          finalNote,
+          proof_url,
+          recorded_by,
+          finalVerifiedFlag,
+          finalVerifiedAt,
+        ]
+      );
+    }
 
     const actionArabicMap: Record<string, string> = {
       check_in: 'حضور',
@@ -2149,7 +2397,19 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           : 'info',
     });
 
-    return this.queryOne('SELECT * FROM attendance_logs WHERE id = ?', [attLogId]);
+    const inserted = await this.queryOne<any>('SELECT * FROM attendance_logs WHERE id = ?', [
+      attLogId,
+    ]);
+    if (inserted && !this.schemaCaps.attendanceCctvMeta) {
+      return {
+        ...inserted,
+        verified_by: finalVerifiedBy,
+        cctv_status: finalCctvStatus,
+        cctv_observed_time: finalObservedTime,
+        cctv_note: finalCctvNote,
+      };
+    }
+    return inserted;
   }
 
   async ensureCatalogProduct({
@@ -2548,7 +2808,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
             sql: "SELECT * FROM dayoff_swap_requests WHERE status IN ('pending_requester', 'pending_peer', 'pending_manager') ORDER BY created_at DESC",
           },
           {
-            sql: 'SELECT role, avatar_url, avatar_preset, avatar_color FROM role_policies',
+            sql: 'SELECT * FROM role_policies',
           },
         ]);
 
@@ -2676,7 +2936,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
               "SELECT * FROM dayoff_swap_requests WHERE status IN ('pending_requester', 'pending_peer', 'pending_manager') ORDER BY created_at DESC"
             )
           : Promise.resolve([]),
-        this.queryAll<any>('SELECT role, avatar_url, avatar_preset, avatar_color FROM role_policies'),
+        this.queryAll<any>('SELECT * FROM role_policies'),
       ]);
 
       settings = settingsRes;
@@ -3503,7 +3763,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
             avatar_preset: e?.avatar_preset ?? '',
           }))
         : [];
-      await upsertRows('employees', 'id', sanitizedEmployees, [
+      const empCols = [
         'id',
         'emp_code',
         'name',
@@ -3512,14 +3772,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         'shift_start',
         'shift_end',
         'avatar_color',
-        'avatar_url',
-        'avatar_preset',
+        ...(this.schemaCaps.employeesAvatars ? ['avatar_url', 'avatar_preset'] : []),
         'phone',
         'is_active',
         'system_role',
         'login_enabled',
         'updated_at',
-      ]);
+      ];
+      await upsertRows('employees', 'id', sanitizedEmployees, empCols);
       if (Array.isArray(tables.role_policies) && tables.role_policies.length > 0) {
         const sanitizedPolicies = tables.role_policies.map((rp: any) => ({
           ...rp,
@@ -3527,14 +3787,15 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           avatar_preset: rp?.avatar_preset ?? '',
           avatar_color: rp?.avatar_color ?? '',
         }));
-        await upsertRows('role_policies', 'role', sanitizedPolicies, [
+        const rolePolicyCols = [
           'role',
           'permissions_json',
-          'avatar_url',
-          'avatar_preset',
-          'avatar_color',
+          ...(this.schemaCaps.rolePoliciesAvatars
+            ? ['avatar_url', 'avatar_preset', 'avatar_color']
+            : []),
           'updated_at',
-        ]);
+        ];
+        await upsertRows('role_policies', 'role', sanitizedPolicies, rolePolicyCols);
       }
       if (Array.isArray(tables.system_users) && tables.system_users.length > 0) {
         const sanitizedUsers = tables.system_users
@@ -3549,7 +3810,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
             password_changed_at: u.password_changed_at ?? '',
             username_changed_at: u.username_changed_at ?? '',
           }));
-        await upsertRows('system_users', 'id', sanitizedUsers, [
+        const sysUserCols = [
           'id',
           'username',
           'display_name',
@@ -3558,19 +3819,24 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           'pin_hash',
           'pin_cipher',
           'avatar_color',
-          'avatar_url',
-          'avatar_preset',
-          'preferences_json',
-          'session_version',
-          'password_changed_at',
-          'username_changed_at',
+          ...(this.schemaCaps.systemUsersRoleProfiles
+            ? [
+                'avatar_url',
+                'avatar_preset',
+                'preferences_json',
+                'session_version',
+                'password_changed_at',
+                'username_changed_at',
+              ]
+            : []),
           'is_active',
           'employee_id',
           'custom_permissions_json',
           'last_login_at',
           'created_at',
           'updated_at',
-        ]);
+        ];
+        await upsertRows('system_users', 'id', sanitizedUsers, sysUserCols);
       }
       await upsertRows('suppliers', 'id', tables.suppliers, [
         'id',
@@ -3617,7 +3883,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         'date_key',
         'synced',
       ]);
-      await upsertRows('attendance_logs', 'id', tables.attendance_logs, [
+      const attCols = [
         'id',
         'employee_id',
         'employee_name',
@@ -3635,12 +3901,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         'recorded_by',
         'verified_by_cctv',
         'verified_at',
-        'verified_by',
-        'cctv_status',
-        'cctv_observed_time',
-        'cctv_note',
+        ...(this.schemaCaps.attendanceCctvMeta
+          ? ['verified_by', 'cctv_status', 'cctv_observed_time', 'cctv_note']
+          : []),
         'synced',
-      ]);
+      ];
+      await upsertRows('attendance_logs', 'id', tables.attendance_logs, attCols);
       await upsertRows('truck_logs', 'id', tables.truck_logs, [
         'id',
         'supplier_id',

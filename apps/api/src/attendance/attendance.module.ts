@@ -263,18 +263,28 @@ export class AttendanceController {
     try {
       const dateKey = body?.date_key || getLocalDateKey();
       const now = new Date().toISOString();
-      const result = await this.db.execute(
-        `UPDATE attendance_logs
-         SET verified_by_cctv = 1,
-             verified_at = ?,
-             verified_by = ?,
-             cctv_status = 'confirmed',
-             synced = 1
-         WHERE date_key = ?
-           AND verified_by_cctv = 0
-           AND COALESCE(cctv_status, 'pending') != 'mismatch'`,
-        [now, auth.actorLabel, dateKey]
-      );
+      const result = this.db.schemaCaps.attendanceCctvMeta
+        ? await this.db.execute(
+            `UPDATE attendance_logs
+             SET verified_by_cctv = 1,
+                 verified_at = ?,
+                 verified_by = ?,
+                 cctv_status = 'confirmed',
+                 synced = 1
+             WHERE date_key = ?
+               AND verified_by_cctv = 0
+               AND COALESCE(cctv_status, 'pending') != 'mismatch'`,
+            [now, auth.actorLabel, dateKey]
+          )
+        : await this.db.execute(
+            `UPDATE attendance_logs
+             SET verified_by_cctv = 1,
+                 verified_at = ?,
+                 synced = 1
+             WHERE date_key = ?
+               AND verified_by_cctv = 0`,
+            [now, dateKey]
+          );
 
       await this.db.recordAuditLog({
         userId: auth.user.id,
@@ -327,18 +337,29 @@ export class AttendanceController {
         .trim()
         .slice(0, 300);
 
-      await this.db.execute(
-        `UPDATE attendance_logs
-         SET verified_by_cctv = ?,
-             verified_at = ?,
-             verified_by = ?,
-             cctv_status = ?,
-             cctv_observed_time = ?,
-             cctv_note = ?,
-             synced = 1
-         WHERE id = ?`,
-        [verifiedFlag, now, auth.actorLabel, status, observedTime, cctvNote, existing.id]
-      );
+      if (this.db.schemaCaps.attendanceCctvMeta) {
+        await this.db.execute(
+          `UPDATE attendance_logs
+           SET verified_by_cctv = ?,
+               verified_at = ?,
+               verified_by = ?,
+               cctv_status = ?,
+               cctv_observed_time = ?,
+               cctv_note = ?,
+               synced = 1
+           WHERE id = ?`,
+          [verifiedFlag, now, auth.actorLabel, status, observedTime, cctvNote, existing.id]
+        );
+      } else {
+        await this.db.execute(
+          `UPDATE attendance_logs
+           SET verified_by_cctv = ?,
+               verified_at = ?,
+               synced = 1
+           WHERE id = ?`,
+          [verifiedFlag, now, existing.id]
+        );
+      }
 
       await this.db.recordAuditLog({
         userId: auth.user.id,
@@ -350,10 +371,20 @@ export class AttendanceController {
         severity: status === 'mismatch' ? 'warning' : 'info',
       });
 
-      const updated = await this.db.queryOne(
+      const updatedRaw = await this.db.queryOne<any>(
         'SELECT * FROM attendance_logs WHERE id = ?',
         [existing.id]
       );
+      const updated =
+        updatedRaw && !this.db.schemaCaps.attendanceCctvMeta
+          ? {
+              ...updatedRaw,
+              verified_by: auth.actorLabel,
+              cctv_status: status,
+              cctv_observed_time: observedTime,
+              cctv_note: cctvNote,
+            }
+          : updatedRaw;
       await this.realtime.broadcastStoreUpdate('attendance_verify');
       return res.status(200).json({ ok: true, log: updated });
     } catch (err: any) {
@@ -500,32 +531,56 @@ export class AttendanceController {
           ? ''
           : existing.cctv_note || '';
 
-      await this.db.execute(
-        `UPDATE attendance_logs
-         SET action_type = ?, timestamp = ?, date_key = ?, shift_date_key = ?,
-             late_minutes = ?, allowed_break_minutes = ?, break_duration_minutes = ?, break_reason = ?,
-             note = ?, verified_by_cctv = ?, verified_at = ?, verified_by = ?,
-             cctv_status = ?, cctv_observed_time = ?, cctv_note = ?, synced = 1
-         WHERE id = ?`,
-        [
-          nextAction,
-          nextIso,
-          nextDateKey,
-          nextShiftDateKey,
-          nextLate,
-          nextAllowedBreak,
-          nextBreakDuration,
-          nextBreakReason,
-          nextNote,
-          nextVerified,
-          nextVerifiedAt,
-          nextVerifiedBy,
-          nextCctvStatus,
-          nextObservedTime,
-          nextCctvNote,
-          existing.id,
-        ]
-      );
+      if (this.db.schemaCaps.attendanceCctvMeta) {
+        await this.db.execute(
+          `UPDATE attendance_logs
+           SET action_type = ?, timestamp = ?, date_key = ?, shift_date_key = ?,
+               late_minutes = ?, allowed_break_minutes = ?, break_duration_minutes = ?, break_reason = ?,
+               note = ?, verified_by_cctv = ?, verified_at = ?, verified_by = ?,
+               cctv_status = ?, cctv_observed_time = ?, cctv_note = ?, synced = 1
+           WHERE id = ?`,
+          [
+            nextAction,
+            nextIso,
+            nextDateKey,
+            nextShiftDateKey,
+            nextLate,
+            nextAllowedBreak,
+            nextBreakDuration,
+            nextBreakReason,
+            nextNote,
+            nextVerified,
+            nextVerifiedAt,
+            nextVerifiedBy,
+            nextCctvStatus,
+            nextObservedTime,
+            nextCctvNote,
+            existing.id,
+          ]
+        );
+      } else {
+        await this.db.execute(
+          `UPDATE attendance_logs
+           SET action_type = ?, timestamp = ?, date_key = ?, shift_date_key = ?,
+               late_minutes = ?, allowed_break_minutes = ?, break_duration_minutes = ?, break_reason = ?,
+               note = ?, verified_by_cctv = ?, verified_at = ?, synced = 1
+           WHERE id = ?`,
+          [
+            nextAction,
+            nextIso,
+            nextDateKey,
+            nextShiftDateKey,
+            nextLate,
+            nextAllowedBreak,
+            nextBreakDuration,
+            nextBreakReason,
+            nextNote,
+            nextVerified,
+            nextVerifiedAt,
+            existing.id,
+          ]
+        );
+      }
 
       await this.db.recordAuditLog({
         userId: auth.user.id,

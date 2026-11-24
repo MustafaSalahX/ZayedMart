@@ -1,10 +1,21 @@
 import { createClient } from '@supabase/supabase-js';
 import {
+  computeShiftDurationHours,
   DEFAULT_ROLE_PERMISSIONS,
+  formatShiftDurationArabic,
   getCairoDateKey,
+  getPreviousDateKey,
   getSaturdayWeekStart,
+  getWeekDateKeys,
+  getWeekdayCodeFromDateKey,
   inferDefaultRoleFromDepartment,
+  inferScheduleTeam,
+  isScheduleTeamGroup,
+  isScheduleWeekday,
   ROLES_METADATA,
+  SCHEDULE_TEAM_GROUPS,
+  SCHEDULE_TEAM_GROUP_IDS,
+  SCHEDULE_WEEKDAYS,
   ZAYED_SUPABASE_ANON_KEY,
   ZAYED_SUPABASE_URL,
 } from '@zayed-mart/shared';
@@ -1533,9 +1544,40 @@ async function executeDirectCloudMutation(endpoint, body) {
         ]
       );
     } catch {
-      const supabase = getSupabaseDirectClient();
-      const { error } = await supabase.from('attendance_logs').upsert(row, { onConflict: 'id' });
-      if (error) throw new Error(error.message);
+      try {
+        await execDirectCloudSql(
+          `INSERT INTO attendance_logs (
+            id, employee_id, employee_name, department, action_type, timestamp, date_key, shift_date_key,
+            late_minutes, allowed_break_minutes, break_duration_minutes, break_reason, note, proof_url,
+            recorded_by, verified_by_cctv, verified_at, synced
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+          ON CONFLICT (id) DO NOTHING`,
+          [
+            row.id,
+            row.employee_id,
+            row.employee_name,
+            row.department,
+            row.action_type,
+            row.timestamp,
+            row.date_key,
+            row.shift_date_key,
+            row.late_minutes,
+            row.allowed_break_minutes,
+            row.break_duration_minutes,
+            row.break_reason,
+            row.note,
+            row.proof_url,
+            row.recorded_by,
+            row.verified_by_cctv,
+            row.verified_at,
+          ]
+        );
+      } catch {
+        const supabase = getSupabaseDirectClient();
+        const { verified_by: _vb, cctv_status: _cs, cctv_observed_time: _cot, cctv_note: _cn, ...baseRow } = row;
+        const { error } = await supabase.from('attendance_logs').upsert(baseRow, { onConflict: 'id' });
+        if (error) throw new Error(error.message);
+      }
     }
     return { ok: true, log: row };
   }
@@ -1810,7 +1852,7 @@ export async function apiRequest(endpoint, method = 'GET', body) {
       if (res.status === 401) {
         notifyAuthInvalidated();
       }
-      const serverErr = new Error(json.error || 'حدث خطأ غير متوقع');
+      const serverErr = new Error(json.error || json.message || 'حدث خطأ غير متوقع');
       serverErr.isServerResponse = contentType.includes('application/json');
       serverErr.status = res.status;
       throw serverErr;
@@ -2161,11 +2203,257 @@ function loadScheduleWeekCache(weekKey) {
   }
 }
 
+async function fetchWeeklyScheduleFromDirectCloud(canonicalWeek) {
+  const session = getCachedAuthSession();
+  const role = session?.user?.role || 'owner';
+  const perms = session?.permissions || [];
+  const canManage = hasPermission(perms, role, 'schedule:manage');
+  const canSwap = hasPermission(perms, role, 'schedule:swap_request') || canManage;
+  const canVerify = hasPermission(perms, role, 'attendance:verify');
+  const hasFullShiftVisibility =
+    role === 'owner' ||
+    canManage ||
+    hasPermission(perms, role, 'attendance:write') ||
+    canVerify;
+  const canSeeEmpCode = canManage || role === 'owner';
+
+  const todayDateKey = getCairoDateKey();
+  const todayWeekday = getWeekdayCodeFromDateKey(todayDateKey);
+  const weekStartDate = getSaturdayWeekStart(canonicalWeek || todayDateKey);
+  const weekDates = getWeekDateKeys(weekStartDate);
+  const targetAttDate = getLocalDateKey();
+  const prevAttDate = getPreviousDateKey(targetAttDate);
+
+  const [employees, defaultRows, overrideRows, weekSwapsRaw, directLogs, prevShiftLogs, settingsRows] =
+    await Promise.all([
+      execDirectCloudSql('SELECT * FROM employees WHERE is_active = 1 ORDER BY department, emp_code, name'),
+      execDirectCloudSql('SELECT * FROM employee_dayoff_defaults').catch(() => []),
+      execDirectCloudSql('SELECT * FROM weekly_dayoff_overrides WHERE week_start_date = ?', [weekStartDate]).catch(() => []),
+      execDirectCloudSql('SELECT * FROM dayoff_swap_requests WHERE week_start_date = ? ORDER BY created_at DESC', [weekStartDate]).catch(() => []),
+      execDirectCloudSql('SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp DESC', [targetAttDate, targetAttDate]).catch(() => []),
+      execDirectCloudSql('SELECT * FROM attendance_logs WHERE date_key = ? OR shift_date_key = ? ORDER BY timestamp ASC', [prevAttDate, prevAttDate]).catch(() => []),
+      execDirectCloudSql('SELECT key, value FROM settings').catch(() => []),
+    ]);
+
+  const settingsMap = Object.fromEntries((settingsRows || []).map((r) => [r.key, r.value]));
+  const scheduleSettings = {
+    swapRequiresManagerApproval: settingsMap.schedule_swap_requires_manager === 'true',
+    minOnDuty: {
+      cashiers: Math.max(1, Number(settingsMap.schedule_min_on_duty_cashiers || 2) || 2),
+      hall: Math.max(1, Number(settingsMap.schedule_min_on_duty_hall || 2) || 2),
+      security_cctv: Math.max(1, Number(settingsMap.schedule_min_on_duty_security_cctv || 1) || 1),
+    },
+  };
+
+  const defaultsByEmp = new Map((defaultRows || []).map((d) => [d.employee_id, d]));
+  const overridesByEmp = new Map((overrideRows || []).map((o) => [o.employee_id, o]));
+
+  const effectiveList = (employees || []).map((emp) => {
+    const def = defaultsByEmp.get(emp.id);
+    const ovr = overridesByEmp.get(emp.id);
+    const teamGroup = isScheduleTeamGroup(ovr?.team_group)
+      ? ovr.team_group
+      : isScheduleTeamGroup(def?.team_group)
+      ? def.team_group
+      : inferScheduleTeam(emp);
+    const defaultDay = isScheduleWeekday(def?.day_of_week) ? def.day_of_week : null;
+    const hasValidOvr = Boolean(ovr && isScheduleWeekday(ovr.day_of_week));
+    const effectiveDay = hasValidOvr ? ovr.day_of_week : defaultDay;
+    const isOverride = Boolean(hasValidOvr && (ovr.source !== 'revert' || ovr.day_of_week !== defaultDay));
+    return {
+      ...emp,
+      team_group: teamGroup,
+      default_day_of_week: defaultDay,
+      effective_day_of_week: effectiveDay,
+      is_override: isOverride,
+      override_source: hasValidOvr ? String(ovr.source || 'manual') : null,
+      swap_request_id: hasValidOvr && ovr.swap_request_id ? String(ovr.swap_request_id) : null,
+    };
+  });
+
+  const myEmployeeId = session?.user?.employee_id || '';
+  const myEffectiveEmp = myEmployeeId ? effectiveList.find((e) => e.id === myEmployeeId) || null : null;
+  const userTeamGroup = myEffectiveEmp?.team_group || inferScheduleTeam({ role });
+  const visibleGroups = hasFullShiftVisibility ? [...SCHEDULE_TEAM_GROUP_IDS] : [userTeamGroup];
+  const groupLabelById = new Map(SCHEDULE_TEAM_GROUPS.map((g) => [g.id, g.label]));
+  const empNameById = new Map(effectiveList.map((e) => [e.id, String(e.name || '')]));
+
+  const mergedLogsById = new Map();
+  for (const l of directLogs || []) mergedLogsById.set(l.id, l);
+  for (const l of prevShiftLogs || []) {
+    if (!mergedLogsById.has(l.id) && l.action_type !== 'check_out') {
+      mergedLogsById.set(l.id, l);
+    }
+  }
+  const attendanceLogs = Array.from(mergedLogsById.values()).sort((a, b) =>
+    String(b.timestamp).localeCompare(String(a.timestamp))
+  );
+  const logsByEmp = new Map();
+  for (let i = attendanceLogs.length - 1; i >= 0; i--) {
+    const log = attendanceLogs[i];
+    if (!logsByEmp.has(log.employee_id)) logsByEmp.set(log.employee_id, []);
+    logsByEmp.get(log.employee_id).push(log);
+  }
+  const defaultMaxBreak = Number(settingsMap.max_break_minutes || 30);
+
+  const groups = visibleGroups.map((groupId) => {
+    const meta = SCHEDULE_TEAM_GROUPS.find((g) => g.id === groupId);
+    const groupEmps = effectiveList
+      .filter((e) => e.team_group === groupId)
+      .map((e) => ({
+        id: e.id,
+        ...(canSeeEmpCode ? { emp_code: e.emp_code } : {}),
+        name: e.name,
+        department: e.department,
+        role_title: e.role_title || '',
+        avatar_color: e.avatar_color || '#1A73E8',
+        avatar_url: String(e.avatar_url || '').trim(),
+        avatar_preset: String(e.avatar_preset || '').trim(),
+        shift_start: e.shift_start || '08:00',
+        shift_end: e.shift_end || '20:00',
+        team_group: e.team_group,
+        default_day_of_week: e.default_day_of_week,
+        effective_day_of_week: e.effective_day_of_week,
+        is_override: e.is_override,
+        override_source: e.override_source,
+        swap_request_id: e.swap_request_id,
+      }));
+    const totalCount = groupEmps.length;
+    const minRequired = scheduleSettings.minOnDuty[groupId] ?? meta.defaultMinOnDuty;
+    const coverageByDay = {};
+    for (const dayMeta of SCHEDULE_WEEKDAYS) {
+      const day = dayMeta.code;
+      const offEmployeeIds = groupEmps.filter((e) => e.effective_day_of_week === day).map((e) => e.id);
+      const offCount = offEmployeeIds.length;
+      const onDutyCount = Math.max(0, totalCount - offCount);
+      coverageByDay[day] = {
+        dateKey: weekDates[day],
+        offCount,
+        onDutyCount,
+        totalCount,
+        minRequired,
+        lowCoverage: totalCount > 0 && (onDutyCount === 0 || onDutyCount < Math.min(minRequired, totalCount)),
+        offEmployeeIds,
+      };
+    }
+    return {
+      id: meta.id,
+      label: meta.label,
+      shortLabel: meta.shortLabel,
+      icon: meta.icon,
+      tone: meta.tone,
+      defaultMinOnDuty: meta.defaultMinOnDuty,
+      employees: groupEmps,
+      coverageByDay,
+    };
+  });
+
+  const shiftRoster = effectiveList
+    .filter((e) => hasFullShiftVisibility || e.team_group === userTeamGroup)
+    .map((e) => {
+      const shiftStart = e.shift_start || '08:00';
+      const shiftEnd = e.shift_end || '20:00';
+      const empLogs = logsByEmp.get(e.id) || [];
+      const latestLog = empLogs[empLogs.length - 1] || null;
+      const firstCheckIn = empLogs.find((l) => l.action_type === 'check_in') || null;
+      const checkOutLog = empLogs.filter((l) => l.action_type === 'check_out').pop() || null;
+      let currentStatus = 'absent';
+      if (latestLog) {
+        if (latestLog.action_type === 'check_in' || latestLog.action_type === 'break_end') currentStatus = 'present';
+        else if (latestLog.action_type === 'break_start') currentStatus = 'on_break';
+        else if (latestLog.action_type === 'check_out') currentStatus = 'checked_out';
+      }
+      const isScheduledOffToday = Boolean(e.effective_day_of_week && e.effective_day_of_week === todayWeekday);
+      const shiftDurationHours = computeShiftDurationHours(shiftStart, shiftEnd);
+      return {
+        id: e.id,
+        name: e.name,
+        department: e.department,
+        role_title: e.role_title || '',
+        avatar_color: e.avatar_color || '#1A73E8',
+        avatar_url: String(e.avatar_url || '').trim(),
+        avatar_preset: String(e.avatar_preset || '').trim(),
+        team_group: e.team_group,
+        team_group_label: groupLabelById.get(e.team_group) || e.team_group,
+        shift_start: shiftStart,
+        shift_end: shiftEnd,
+        shiftDurationHours,
+        shiftDurationLabel: formatShiftDurationArabic(shiftDurationHours),
+        effective_day_of_week: e.effective_day_of_week,
+        default_day_of_week: e.default_day_of_week,
+        is_override: e.is_override,
+        currentStatus,
+        isScheduledOffToday,
+        workedOnDayOff: Boolean(isScheduledOffToday && firstCheckIn),
+        overlapsMyShift: true,
+        isMe: Boolean(myEmployeeId && e.id === myEmployeeId),
+        checkInTime: firstCheckIn ? firstCheckIn.timestamp : null,
+        checkOutTime: checkOutLog ? checkOutLog.timestamp : null,
+        latestActionTime: latestLog ? latestLog.timestamp : null,
+        lateMinutes: firstCheckIn ? Number(firstCheckIn.late_minutes || 0) : 0,
+        totalBreakMinutes: 0,
+        allowedBreakMinutes: defaultMaxBreak,
+        activeBreakStart: currentStatus === 'on_break' && latestLog ? latestLog.timestamp : null,
+        latestLogId: latestLog ? latestLog.id : null,
+        latestRecordedBy: latestLog ? latestLog.recorded_by : null,
+        latestVerified: latestLog ? Boolean(Number(latestLog.verified_by_cctv)) : true,
+        latestCctvStatus: latestLog
+          ? latestLog.cctv_status || (Number(latestLog.verified_by_cctv) === 1 ? 'confirmed' : 'pending')
+          : 'none',
+        latestVerifiedBy: latestLog?.verified_by || '',
+        latestCctvObservedTime: latestLog?.cctv_observed_time || '',
+        latestCctvNote: latestLog?.cctv_note || '',
+        phone: e.phone || '',
+      };
+    });
+
+  const swaps = (weekSwapsRaw || []).map((s) => ({
+    ...s,
+    requester_name: empNameById.get(s.requester_employee_id) || '',
+    target_name: s.target_employee_id ? empNameById.get(s.target_employee_id) || '' : '',
+    awaiting_my_action: false,
+    can_cancel: false,
+    can_revert: false,
+  }));
+
+  const payload = {
+    ok: true,
+    _offlineCached: true,
+    weekStartDate,
+    weekDates,
+    todayDateKey,
+    todayWeekday,
+    canManage,
+    canSwap,
+    canVerify,
+    hasFullShiftVisibility,
+    myEmployeeId,
+    userTeamGroup,
+    visibleGroups,
+    settings: scheduleSettings,
+    groups,
+    shiftRoster,
+    swaps,
+  };
+  saveScheduleWeekCache(weekStartDate, payload);
+  return payload;
+}
+
 export async function fetchWeeklySchedule(weekStartDate) {
   const canonicalWeek = weekStartDate
     ? getSaturdayWeekStart(weekStartDate)
     : getSaturdayWeekStart(getCairoDateKey());
   const qs = weekStartDate ? `?weekStart=${encodeURIComponent(canonicalWeek)}` : '';
+
+  if (isDirectCloudToken(getAuthToken()) && getDirectCloudCredentials()) {
+    try {
+      return await fetchWeeklyScheduleFromDirectCloud(canonicalWeek);
+    } catch (directErr) {
+      const cached = loadScheduleWeekCache(canonicalWeek);
+      if (cached) return { ...cached, _offlineCached: true };
+      throw directErr;
+    }
+  }
 
   try {
     const res = await apiRequest(`/api/schedules/week${qs}`, 'GET');
@@ -2178,8 +2466,18 @@ export async function fetchWeeklySchedule(weekStartDate) {
     }
     return res;
   } catch (err) {
-    if (err?.isServerResponse || err?.status === 401 || err?.status === 403) {
+    if (err?.status === 401 || err?.status === 403) {
       throw err;
+    }
+    if (
+      getDirectCloudCredentials() &&
+      (typeof navigator === 'undefined' || navigator.onLine !== false)
+    ) {
+      try {
+        return await fetchWeeklyScheduleFromDirectCloud(canonicalWeek);
+      } catch {
+        // Fall through to cached schedule
+      }
     }
     const cached = loadScheduleWeekCache(canonicalWeek);
     if (cached) {

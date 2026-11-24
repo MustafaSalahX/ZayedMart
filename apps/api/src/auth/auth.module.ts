@@ -73,14 +73,10 @@ export class AuthController {
     if (showRoleCards) {
       const [users, rolePolicies, employees] = await Promise.all([
         this.db.queryAll<any>(
-          "SELECT id, display_name, role, avatar_color, avatar_url, avatar_preset, employee_id FROM system_users WHERE is_active = 1 AND role != 'kiosk' ORDER BY display_name ASC"
+          "SELECT * FROM system_users WHERE is_active = 1 AND role != 'kiosk' ORDER BY display_name ASC"
         ),
-        this.db.queryAll<any>(
-          'SELECT role, avatar_url, avatar_preset, avatar_color FROM role_policies'
-        ),
-        this.db.queryAll<any>(
-          'SELECT id, avatar_url, avatar_preset FROM employees WHERE is_active = 1'
-        ),
+        this.db.queryAll<any>('SELECT * FROM role_policies'),
+        this.db.queryAll<any>('SELECT * FROM employees WHERE is_active = 1'),
       ]);
 
       const policyMap = new Map<string, any>(rolePolicies.map((rp) => [rp.role, rp]));
@@ -243,7 +239,7 @@ export class AuthController {
         matchedUser.id,
       ]);
 
-      const [token, permissions, rolePolicyRow, empRow] = await Promise.all([
+      const [token, permissions, rolePolicyRow, empRow, userPreferences] = await Promise.all([
         this.db.issueSessionForUser(
           matchedUser,
           ip,
@@ -254,7 +250,7 @@ export class AuthController {
           matchedUser.custom_permissions_json
         ),
         this.db.queryOne<any>(
-          'SELECT role, avatar_url, avatar_preset, avatar_color FROM role_policies WHERE role = ? LIMIT 1',
+          'SELECT * FROM role_policies WHERE role = ? LIMIT 1',
           [matchedUser.role]
         ),
         matchedUser.employee_id
@@ -262,12 +258,16 @@ export class AuthController {
               matchedUser.employee_id,
             ])
           : Promise.resolve(null),
+        this.db.loadUserPreferences(matchedUser),
       ]);
 
       const roleMeta = ROLES_METADATA[matchedUser.role] || {
         label: matchedUser.role,
       };
-      const publicUser = this.db.buildPublicUserPayload(matchedUser, empRow, rolePolicyRow);
+      const publicUser = {
+        ...this.db.buildPublicUserPayload(matchedUser, empRow, rolePolicyRow),
+        preferences: userPreferences,
+      };
 
       await this.db.recordAuditLog({
         userId: matchedUser.id,
@@ -378,20 +378,21 @@ export class AuthController {
         'SELECT * FROM system_users WHERE id = ? LIMIT 1',
         [auth.user.id]
       );
-      const [empRow, rolePolicyRow, sessionsCountRow] = await Promise.all([
+      const [empRow, rolePolicyRow, sessionsCountRow, userPreferences] = await Promise.all([
         userRow?.employee_id
           ? this.db.queryOne<any>('SELECT * FROM employees WHERE id = ? LIMIT 1', [
               userRow.employee_id,
             ])
           : Promise.resolve(null),
         this.db.queryOne<any>(
-          'SELECT role, avatar_url, avatar_preset, avatar_color FROM role_policies WHERE role = ? LIMIT 1',
+          'SELECT * FROM role_policies WHERE role = ? LIMIT 1',
           [auth.user.role]
         ),
         this.db.queryOne<{ c: any }>(
           'SELECT COUNT(*) as c FROM user_sessions WHERE user_id = ? AND revoked = 0 AND expires_at > ?',
           [auth.user.id, new Date().toISOString()]
         ),
+        this.db.loadUserPreferences(userRow),
       ]);
       const myPass = userRow
         ? decryptPasswordForAdmin(userRow.pin_cipher, secretHex) || empRow?.emp_code || ''
@@ -452,7 +453,7 @@ export class AuthController {
           effective_avatar_url: effectiveAvatarUrl,
           role_default_avatar_url: String(rolePolicyRow?.avatar_url || '').trim(),
           avatar_preset: resolvedPreset,
-          preferences: this.db.parsePreferencesJson(userRow?.preferences_json),
+          preferences: userPreferences,
           password_changed_at: userRow?.password_changed_at || '',
           username_changed_at: userRow?.username_changed_at || '',
           last_login_at: userRow?.last_login_at || '',

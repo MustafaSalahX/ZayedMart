@@ -208,18 +208,22 @@ export class SettingsController {
       [userId]
     );
     if (!userRow) return null;
-    const [empRow, rolePolicyRow] = await Promise.all([
+    const [empRow, rolePolicyRow, preferences] = await Promise.all([
       userRow.employee_id
         ? this.db.queryOne<any>('SELECT * FROM employees WHERE id = ? LIMIT 1', [
             userRow.employee_id,
           ])
         : Promise.resolve(null),
       this.db.queryOne<any>(
-        'SELECT role, avatar_url, avatar_preset, avatar_color FROM role_policies WHERE role = ? LIMIT 1',
+        'SELECT * FROM role_policies WHERE role = ? LIMIT 1',
         [userRow.role]
       ),
+      this.db.loadUserPreferences(userRow),
     ]);
-    return this.db.buildPublicUserPayload(userRow, empRow, rolePolicyRow);
+    return {
+      ...this.db.buildPublicUserPayload(userRow, empRow, rolePolicyRow),
+      preferences,
+    };
   }
 
   // =========================================================================
@@ -282,37 +286,62 @@ export class SettingsController {
       }
 
       const nowIso = new Date().toISOString();
-      await this.db.execute(
-        `UPDATE system_users
-         SET display_name = ?, avatar_color = ?, avatar_preset = ?, avatar_url = ?, updated_at = ?
-         WHERE id = ?`,
-        [nextDisplayName, nextColor, nextPreset, nextAvatarUrl, nowIso, userRow.id]
-      );
+      if (this.db.schemaCaps.systemUsersRoleProfiles) {
+        await this.db.execute(
+          `UPDATE system_users
+           SET display_name = ?, avatar_color = ?, avatar_preset = ?, avatar_url = ?, updated_at = ?
+           WHERE id = ?`,
+          [nextDisplayName, nextColor, nextPreset, nextAvatarUrl, nowIso, userRow.id]
+        );
+      } else {
+        await this.db.execute(
+          `UPDATE system_users
+           SET display_name = ?, avatar_color = ?, updated_at = ?
+           WHERE id = ?`,
+          [nextDisplayName, nextColor, nowIso, userRow.id]
+        );
+      }
 
       if (userRow.employee_id) {
         const nextPhone =
           body?.phone !== undefined ? String(body.phone || '').trim().slice(0, 32) : undefined;
         if (nextPhone !== undefined) {
-          await this.db.execute(
-            `UPDATE employees
-             SET name = ?, avatar_color = ?, avatar_preset = ?, avatar_url = ?, phone = ?, updated_at = ?
-             WHERE id = ?`,
-            [
-              nextDisplayName,
-              nextColor,
-              nextPreset,
-              nextAvatarUrl,
-              nextPhone,
-              nowIso,
-              userRow.employee_id,
-            ]
-          );
-        } else {
+          if (this.db.schemaCaps.employeesAvatars) {
+            await this.db.execute(
+              `UPDATE employees
+               SET name = ?, avatar_color = ?, avatar_preset = ?, avatar_url = ?, phone = ?, updated_at = ?
+               WHERE id = ?`,
+              [
+                nextDisplayName,
+                nextColor,
+                nextPreset,
+                nextAvatarUrl,
+                nextPhone,
+                nowIso,
+                userRow.employee_id,
+              ]
+            );
+          } else {
+            await this.db.execute(
+              `UPDATE employees
+               SET name = ?, avatar_color = ?, phone = ?, updated_at = ?
+               WHERE id = ?`,
+              [nextDisplayName, nextColor, nextPhone, nowIso, userRow.employee_id]
+            );
+          }
+        } else if (this.db.schemaCaps.employeesAvatars) {
           await this.db.execute(
             `UPDATE employees
              SET name = ?, avatar_color = ?, avatar_preset = ?, avatar_url = ?, updated_at = ?
              WHERE id = ?`,
             [nextDisplayName, nextColor, nextPreset, nextAvatarUrl, nowIso, userRow.employee_id]
+          );
+        } else {
+          await this.db.execute(
+            `UPDATE employees
+             SET name = ?, avatar_color = ?, updated_at = ?
+             WHERE id = ?`,
+            [nextDisplayName, nextColor, nowIso, userRow.employee_id]
           );
         }
       }
@@ -357,6 +386,15 @@ export class SettingsController {
         return res.status(404).json({ ok: false, error: 'الحساب غير موجود' });
       }
 
+      if (!this.db.schemaCaps.systemUsersRoleProfiles) {
+        return res.status(503).json({
+          ok: false,
+          code: 'SCHEMA_MIGRATION_REQUIRED',
+          error:
+            'يتطلب حفظ الصور الشخصية تشغيل تحديث قاعدة البيانات (schema.sql) في Supabase SQL Editor أولاً',
+        });
+      }
+
       const uploaded = await this.storage.uploadAvatarDataUrl(body?.dataUrl, userRow.id);
       if (uploaded.ok === false) {
         return res.status(400).json({ ok: false, error: uploaded.error });
@@ -372,7 +410,7 @@ export class SettingsController {
         [uploaded.url, nowIso, userRow.id]
       );
 
-      if (userRow.employee_id) {
+      if (userRow.employee_id && this.db.schemaCaps.employeesAvatars) {
         await this.db.execute(
           `UPDATE employees
            SET avatar_url = ?, avatar_preset = '', updated_at = ?
@@ -381,7 +419,11 @@ export class SettingsController {
         );
       }
 
-      if (body?.apply_to_role_default && auth.has('users:manage')) {
+      if (
+        body?.apply_to_role_default &&
+        auth.has('users:manage') &&
+        this.db.schemaCaps.rolePoliciesAvatars
+      ) {
         await this.upsertRoleDefaultAvatar(userRow.role, uploaded.url, nowIso);
       }
 
@@ -425,6 +467,11 @@ export class SettingsController {
         return res.status(404).json({ ok: false, error: 'الحساب غير موجود' });
       }
 
+      if (!this.db.schemaCaps.systemUsersRoleProfiles) {
+        const user = await this.loadFullPublicUser(userRow.id);
+        return res.json({ ok: true, user });
+      }
+
       const oldAvatarUrl = userRow.avatar_url || '';
       const nowIso = new Date().toISOString();
 
@@ -432,7 +479,7 @@ export class SettingsController {
         `UPDATE system_users SET avatar_url = '', updated_at = ? WHERE id = ?`,
         [nowIso, userRow.id]
       );
-      if (userRow.employee_id) {
+      if (userRow.employee_id && this.db.schemaCaps.employeesAvatars) {
         await this.db.execute(
           `UPDATE employees SET avatar_url = '', updated_at = ? WHERE id = ?`,
           [nowIso, userRow.employee_id]
@@ -569,12 +616,21 @@ export class SettingsController {
 
       const nowIso = new Date().toISOString();
       const oldUsername = userRow.username;
-      await this.db.execute(
-        `UPDATE system_users
-         SET username = ?, username_changed_at = ?, updated_at = ?
-         WHERE id = ?`,
-        [formatCheck.normalized, nowIso, nowIso, userRow.id]
-      );
+      if (this.db.schemaCaps.systemUsersRoleProfiles) {
+        await this.db.execute(
+          `UPDATE system_users
+           SET username = ?, username_changed_at = ?, updated_at = ?
+           WHERE id = ?`,
+          [formatCheck.normalized, nowIso, nowIso, userRow.id]
+        );
+      } else {
+        await this.db.execute(
+          `UPDATE system_users
+           SET username = ?, updated_at = ?
+           WHERE id = ?`,
+          [formatCheck.normalized, nowIso, userRow.id]
+        );
+      }
 
       await this.db.recordAuditLog({
         userId: auth.user.id,
@@ -680,12 +736,21 @@ export class SettingsController {
       const nowIso = new Date().toISOString();
       const nextSessionVersion = Number(userRow.session_version || 1) + 1;
 
-      await this.db.execute(
-        `UPDATE system_users
-         SET pin_salt = ?, pin_hash = ?, pin_cipher = ?, session_version = ?, password_changed_at = ?, updated_at = ?
-         WHERE id = ?`,
-        [saltHex, hashHex, cipher, nextSessionVersion, nowIso, nowIso, userRow.id]
-      );
+      if (this.db.schemaCaps.systemUsersRoleProfiles) {
+        await this.db.execute(
+          `UPDATE system_users
+           SET pin_salt = ?, pin_hash = ?, pin_cipher = ?, session_version = ?, password_changed_at = ?, updated_at = ?
+           WHERE id = ?`,
+          [saltHex, hashHex, cipher, nextSessionVersion, nowIso, nowIso, userRow.id]
+        );
+      } else {
+        await this.db.execute(
+          `UPDATE system_users
+           SET pin_salt = ?, pin_hash = ?, pin_cipher = ?, updated_at = ?
+           WHERE id = ?`,
+          [saltHex, hashHex, cipher, nowIso, userRow.id]
+        );
+      }
 
       // Revoke all previous sessions and issue one fresh token with the bumped session_version
       const revokeRes = await this.db.execute(
@@ -732,24 +797,21 @@ export class SettingsController {
     if (this.rejectIfKiosk(auth, res)) return;
     try {
       const userRow = await this.db.queryOne<any>(
-        'SELECT id, preferences_json FROM system_users WHERE id = ? LIMIT 1',
+        'SELECT * FROM system_users WHERE id = ? LIMIT 1',
         [auth.user.id]
       );
       if (!userRow) {
         return res.status(404).json({ ok: false, error: 'الحساب غير موجود' });
       }
 
-      const existing = this.db.parsePreferencesJson(userRow.preferences_json);
+      const existing = await this.db.loadUserPreferences(userRow);
       const merged = sanitizePreferencesPatch(existing, body || {});
       const serialized = JSON.stringify(merged);
       if (Buffer.byteLength(serialized, 'utf8') > 4096) {
         return res.status(400).json({ ok: false, error: 'حجم التفضيلات يتجاوز الحد المسموح' });
       }
 
-      await this.db.execute(
-        'UPDATE system_users SET preferences_json = ?, updated_at = ? WHERE id = ?',
-        [serialized, new Date().toISOString(), userRow.id]
-      );
+      await this.db.saveUserPreferences(userRow.id, serialized, new Date().toISOString());
 
       return res.json({ ok: true, preferences: merged });
     } catch (err: any) {
@@ -843,18 +905,10 @@ export class SettingsController {
       const secretHex = await this.db.getSessionSecret();
       const [users, rolePolicies, employees] = await Promise.all([
         this.db.queryAll<any>(
-          `SELECT id, username, display_name, role, pin_cipher, avatar_color, avatar_url, avatar_preset,
-                  is_active, employee_id, custom_permissions_json, last_login_at,
-                  password_changed_at, username_changed_at, created_at, updated_at
-           FROM system_users
-           ORDER BY is_active DESC, created_at ASC`
+          `SELECT * FROM system_users ORDER BY is_active DESC, created_at ASC`
         ),
-        this.db.queryAll<any>(
-          'SELECT role, avatar_url, avatar_preset, avatar_color, updated_at FROM role_policies'
-        ),
-        this.db.queryAll<any>(
-          'SELECT id, emp_code, department, avatar_url, avatar_preset FROM employees'
-        ),
+        this.db.queryAll<any>('SELECT * FROM role_policies'),
+        this.db.queryAll<any>('SELECT * FROM employees'),
       ]);
 
       const policyMap = new Map<string, any>(rolePolicies.map((rp) => [rp.role, rp]));
@@ -938,13 +992,22 @@ export class SettingsController {
         return res.status(403).json({ ok: false, error: 'تعديل صورة دور المالك متاح للمالك فقط' });
       }
 
+      if (!this.db.schemaCaps.rolePoliciesAvatars) {
+        return res.status(503).json({
+          ok: false,
+          code: 'SCHEMA_MIGRATION_REQUIRED',
+          error:
+            'يتطلب حفظ صور الأدوار تشغيل تحديث قاعدة البيانات (schema.sql) في Supabase SQL Editor أولاً',
+        });
+      }
+
       const uploaded = await this.storage.uploadAvatarDataUrl(body?.dataUrl, `role_${role}`);
       if (uploaded.ok === false) {
         return res.status(400).json({ ok: false, error: uploaded.error });
       }
 
-      const prevRow = await this.db.queryOne<{ avatar_url?: string }>(
-        'SELECT avatar_url FROM role_policies WHERE role = ? LIMIT 1',
+      const prevRow = await this.db.queryOne<any>(
+        'SELECT * FROM role_policies WHERE role = ? LIMIT 1',
         [role]
       );
       const nowIso = new Date().toISOString();
@@ -986,8 +1049,12 @@ export class SettingsController {
         return res.status(403).json({ ok: false, error: 'تعديل صورة دور المالك متاح للمالك فقط' });
       }
 
-      const prevRow = await this.db.queryOne<{ avatar_url?: string }>(
-        'SELECT avatar_url FROM role_policies WHERE role = ? LIMIT 1',
+      if (!this.db.schemaCaps.rolePoliciesAvatars) {
+        return res.json({ ok: true, role });
+      }
+
+      const prevRow = await this.db.queryOne<any>(
+        'SELECT * FROM role_policies WHERE role = ? LIMIT 1',
         [role]
       );
       await this.upsertRoleDefaultAvatar(role, '', new Date().toISOString());
@@ -1037,6 +1104,15 @@ export class SettingsController {
         });
       }
 
+      if (!this.db.schemaCaps.systemUsersRoleProfiles) {
+        return res.status(503).json({
+          ok: false,
+          code: 'SCHEMA_MIGRATION_REQUIRED',
+          error:
+            'يتطلب حفظ الصور الشخصية تشغيل تحديث قاعدة البيانات (schema.sql) في Supabase SQL Editor أولاً',
+        });
+      }
+
       const uploaded = await this.storage.uploadAvatarDataUrl(body?.dataUrl, target.id);
       if (uploaded.ok === false) {
         return res.status(400).json({ ok: false, error: uploaded.error });
@@ -1049,7 +1125,7 @@ export class SettingsController {
         `UPDATE system_users SET avatar_url = ?, avatar_preset = '', updated_at = ? WHERE id = ?`,
         [uploaded.url, nowIso, target.id]
       );
-      if (target.employee_id) {
+      if (target.employee_id && this.db.schemaCaps.employeesAvatars) {
         await this.db.execute(
           `UPDATE employees SET avatar_url = ?, avatar_preset = '', updated_at = ? WHERE id = ?`,
           [uploaded.url, nowIso, target.employee_id]
@@ -1099,6 +1175,10 @@ export class SettingsController {
         });
       }
 
+      if (!this.db.schemaCaps.systemUsersRoleProfiles) {
+        return res.json({ ok: true, id: target.id });
+      }
+
       const oldUrl = target.avatar_url || '';
       const nowIso = new Date().toISOString();
 
@@ -1106,7 +1186,7 @@ export class SettingsController {
         `UPDATE system_users SET avatar_url = '', updated_at = ? WHERE id = ?`,
         [nowIso, target.id]
       );
-      if (target.employee_id) {
+      if (target.employee_id && this.db.schemaCaps.employeesAvatars) {
         await this.db.execute(
           `UPDATE employees SET avatar_url = '', updated_at = ? WHERE id = ?`,
           [nowIso, target.employee_id]
@@ -1277,48 +1357,85 @@ export class SettingsController {
         nextSessionVersion += 1;
       }
 
-      await this.db.execute(
-        `UPDATE system_users
-         SET username = ?, display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?,
-             avatar_color = ?, avatar_preset = ?, avatar_url = ?, is_active = ?,
-             session_version = ?, password_changed_at = ?, username_changed_at = ?, updated_at = ?
-         WHERE id = ?`,
-        [
-          nextUsername,
-          nextDisplayName,
-          nextRole,
-          saltHex,
-          hashHex,
-          cipher,
-          nextColor,
-          nextPreset,
-          nextAvatarUrl,
-          nextActive ? 1 : 0,
-          nextSessionVersion,
-          passwordChangedAt,
-          usernameChangedAt,
-          nowIso,
-          target.id,
-        ]
-      );
-
-      // Sync non-badge fields to linked employee (never corrupt employees.emp_code QR badge!)
-      if (target.employee_id) {
+      if (this.db.schemaCaps.systemUsersRoleProfiles) {
         await this.db.execute(
-          `UPDATE employees
-           SET name = ?, system_role = ?, login_enabled = ?, avatar_color = ?, avatar_preset = ?, avatar_url = ?, updated_at = ?
+          `UPDATE system_users
+           SET username = ?, display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?,
+               avatar_color = ?, avatar_preset = ?, avatar_url = ?, is_active = ?,
+               session_version = ?, password_changed_at = ?, username_changed_at = ?, updated_at = ?
            WHERE id = ?`,
           [
+            nextUsername,
             nextDisplayName,
             nextRole,
-            nextActive ? 1 : 0,
+            saltHex,
+            hashHex,
+            cipher,
             nextColor,
             nextPreset,
             nextAvatarUrl,
+            nextActive ? 1 : 0,
+            nextSessionVersion,
+            passwordChangedAt,
+            usernameChangedAt,
             nowIso,
-            target.employee_id,
+            target.id,
           ]
         );
+      } else {
+        await this.db.execute(
+          `UPDATE system_users
+           SET username = ?, display_name = ?, role = ?, pin_salt = ?, pin_hash = ?, pin_cipher = ?,
+               avatar_color = ?, is_active = ?, updated_at = ?
+           WHERE id = ?`,
+          [
+            nextUsername,
+            nextDisplayName,
+            nextRole,
+            saltHex,
+            hashHex,
+            cipher,
+            nextColor,
+            nextActive ? 1 : 0,
+            nowIso,
+            target.id,
+          ]
+        );
+      }
+
+      // Sync non-badge fields to linked employee (never corrupt employees.emp_code QR badge!)
+      if (target.employee_id) {
+        if (this.db.schemaCaps.employeesAvatars) {
+          await this.db.execute(
+            `UPDATE employees
+             SET name = ?, system_role = ?, login_enabled = ?, avatar_color = ?, avatar_preset = ?, avatar_url = ?, updated_at = ?
+             WHERE id = ?`,
+            [
+              nextDisplayName,
+              nextRole,
+              nextActive ? 1 : 0,
+              nextColor,
+              nextPreset,
+              nextAvatarUrl,
+              nowIso,
+              target.employee_id,
+            ]
+          );
+        } else {
+          await this.db.execute(
+            `UPDATE employees
+             SET name = ?, system_role = ?, login_enabled = ?, avatar_color = ?, updated_at = ?
+             WHERE id = ?`,
+            [
+              nextDisplayName,
+              nextRole,
+              nextActive ? 1 : 0,
+              nextColor,
+              nowIso,
+              target.employee_id,
+            ]
+          );
+        }
       }
 
       if (oldAvatarToDelete) {

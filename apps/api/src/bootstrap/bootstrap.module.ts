@@ -48,6 +48,8 @@ export class BootstrapController {
       framework: 'nestjs',
       monorepo: 'turborepo',
       storageMode: this.db.storageMode,
+      pendingSchemaMigration: this.db.hasPendingSchemaMigration,
+      schemaCaps: this.db.schemaCaps,
       cloudRealtime: this.realtime.getPublicCloudRealtimeConfig().enabled,
       serverTime: new Date().toISOString(),
     };
@@ -191,12 +193,21 @@ export class BootstrapController {
         );
         const nowIso = new Date().toISOString();
         const nextSessionVersion = Number(selfRow.session_version || 1) + 1;
-        await this.db.execute(
-          `UPDATE system_users
-           SET pin_salt = ?, pin_hash = ?, pin_cipher = ?, session_version = ?, password_changed_at = ?, updated_at = ?
-           WHERE id = ?`,
-          [saltHex, hashHex, cipher, nextSessionVersion, nowIso, nowIso, auth.user.id]
-        );
+        if (this.db.schemaCaps.systemUsersRoleProfiles) {
+          await this.db.execute(
+            `UPDATE system_users
+             SET pin_salt = ?, pin_hash = ?, pin_cipher = ?, session_version = ?, password_changed_at = ?, updated_at = ?
+             WHERE id = ?`,
+            [saltHex, hashHex, cipher, nextSessionVersion, nowIso, nowIso, auth.user.id]
+          );
+        } else {
+          await this.db.execute(
+            `UPDATE system_users
+             SET pin_salt = ?, pin_hash = ?, pin_cipher = ?, updated_at = ?
+             WHERE id = ?`,
+            [saltHex, hashHex, cipher, nowIso, auth.user.id]
+          );
+        }
         await this.db.execute(
           'UPDATE user_sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0',
           [auth.user.id]

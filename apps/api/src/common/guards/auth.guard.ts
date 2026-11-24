@@ -23,7 +23,17 @@ export class AuthGuard implements CanActivate {
     const res = context.switchToHttp().getResponse<Response>();
 
     const rawToken = extractBearerOrQueryToken(req);
-    const auth = await this.db.resolveAuthFromToken(rawToken);
+    let auth: any = null;
+    try {
+      auth = await this.db.resolveAuthFromToken(rawToken);
+    } catch (err: any) {
+      res.status(503).json({
+        ok: false,
+        code: 'AUTH_STORAGE_ERROR',
+        error: err?.message || 'تعذر التحقق من الجلسة حالياً',
+      });
+      return false;
+    }
     if (!auth) {
       res.status(401).json({
         ok: false,
