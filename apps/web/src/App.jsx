@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import AmbientBackdrop from './components/AmbientBackdrop.jsx';
 import AppShell from './components/AppShell.jsx';
+import ShadcnSidebar from './components/ShadcnSidebar.jsx';
 import TopBar from './components/TopBar.jsx';
 import BottomNav from './components/BottomNav.jsx';
 import SmartAlertsAndHandoverBar from './components/SmartAlertsAndHandoverBar.jsx';
@@ -71,9 +72,12 @@ const VALID_URL_TABS = [
   'settings',
 ];
 
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'zayed_shadcn_sidebar_collapsed_v1';
+
 export default function App() {
   const todayKey = getTodayLocalKey();
   const {
+    architecture,
     darkMode,
     toggleDarkMode,
     fontScale,
@@ -87,6 +91,29 @@ export default function App() {
     setVoiceConfirm: setVoiceConfirmEnabled,
     applyServerPrefs,
   } = useTheme();
+  const hasShadcnSidebar =
+    architecture?.shell?.sidebarLayout === 'shadcn-collapsible-rail';
+
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, String(next));
+      } catch {
+        // ignore storage quota errors
+      }
+      return next;
+    });
+  }, []);
 
   const [authSession, setAuthSessionState] = useState(() => getCachedAuthSession());
   const [selectedDate, setSelectedDate] = useState(todayKey);
@@ -525,6 +552,24 @@ export default function App() {
     return () => setKioskLocked(false);
   }, [role, setKioskLocked]);
 
+  // Keyboard toggle (Ctrl+B / Cmd+B) for Shadcn collapsible sidebar
+  useEffect(() => {
+    if (!hasShadcnSidebar || !authSession?.token || role === 'kiosk') return undefined;
+    const onKeyDown = (e) => {
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        String(e.key || '').toLowerCase() === 'b'
+      ) {
+        e.preventDefault();
+        handleToggleSidebar();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [hasShadcnSidebar, authSession?.token, role, handleToggleSidebar]);
+
   // Close Lightbox Preview on Escape key + coordinate modal floating-chrome hide layer
   const previewOpen = Boolean(previewModal);
   useEffect(() => {
@@ -858,6 +903,29 @@ export default function App() {
   return (
     <AppShell
       hasBottomNav={hasBottomNav}
+      sidebar={
+        hasShadcnSidebar ? (
+          <ShadcnSidebar
+            collapsed={sidebarCollapsed}
+            storeName={data?.settings?.store_name}
+            branchName={data?.settings?.branch_name}
+            authUser={authUser}
+            permissions={permissions}
+            activeTab={activeTab}
+            onSelectTab={setActiveTab}
+            summary={data?.summary}
+            onOpenQrModal={() => setQrModalTab('code')}
+            onOpenHandoverModal={() => setShowHandoverModal(true)}
+            onOpenWalkieModal={() => walkie.setConsoleOpen(true)}
+            onOpenProfileModal={() => setShowProfileModal(true)}
+            onOpenSettings={handleOpenSettings}
+            onLockToKiosk={handleLockToKiosk}
+            onLogout={handleLogout}
+            canUseWalkie={walkie.canUseWalkie}
+            walkieActive={walkie.radioEnabled}
+          />
+        ) : null
+      }
       header={
         <TopBar
           storeName={data?.settings?.store_name}
@@ -876,6 +944,8 @@ export default function App() {
           onToast={showToast}
           darkMode={darkMode}
           onToggleDarkMode={toggleDarkMode}
+          sidebarCollapsed={sidebarCollapsed}
+          onToggleSidebar={handleToggleSidebar}
           liteMode={liteMode}
           onToggleLiteMode={() => {
             setLiteMode((l) => {

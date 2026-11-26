@@ -12,6 +12,7 @@ import AmbientBackdrop from './AmbientBackdrop.jsx';
  */
 export default function AppShell({
   hasBottomNav = false,
+  sidebar = null,
   header = null,
   footer = null,
   mainClassName = '',
@@ -20,6 +21,37 @@ export default function AppShell({
   const arch = useThemeArchitecture();
   const maxWidthCls = arch.shell.maxContentWidth || 'max-w-7xl';
   const paddingCls = arch.shell.mainPaddingClass || 'px-3 sm:px-6 py-4 sm:py-5';
+  const bottomPadCls = hasBottomNav
+    ? 'pb-[calc(var(--bottom-nav-h)+5.25rem)] md:pb-24'
+    : 'pb-[calc(5.25rem+var(--safe-bottom))] md:pb-24';
+
+  if (arch.shell.sidebarLayout === 'shadcn-collapsible-rail' && sidebar) {
+    return (
+      <>
+        <AmbientBackdrop />
+        <div
+          data-shell-header={arch.shell.headerLayout}
+          data-shell-sidebar={arch.shell.sidebarLayout}
+          data-shell-dock={arch.shell.bottomNavLayout}
+          className="min-h-[100dvh] w-full flex flex-col md:flex-row overflow-x-clip"
+        >
+          {sidebar}
+
+          <div className={`flex-1 min-w-0 flex flex-col ${bottomPadCls}`}>
+            {header}
+
+            <main
+              className={`relative flex-1 w-full mx-auto ${maxWidthCls} ${paddingCls} ${mainClassName}`}
+            >
+              {children}
+            </main>
+          </div>
+
+          {footer}
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
@@ -27,11 +59,7 @@ export default function AppShell({
       <div
         data-shell-header={arch.shell.headerLayout}
         data-shell-dock={arch.shell.bottomNavLayout}
-        className={`min-h-[100dvh] w-full flex flex-col overflow-x-hidden ${
-          hasBottomNav
-            ? 'pb-[calc(var(--bottom-nav-h)+5.25rem)] md:pb-24'
-            : 'pb-[calc(5.25rem+var(--safe-bottom))] md:pb-24'
-        }`}
+        className={`min-h-[100dvh] w-full flex flex-col overflow-x-hidden ${bottomPadCls}`}
       >
         {header}
 

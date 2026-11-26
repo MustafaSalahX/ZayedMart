@@ -10,6 +10,12 @@ import {
   SkeletonKpiStrip,
   SkeletonList,
   StatusDot,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
 } from './ui/index.js';
 import {
   apiRequest,
@@ -618,58 +624,143 @@ export default function AdminReportsPanel({
               {filteredEmployees.length === 0 ? (
                 <EmptyState compact title="لا توجد بيانات موظفين" />
               ) : (
-                <GroupedList>
-                  {filteredEmployees.map((emp) => {
-                    const breaksVal = emp.breaksCount ?? emp.breaks ?? 0;
-                    return (
-                      <div
-                        key={emp.id}
-                        className="min-h-[56px] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="text-sm font-semibold text-ink truncate">
-                            {emp.name}
-                            {isOwner && emp.emp_code && (
-                              <span className="num-ltr text-xs font-normal text-ink-muted">
-                                {' '}
-                                · #{emp.emp_code}
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-ink-muted truncate num-ltr">
-                            {emp.department} · {emp.shift_start || '08:00'}–{emp.shift_end || '20:00'}
-                          </div>
-                        </div>
-
-                        <div className="w-full sm:w-auto flex items-center justify-between sm:justify-end gap-3 flex-wrap text-xs num-ltr shrink-0">
-                          <span className="font-semibold text-ink">
-                            {emp.daysPresent} يوم
-                          </span>
-                          <span
-                            className={
-                              emp.lateCount > 0
-                                ? 'text-danger font-semibold'
-                                : 'text-ink-muted'
-                            }
-                          >
-                            {emp.lateCount} تأخير
-                            {emp.totalLateMinutes > 0 ? ` (${emp.totalLateMinutes}د)` : ''}
-                          </span>
-                          <span className="text-ink-muted">{breaksVal} بريك</span>
+                <>
+                  <div className="hidden md:block">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="hover:bg-transparent">
+                          <TableHead className="min-w-[180px]">الموظف</TableHead>
+                          <TableHead>القسم والشفت</TableHead>
+                          <TableHead>الحضور</TableHead>
+                          <TableHead>التأخير</TableHead>
+                          <TableHead>الاستراحات</TableHead>
                           {onOpenPersonLog && (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => onOpenPersonLog(emp.id, emp.name)}
-                            >
-                              سجل
-                            </Button>
+                            <TableHead className="text-end">إجراءات</TableHead>
                           )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </GroupedList>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {filteredEmployees.map((emp) => {
+                          const breaksVal = emp.breaksCount ?? emp.breaks ?? 0;
+                          return (
+                            <TableRow key={emp.id}>
+                              <TableCell>
+                                <div className="text-sm font-semibold text-ink">
+                                  {emp.name}
+                                  {isOwner && emp.emp_code && (
+                                    <span className="num-ltr text-xs font-normal text-ink-muted">
+                                      {' '}
+                                      · #{emp.emp_code}
+                                    </span>
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <span className="text-xs text-ink-muted num-ltr">
+                                  {emp.department} · {emp.shift_start || '08:00'}–
+                                  {emp.shift_end || '20:00'}
+                                </span>
+                              </TableCell>
+                              <TableCell>
+                                <span className="num-ltr text-xs font-semibold text-ink">
+                                  {emp.daysPresent} يوم
+                                </span>
+                              </TableCell>
+                              <TableCell>
+                                <StatusDot
+                                  tone={emp.lateCount > 0 ? 'warning' : 'success'}
+                                  tintedText={emp.lateCount > 0}
+                                  label={
+                                    <span className="num-ltr">
+                                      {emp.lateCount > 0
+                                        ? `${emp.lateCount} تأخير${
+                                            emp.totalLateMinutes > 0
+                                              ? ` (${emp.totalLateMinutes}د)`
+                                              : ''
+                                          }`
+                                        : 'منتظم'}
+                                    </span>
+                                  }
+                                />
+                              </TableCell>
+                              <TableCell>
+                                <span className="num-ltr text-xs text-ink-muted">
+                                  {breaksVal} بريك
+                                </span>
+                              </TableCell>
+                              {onOpenPersonLog && (
+                                <TableCell className="text-end">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => onOpenPersonLog(emp.id, emp.name)}
+                                  >
+                                    سجل
+                                  </Button>
+                                </TableCell>
+                              )}
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
+
+                  <div className="md:hidden">
+                    <GroupedList>
+                      {filteredEmployees.map((emp) => {
+                        const breaksVal = emp.breaksCount ?? emp.breaks ?? 0;
+                        return (
+                          <div
+                            key={emp.id}
+                            className="min-h-[56px] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm font-semibold text-ink truncate">
+                                {emp.name}
+                                {isOwner && emp.emp_code && (
+                                  <span className="num-ltr text-xs font-normal text-ink-muted">
+                                    {' '}
+                                    · #{emp.emp_code}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-xs text-ink-muted truncate num-ltr">
+                                {emp.department} · {emp.shift_start || '08:00'}–{emp.shift_end || '20:00'}
+                              </div>
+                            </div>
+
+                            <div className="w-full sm:w-auto flex items-center justify-between sm:justify-end gap-3 flex-wrap text-xs num-ltr shrink-0">
+                              <span className="font-semibold text-ink">
+                                {emp.daysPresent} يوم
+                              </span>
+                              <span
+                                className={
+                                  emp.lateCount > 0
+                                    ? 'text-danger font-semibold'
+                                    : 'text-ink-muted'
+                                }
+                              >
+                                {emp.lateCount} تأخير
+                                {emp.totalLateMinutes > 0 ? ` (${emp.totalLateMinutes}د)` : ''}
+                              </span>
+                              <span className="text-ink-muted">{breaksVal} بريك</span>
+                              {onOpenPersonLog && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => onOpenPersonLog(emp.id, emp.name)}
+                                >
+                                  سجل
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </GroupedList>
+                  </div>
+                </>
               )}
             </div>
           )}
@@ -701,46 +792,116 @@ export default function AdminReportsPanel({
               {filteredSuppliers.length === 0 ? (
                 <EmptyState compact title="لا توجد عربيات في هذه الفترة" />
               ) : (
-                <GroupedList>
-                  {filteredSuppliers.map((sup) => (
-                    <div
-                      key={sup.id || sup.supplier_name || sup.name}
-                      className="min-h-[54px] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-baseline gap-2 min-w-0">
-                          <span className="text-sm font-semibold text-ink truncate">
-                            {sup.name || sup.supplier_name}
-                          </span>
-                          {sup.hasPendingReturn && (
-                            <span className="text-xs font-medium text-warning shrink-0">
-                              مرتجع
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-xs text-ink-muted truncate">
-                          {sup.category}
-                        </div>
-                      </div>
+                <>
+                  <div className="hidden md:block">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="hover:bg-transparent">
+                          <TableHead className="min-w-[180px]">المورد</TableHead>
+                          <TableHead>القسم</TableHead>
+                          <TableHead>الطلبيات</TableHead>
+                          <TableHead>متوسط التنزيل</TableHead>
+                          <TableHead>الملاحظات</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {filteredSuppliers.map((sup) => (
+                          <TableRow key={sup.id || sup.supplier_name || sup.name}>
+                            <TableCell>
+                              <span className="text-sm font-semibold text-ink">
+                                {sup.name || sup.supplier_name}
+                              </span>
+                            </TableCell>
+                            <TableCell>
+                              <span className="text-xs text-ink-muted">
+                                {sup.category || '—'}
+                              </span>
+                            </TableCell>
+                            <TableCell>
+                              <span className="num-ltr text-xs font-semibold text-ink">
+                                {sup.deliveriesCount} طلبية
+                              </span>
+                            </TableCell>
+                            <TableCell>
+                              <span className="num-ltr text-xs text-ink-muted">
+                                {sup.avgDurationMinutes}د
+                              </span>
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <StatusDot
+                                  tone={
+                                    sup.issuesCount > 0
+                                      ? 'danger'
+                                      : sup.hasPendingReturn
+                                      ? 'warning'
+                                      : 'success'
+                                  }
+                                  tintedText={
+                                    sup.issuesCount > 0 || sup.hasPendingReturn
+                                  }
+                                  label={
+                                    <span className="num-ltr">
+                                      {sup.issuesCount} ملاحظات
+                                    </span>
+                                  }
+                                />
+                                {sup.hasPendingReturn && (
+                                  <span className="text-xs font-medium text-warning">
+                                    · مرتجع
+                                  </span>
+                                )}
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
 
-                      <div className="w-full sm:w-auto flex items-center justify-between sm:justify-end gap-3 flex-wrap text-xs num-ltr shrink-0">
-                        <span className="font-semibold text-ink">
-                          {sup.deliveriesCount} طلبية
-                        </span>
-                        <span className="text-ink-muted">{sup.avgDurationMinutes}د</span>
-                        <span
-                          className={
-                            sup.issuesCount > 0
-                              ? 'text-danger font-semibold'
-                              : 'text-ink-muted'
-                          }
+                  <div className="md:hidden">
+                    <GroupedList>
+                      {filteredSuppliers.map((sup) => (
+                        <div
+                          key={sup.id || sup.supplier_name || sup.name}
+                          className="min-h-[54px] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                         >
-                          {sup.issuesCount} ملاحظات
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </GroupedList>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-baseline gap-2 min-w-0">
+                              <span className="text-sm font-semibold text-ink truncate">
+                                {sup.name || sup.supplier_name}
+                              </span>
+                              {sup.hasPendingReturn && (
+                                <span className="text-xs font-medium text-warning shrink-0">
+                                  مرتجع
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-xs text-ink-muted truncate">
+                              {sup.category}
+                            </div>
+                          </div>
+
+                          <div className="w-full sm:w-auto flex items-center justify-between sm:justify-end gap-3 flex-wrap text-xs num-ltr shrink-0">
+                            <span className="font-semibold text-ink">
+                              {sup.deliveriesCount} طلبية
+                            </span>
+                            <span className="text-ink-muted">{sup.avgDurationMinutes}د</span>
+                            <span
+                              className={
+                                sup.issuesCount > 0
+                                  ? 'text-danger font-semibold'
+                                  : 'text-ink-muted'
+                              }
+                            >
+                              {sup.issuesCount} ملاحظات
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </GroupedList>
+                  </div>
+                </>
               )}
             </div>
           )}

@@ -254,6 +254,16 @@ CREATE TABLE IF NOT EXISTS public.walkie_presence (
   updated_at_ms BIGINT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS public.profile_avatars (
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  avatar_url TEXT DEFAULT '',
+  avatar_preset TEXT DEFAULT '',
+  avatar_color TEXT DEFAULT '',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (entity_type, entity_id)
+);
+
 CREATE TABLE IF NOT EXISTS public.employee_dayoff_defaults (
   employee_id TEXT PRIMARY KEY,
   team_group TEXT NOT NULL CHECK (team_group IN ('cashiers', 'hall', 'security_cctv')),
@@ -381,7 +391,8 @@ BEGIN
   FOREACH tbl IN ARRAY ARRAY[
     'employee_dayoff_defaults',
     'weekly_dayoff_overrides',
-    'dayoff_swap_requests'
+    'dayoff_swap_requests',
+    'profile_avatars'
   ]
   LOOP
     EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY;', tbl);

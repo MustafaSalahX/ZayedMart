@@ -1,5 +1,6 @@
 import React from 'react';
 import { useThemeArchitecture } from '../../lib/themeContext.jsx';
+import { cn } from '../../lib/utils.js';
 import Icon from './Icon.jsx';
 
 const DOT_TONES = {
@@ -26,11 +27,55 @@ const COL_CLASSES = {
   4: 'grid-cols-2 lg:grid-cols-4',
 };
 
+function MetricCellContent({ item, columns, chevronOpacityClass = 'opacity-65' }) {
+  const dotCls =
+    DOT_TONES[item.dotTone || (item.tone && item.tone !== 'neutral' ? item.tone : '')] || '';
+  const valCls = VALUE_TONES[item.tone] || VALUE_TONES.neutral;
+
+  return (
+    <>
+      <div className="flex items-center justify-between gap-1.5 min-w-0">
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-muted truncate">
+          {dotCls && (
+            <span
+              className={`w-2 h-2 rounded-full shrink-0 ${dotCls}`}
+              aria-hidden="true"
+            />
+          )}
+          <span className="truncate">{item.label}</span>
+        </span>
+        {item.onClick && (
+          <Icon
+            name="chevron_left"
+            size={15}
+            className={`text-ink-muted ${chevronOpacityClass} ltr:rotate-180`}
+          />
+        )}
+      </div>
+
+      <div className="space-y-1 min-w-0">
+        <div
+          className={`num-ltr ${
+            columns === 3 ? 'text-xl sm:text-3xl' : 'text-2xl sm:text-3xl'
+          } font-semibold tracking-tight leading-none ${valCls}`}
+        >
+          {item.value}
+        </div>
+        {item.secondary !== undefined && item.secondary !== null && item.secondary !== '' && (
+          <div className="text-xs text-ink-muted truncate leading-snug">
+            {item.secondary}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
 /**
  * Adaptive 4-Metric Operational Cockpit Strip (`CockpitMetricStrip` / `MetricStrip`):
  * Renders 3 pure data elements per cell (1–2 word label + optional 8px status dot,
  * big tabular numeral, 1 subtle secondary datum) with theme-native architecture:
- * - minimal: open hairline-divided strip directly on canvas (ZERO card boxes!)
+ * - minimal: Shadcn Dashboard-01 Zinc bordered KPI cards (`shadcn-cards`)
  * - liquid-glass: detached frosted refractive glass tiles with Fresnel specular rim
  * - elegant: warm editorial hairline bordered strip
  * - modern / classic: crisp tonal studio / M3 metric tiles
@@ -45,6 +90,36 @@ export default function CockpitMetricStrip({
   const colCls = COL_CLASSES[columns] || COL_CLASSES[4];
 
   if (!items || items.length === 0) return null;
+
+  if (kpiLayout === 'shadcn-cards') {
+    return (
+      <div className={cn('grid gap-3 sm:gap-4', colCls, className)}>
+        {items.map((item) => {
+          const Comp = item.onClick ? 'button' : 'div';
+          return (
+            <Comp
+              key={item.id || item.label}
+              type={item.onClick ? 'button' : undefined}
+              onClick={item.onClick}
+              aria-label={item.ariaLabel}
+              className={cn(
+                'rounded-[var(--g-radius-card)] border border-line bg-surface shadow-[var(--g-shadow-sm)] p-4 sm:p-5 text-start min-h-[88px] sm:min-h-[96px] flex flex-col justify-between gap-2 min-w-0 transition-[background-color,border-color,box-shadow,transform] duration-150 ease-[var(--g-ease-out)]',
+                item.onClick &&
+                  'cursor-pointer hover:border-line-strong hover:bg-surface-tint active:scale-[0.99] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--g-ring-focus)]',
+                item.active && 'ring-1 ring-[var(--g-ring-focus)] border-line-strong bg-surface-tint'
+              )}
+            >
+              <MetricCellContent
+                item={item}
+                columns={columns}
+                chevronOpacityClass="opacity-65"
+              />
+            </Comp>
+          );
+        })}
+      </div>
+    );
+  }
 
   const isMinimalStrip = kpiLayout === 'hairline-strip';
   const isEditorialStrip = kpiLayout === 'editorial-strip';
@@ -61,9 +136,6 @@ export default function CockpitMetricStrip({
       >
         {items.map((item) => {
           const Comp = item.onClick ? 'button' : 'div';
-          const dotCls = DOT_TONES[item.dotTone || (item.tone && item.tone !== 'neutral' ? item.tone : '')] || '';
-          const valCls = VALUE_TONES[item.tone] || VALUE_TONES.neutral;
-
           return (
             <Comp
               key={item.id || item.label}
@@ -80,39 +152,11 @@ export default function CockpitMetricStrip({
                   : ''
               } ${item.active ? 'bg-surface-tint' : ''}`}
             >
-              <div className="flex items-center justify-between gap-1.5 min-w-0">
-                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-muted truncate">
-                  {dotCls && (
-                    <span
-                      className={`w-2 h-2 rounded-full shrink-0 ${dotCls}`}
-                      aria-hidden="true"
-                    />
-                  )}
-                  <span className="truncate">{item.label}</span>
-                </span>
-                {item.onClick && (
-                  <Icon
-                    name="chevron_left"
-                    size={15}
-                    className="text-ink-muted opacity-60 ltr:rotate-180"
-                  />
-                )}
-              </div>
-
-              <div className="space-y-1 min-w-0">
-                <div
-                  className={`num-ltr ${
-                    columns === 3 ? 'text-xl sm:text-3xl' : 'text-2xl sm:text-3xl'
-                  } font-semibold tracking-tight leading-none ${valCls}`}
-                >
-                  {item.value}
-                </div>
-                {item.secondary !== undefined && item.secondary !== null && item.secondary !== '' && (
-                  <div className="text-xs text-ink-muted truncate leading-snug">
-                    {item.secondary}
-                  </div>
-                )}
-              </div>
+              <MetricCellContent
+                item={item}
+                columns={columns}
+                chevronOpacityClass="opacity-60"
+              />
             </Comp>
           );
         })}
@@ -124,9 +168,6 @@ export default function CockpitMetricStrip({
     <div className={`grid ${colCls} gap-2 sm:gap-3 ${className}`}>
       {items.map((item) => {
         const Comp = item.onClick ? 'button' : 'div';
-        const dotCls = DOT_TONES[item.dotTone || (item.tone && item.tone !== 'neutral' ? item.tone : '')] || '';
-        const valCls = VALUE_TONES[item.tone] || VALUE_TONES.neutral;
-
         return (
           <Comp
             key={item.id || item.label}
@@ -143,39 +184,11 @@ export default function CockpitMetricStrip({
                 : ''
             } ${item.active ? 'ring-2 ring-[var(--g-primary)]' : ''}`}
           >
-            <div className="flex items-center justify-between gap-1.5 min-w-0">
-              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-ink-muted truncate">
-                {dotCls && (
-                  <span
-                    className={`w-2 h-2 rounded-full shrink-0 ${dotCls}`}
-                    aria-hidden="true"
-                  />
-                )}
-                <span className="truncate">{item.label}</span>
-              </span>
-              {item.onClick && (
-                <Icon
-                  name="chevron_left"
-                  size={15}
-                  className="text-ink-muted opacity-65 ltr:rotate-180"
-                />
-              )}
-            </div>
-
-            <div className="space-y-1 min-w-0">
-              <div
-                className={`num-ltr ${
-                  columns === 3 ? 'text-xl sm:text-3xl' : 'text-2xl sm:text-3xl'
-                } font-semibold tracking-tight leading-none ${valCls}`}
-              >
-                {item.value}
-              </div>
-              {item.secondary !== undefined && item.secondary !== null && item.secondary !== '' && (
-                <div className="text-xs text-ink-muted truncate leading-snug">
-                  {item.secondary}
-                </div>
-              )}
-            </div>
+            <MetricCellContent
+              item={item}
+              columns={columns}
+              chevronOpacityClass="opacity-65"
+            />
           </Comp>
         );
       })}

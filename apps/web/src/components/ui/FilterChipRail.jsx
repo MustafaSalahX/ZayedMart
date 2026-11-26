@@ -1,10 +1,12 @@
 import React from 'react';
 import { useThemeArchitecture } from '../../lib/themeContext.jsx';
+import { cn } from '../../lib/utils.js';
 import Icon from './Icon.jsx';
 
 /**
  * Adaptive Horizontal Filter Rail (`FilterChipRail`):
- * - `minimal` / `elegant`: Clean underline typographic tab strip (ZERO pill borders or icon bloat)
+ * - `minimal`: Shadcn Zinc segmented tab bar (`shadcn-tabs`)
+ * - `elegant`: Clean underline typographic tab strip
  * - `liquid-glass`: Translucent frosted glass pills with luminous liquid active bubble
  * - `modern`: Crisp studio tonal tabs
  * - `classic`: Clean detoxed M3 pills
@@ -21,6 +23,54 @@ export default function FilterChipRail({
   const arch = useThemeArchitecture();
   const resolvedVariant =
     variant === 'auto' ? arch.surfaces.filterRailStyle || 'pill' : variant;
+
+  if (resolvedVariant === 'shadcn-tabs') {
+    return (
+      <div
+        className={cn(
+          'inline-flex max-w-full items-center gap-1 p-1 rounded-[var(--g-radius-md)] bg-surface-2 border border-line overflow-x-auto no-scrollbar',
+          className
+        )}
+        role="tablist"
+      >
+        {items.map((item) => {
+          const isActive = activeId === item.id;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              onClick={() => onSelect?.(item.id)}
+              className={cn(
+                'min-h-[44px] sm:min-h-[34px] px-3 py-1.5 rounded-[var(--g-radius-sm)] text-xs inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 border transition-[background-color,color,border-color,box-shadow] duration-150 ease-[var(--g-ease-out)] cursor-pointer select-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--g-ring-focus)]',
+                isActive
+                  ? 'bg-canvas text-ink font-semibold border-line shadow-[var(--g-shadow-sm)]'
+                  : 'bg-transparent text-ink-muted hover:text-ink font-medium border-transparent'
+              )}
+            >
+              {showIcons && item.icon && (
+                <Icon name={item.icon} size={15} filled={isActive} />
+              )}
+              <span>{item.label}</span>
+              {item.count !== undefined && item.count !== null && (
+                <span
+                  className={cn(
+                    'num-ltr text-[11px] font-medium leading-none',
+                    item.alert && item.count > 0
+                      ? 'text-danger font-semibold'
+                      : 'text-ink-muted'
+                  )}
+                >
+                  {item.count}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
 
   if (resolvedVariant === 'underline') {
     const isElegant = arch.id === 'elegant';

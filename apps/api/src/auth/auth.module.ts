@@ -71,15 +71,19 @@ export class AuthController {
     let profiles: any[] = [];
 
     if (showRoleCards) {
-      const [users, rolePolicies, employees] = await Promise.all([
+      const [users, rolePolicies, employees, avatarMap] = await Promise.all([
         this.db.queryAll<any>(
           "SELECT * FROM system_users WHERE is_active = 1 AND role != 'kiosk' ORDER BY display_name ASC"
         ),
         this.db.queryAll<any>('SELECT * FROM role_policies'),
         this.db.queryAll<any>('SELECT * FROM employees WHERE is_active = 1'),
+        this.db.loadProfileAvatarsMap(),
       ]);
 
-      const policyMap = new Map<string, any>(rolePolicies.map((rp) => [rp.role, rp]));
+      if (this.db.needsProfileAvatarFallback) {
+        this.db.applyProfileAvatarMap(avatarMap, { users, employees, rolePolicies });
+      }
+      const policyMap = this.db.buildRolePoliciesMapWithFallback(rolePolicies, avatarMap);
       const empMap = new Map<string, any>(employees.map((e) => [e.id, e]));
 
       profiles = users
@@ -239,7 +243,7 @@ export class AuthController {
         matchedUser.id,
       ]);
 
-      const [token, permissions, rolePolicyRow, empRow, userPreferences] = await Promise.all([
+      const [token, permissions, rolePolicyRowRaw, empRowRaw, userPreferences] = await Promise.all([
         this.db.issueSessionForUser(
           matchedUser,
           ip,
@@ -261,11 +265,22 @@ export class AuthController {
         this.db.loadUserPreferences(matchedUser),
       ]);
 
-      const roleMeta = ROLES_METADATA[matchedUser.role] || {
-        label: matchedUser.role,
+      const {
+        userRow: hydratedMatchedUser,
+        empRow,
+        rolePolicyRow,
+      } = await this.db.hydrateUserBundle(
+        matchedUser,
+        empRowRaw,
+        rolePolicyRowRaw,
+        matchedUser.role
+      );
+
+      const roleMeta = ROLES_METADATA[hydratedMatchedUser.role] || {
+        label: hydratedMatchedUser.role,
       };
       const publicUser = {
-        ...this.db.buildPublicUserPayload(matchedUser, empRow, rolePolicyRow),
+        ...this.db.buildPublicUserPayload(hydratedMatchedUser, empRow, rolePolicyRow),
         preferences: userPreferences,
       };
 
@@ -374,14 +389,14 @@ export class AuthController {
   async getMyProfile(@CurrentAuth() auth: AuthContext, @Res() res: Response) {
     try {
       const secretHex = await this.db.getSessionSecret();
-      const userRow = await this.db.queryOne<any>(
+      const rawUserRow = await this.db.queryOne<any>(
         'SELECT * FROM system_users WHERE id = ? LIMIT 1',
         [auth.user.id]
       );
-      const [empRow, rolePolicyRow, sessionsCountRow, userPreferences] = await Promise.all([
-        userRow?.employee_id
+      const [empRowRaw, rolePolicyRowRaw, sessionsCountRow, userPreferences] = await Promise.all([
+        rawUserRow?.employee_id
           ? this.db.queryOne<any>('SELECT * FROM employees WHERE id = ? LIMIT 1', [
-              userRow.employee_id,
+              rawUserRow.employee_id,
             ])
           : Promise.resolve(null),
         this.db.queryOne<any>(
@@ -392,8 +407,14 @@ export class AuthController {
           'SELECT COUNT(*) as c FROM user_sessions WHERE user_id = ? AND revoked = 0 AND expires_at > ?',
           [auth.user.id, new Date().toISOString()]
         ),
-        this.db.loadUserPreferences(userRow),
+        this.db.loadUserPreferences(rawUserRow),
       ]);
+      const { userRow, empRow, rolePolicyRow } = await this.db.hydrateUserBundle(
+        rawUserRow,
+        empRowRaw,
+        rolePolicyRowRaw,
+        auth.user.role
+      );
       const myPass = userRow
         ? decryptPasswordForAdmin(userRow.pin_cipher, secretHex) || empRow?.emp_code || ''
         : '';

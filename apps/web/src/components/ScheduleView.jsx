@@ -45,6 +45,12 @@ import {
   SkeletonKpiStrip,
   SkeletonList,
   StatusDot,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
   ToggleSwitch,
   WeekDayStrip,
 } from './ui/index.js';
@@ -1571,198 +1577,196 @@ export default function ScheduleView({
                         لا يوجد موظفون
                       </div>
                     ) : (
-                      <div className="overflow-x-auto">
-                        <table className="w-full border-collapse text-start">
-                          <thead>
-                            <tr className="border-b border-line">
-                              <th className="sticky start-0 z-10 bg-surface p-3 text-xs font-semibold text-ink-muted min-w-[210px]">
-                                الموظف
-                              </th>
-                              {SCHEDULE_WEEKDAYS.map((day) => {
-                                const dKey = weekDates[day.code] || '';
-                                const isToday = dKey === todayDateKey;
-                                return (
-                                  <th
-                                    key={day.code}
-                                    className={`p-2.5 text-center min-w-[88px] border-s border-line ${
-                                      isToday ? 'bg-surface-tint' : ''
-                                    }`}
-                                  >
-                                    <div
-                                      className={`text-xs font-semibold ${
-                                        isToday ? 'text-primary' : 'text-ink'
-                                      }`}
-                                    >
-                                      {day.label}
-                                    </div>
-                                    <div className="num-ltr text-[11px] font-normal text-ink-muted mt-0.5">
-                                      {formatShortDate(dKey)}
-                                    </div>
-                                  </th>
-                                );
-                              })}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {emps.map((emp) => {
-                              const isMe = emp.id === myEmployeeId;
-                              const canSwapRow =
-                                effectiveCanSwap &&
-                                !isMe &&
-                                myEmployee &&
-                                myEmployee.team_group === emp.team_group &&
-                                myEmployee.effective_day_of_week &&
-                                emp.effective_day_of_week &&
-                                emp.effective_day_of_week !== myEmployee.effective_day_of_week;
-
+                      <Table wrapperClassName="border-0 rounded-none shadow-none bg-transparent">
+                        <TableHeader>
+                          <TableRow className="border-line hover:bg-transparent">
+                            <TableHead className="sticky start-0 z-10 bg-surface p-3 h-auto min-w-[210px]">
+                              الموظف
+                            </TableHead>
+                            {SCHEDULE_WEEKDAYS.map((day) => {
+                              const dKey = weekDates[day.code] || '';
+                              const isToday = dKey === todayDateKey;
                               return (
-                                <tr
-                                  key={emp.id}
-                                  className={`border-b border-line transition-[background-color] duration-150 ${
-                                    isMe ? 'bg-surface-tint' : 'hover:bg-surface-tint'
+                                <TableHead
+                                  key={day.code}
+                                  className={`p-2.5 h-auto text-center min-w-[88px] border-s border-line ${
+                                    isToday ? 'bg-surface-tint' : ''
                                   }`}
                                 >
-                                  <td className="sticky start-0 z-10 bg-surface p-3 align-middle">
-                                    <div className="flex items-center justify-between gap-2">
-                                      <div className="flex items-center gap-2.5 min-w-0">
-                                        <RoleAvatar
-                                          src={emp.avatar_url || ''}
-                                          name={emp.name}
-                                          color={emp.avatar_color || 'var(--g-primary-solid)'}
-                                          preset="initials_gradient"
-                                          size="xs"
-                                          shape="circle"
-                                        />
-                                        <div className="min-w-0">
-                                          <div className="text-xs sm:text-sm font-medium text-ink truncate">
-                                            {emp.name}
-                                            {isMe && (
-                                              <span className="text-primary"> · أنت</span>
-                                            )}
-                                            {emp.is_override && (
-                                              <span className="text-warning"> · معدل</span>
-                                            )}
-                                          </div>
-                                          <div className="text-[11px] text-ink-muted truncate">
-                                            {emp.department}
-                                          </div>
-                                        </div>
-                                      </div>
-
-                                      <div className="flex items-center gap-1 shrink-0">
-                                        {canSwapRow && (
-                                          <Button
-                                            variant="ghost"
-                                            size="sm"
-                                            disabled={isOfflineReadOnly}
-                                            onClick={() =>
-                                              openSwapComposer({
-                                                preselectedTargetId: emp.id,
-                                                preferredType: 'swap',
-                                              })
-                                            }
-                                          >
-                                            تبديل
-                                          </Button>
-                                        )}
-                                        {effectiveCanManage && (
-                                          <select
-                                            aria-label={`فريق ${emp.name}`}
-                                            value={emp.team_group}
-                                            disabled={busyAction || isOfflineReadOnly}
-                                            onChange={(e) =>
-                                              handleTeamGroupQuickChange(emp, e.target.value)
-                                            }
-                                            className="min-h-[36px] bg-transparent border border-line rounded-[var(--g-radius-btn)] px-2 py-1 text-[11px] font-medium text-ink outline-none focus:border-[var(--g-primary)]"
-                                          >
-                                            {SCHEDULE_TEAM_GROUPS.map((tg) => (
-                                              <option key={tg.id} value={tg.id}>
-                                                {tg.shortLabel || tg.label}
-                                              </option>
-                                            ))}
-                                          </select>
-                                        )}
-                                      </div>
-                                    </div>
-                                  </td>
-
-                                  {SCHEDULE_WEEKDAYS.map((day) => {
-                                    const isOff = emp.effective_day_of_week === day.code;
-                                    const isToday = weekDates[day.code] === todayDateKey;
-
-                                    return (
-                                      <td
-                                        key={day.code}
-                                        className={`p-1.5 text-center align-middle border-s border-line ${
-                                          isToday ? 'bg-surface-tint' : ''
-                                        }`}
-                                      >
-                                        {effectiveCanManage ? (
-                                          <button
-                                            type="button"
-                                            disabled={busyAction || isOfflineReadOnly}
-                                            onClick={() => {
-                                              if (isOff) {
-                                                setEditingEmployee({
-                                                  emp,
-                                                  dayOfWeek: emp.effective_day_of_week || '',
-                                                  teamGroup: emp.team_group,
-                                                  scope: editScope,
-                                                });
-                                              } else {
-                                                handleAssignDayOff(emp, day.code);
-                                              }
-                                            }}
-                                            className={`w-full min-h-[40px] px-2 py-1 rounded-[var(--g-radius-btn)] text-xs font-medium inline-flex items-center justify-center transition-[background-color,color] duration-150 cursor-pointer disabled:opacity-50 ${
-                                              isOff
-                                                ? 'bg-secondary-container text-on-secondary-container font-semibold'
-                                                : 'text-ink-muted hover:bg-surface-2 hover:text-ink'
-                                            }`}
-                                          >
-                                            {isOff ? 'إجازة' : '—'}
-                                          </button>
-                                        ) : isOff ? (
-                                          <span className="inline-flex items-center justify-center px-2.5 py-1 rounded-[var(--g-radius-btn)] bg-secondary-container text-on-secondary-container text-xs font-semibold">
-                                            إجازة
-                                          </span>
-                                        ) : (
-                                          <span className="text-xs text-ink-muted">—</span>
-                                        )}
-                                      </td>
-                                    );
-                                  })}
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                          <tfoot>
-                            <tr>
-                              <td className="sticky start-0 z-10 bg-surface p-3 text-xs font-semibold text-ink-muted">
-                                التغطية
-                              </td>
-                              {SCHEDULE_WEEKDAYS.map((day) => {
-                                const cov = group.coverageByDay?.[day.code] || {
-                                  offCount: 0,
-                                  onDutyCount: 0,
-                                  lowCoverage: false,
-                                };
-                                return (
-                                  <td
-                                    key={day.code}
-                                    className={`p-2 text-center border-s border-line num-ltr text-xs ${
-                                      cov.lowCoverage
-                                        ? 'text-warning font-semibold'
-                                        : 'text-ink-muted'
+                                  <div
+                                    className={`text-xs font-semibold ${
+                                      isToday ? 'text-primary' : 'text-ink'
                                     }`}
                                   >
-                                    {cov.onDutyCount}/{cov.onDutyCount + cov.offCount}
-                                  </td>
-                                );
-                              })}
-                            </tr>
-                          </tfoot>
-                        </table>
-                      </div>
+                                    {day.label}
+                                  </div>
+                                  <div className="num-ltr text-[11px] font-normal text-ink-muted mt-0.5">
+                                    {formatShortDate(dKey)}
+                                  </div>
+                                </TableHead>
+                              );
+                            })}
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {emps.map((emp) => {
+                            const isMe = emp.id === myEmployeeId;
+                            const canSwapRow =
+                              effectiveCanSwap &&
+                              !isMe &&
+                              myEmployee &&
+                              myEmployee.team_group === emp.team_group &&
+                              myEmployee.effective_day_of_week &&
+                              emp.effective_day_of_week &&
+                              emp.effective_day_of_week !== myEmployee.effective_day_of_week;
+
+                            return (
+                              <TableRow
+                                key={emp.id}
+                                className={`border-line ${
+                                  isMe ? 'bg-surface-tint' : 'hover:bg-surface-tint'
+                                }`}
+                              >
+                                <TableCell className="sticky start-0 z-10 bg-surface p-3">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2.5 min-w-0">
+                                      <RoleAvatar
+                                        src={emp.avatar_url || ''}
+                                        name={emp.name}
+                                        color={emp.avatar_color || 'var(--g-primary-solid)'}
+                                        preset="initials_gradient"
+                                        size="xs"
+                                        shape="circle"
+                                      />
+                                      <div className="min-w-0">
+                                        <div className="text-xs sm:text-sm font-medium text-ink truncate">
+                                          {emp.name}
+                                          {isMe && (
+                                            <span className="text-primary"> · أنت</span>
+                                          )}
+                                          {emp.is_override && (
+                                            <span className="text-warning"> · معدل</span>
+                                          )}
+                                        </div>
+                                        <div className="text-[11px] text-ink-muted truncate">
+                                          {emp.department}
+                                        </div>
+                                      </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-1 shrink-0">
+                                      {canSwapRow && (
+                                        <Button
+                                          variant="ghost"
+                                          size="sm"
+                                          disabled={isOfflineReadOnly}
+                                          onClick={() =>
+                                            openSwapComposer({
+                                              preselectedTargetId: emp.id,
+                                              preferredType: 'swap',
+                                            })
+                                          }
+                                        >
+                                          تبديل
+                                        </Button>
+                                      )}
+                                      {effectiveCanManage && (
+                                        <select
+                                          aria-label={`فريق ${emp.name}`}
+                                          value={emp.team_group}
+                                          disabled={busyAction || isOfflineReadOnly}
+                                          onChange={(e) =>
+                                            handleTeamGroupQuickChange(emp, e.target.value)
+                                          }
+                                          className="min-h-[36px] bg-transparent border border-line rounded-[var(--g-radius-btn)] px-2 py-1 text-[11px] font-medium text-ink outline-none focus:border-[var(--g-primary)]"
+                                        >
+                                          {SCHEDULE_TEAM_GROUPS.map((tg) => (
+                                            <option key={tg.id} value={tg.id}>
+                                              {tg.shortLabel || tg.label}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      )}
+                                    </div>
+                                  </div>
+                                </TableCell>
+
+                                {SCHEDULE_WEEKDAYS.map((day) => {
+                                  const isOff = emp.effective_day_of_week === day.code;
+                                  const isToday = weekDates[day.code] === todayDateKey;
+
+                                  return (
+                                    <TableCell
+                                      key={day.code}
+                                      className={`p-1.5 text-center border-s border-line ${
+                                        isToday ? 'bg-surface-tint' : ''
+                                      }`}
+                                    >
+                                      {effectiveCanManage ? (
+                                        <button
+                                          type="button"
+                                          disabled={busyAction || isOfflineReadOnly}
+                                          onClick={() => {
+                                            if (isOff) {
+                                              setEditingEmployee({
+                                                emp,
+                                                dayOfWeek: emp.effective_day_of_week || '',
+                                                teamGroup: emp.team_group,
+                                                scope: editScope,
+                                              });
+                                            } else {
+                                              handleAssignDayOff(emp, day.code);
+                                            }
+                                          }}
+                                          className={`w-full min-h-[40px] px-2 py-1 rounded-[var(--g-radius-btn)] text-xs font-medium inline-flex items-center justify-center transition-[background-color,color] duration-150 cursor-pointer disabled:opacity-50 ${
+                                            isOff
+                                              ? 'bg-secondary-container text-on-secondary-container font-semibold'
+                                              : 'text-ink-muted hover:bg-surface-2 hover:text-ink'
+                                          }`}
+                                        >
+                                          {isOff ? 'إجازة' : '—'}
+                                        </button>
+                                      ) : isOff ? (
+                                        <span className="inline-flex items-center justify-center px-2.5 py-1 rounded-[var(--g-radius-btn)] bg-secondary-container text-on-secondary-container text-xs font-semibold">
+                                          إجازة
+                                        </span>
+                                      ) : (
+                                        <span className="text-xs text-ink-muted">—</span>
+                                      )}
+                                    </TableCell>
+                                  );
+                                })}
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                        <tfoot className="border-t border-line bg-surface-tint">
+                          <TableRow className="border-b-0 hover:bg-transparent">
+                            <TableCell className="sticky start-0 z-10 bg-surface p-3 text-xs font-semibold text-ink-muted">
+                              التغطية
+                            </TableCell>
+                            {SCHEDULE_WEEKDAYS.map((day) => {
+                              const cov = group.coverageByDay?.[day.code] || {
+                                offCount: 0,
+                                onDutyCount: 0,
+                                lowCoverage: false,
+                              };
+                              return (
+                                <TableCell
+                                  key={day.code}
+                                  className={`p-2 text-center border-s border-line num-ltr text-xs ${
+                                    cov.lowCoverage
+                                      ? 'text-warning font-semibold'
+                                      : 'text-ink-muted'
+                                  }`}
+                                >
+                                  {cov.onDutyCount}/{cov.onDutyCount + cov.offCount}
+                                </TableCell>
+                              );
+                            })}
+                          </TableRow>
+                        </tfoot>
+                      </Table>
                     )}
                   </Card>
                 );

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import * as Dialog from '@radix-ui/react-dialog';
 import { useThemeArchitecture } from '../../lib/themeContext.jsx';
+import { cn } from '../../lib/utils.js';
 import Icon from './Icon.jsx';
 
 let openSheetCounter = 0;
@@ -33,12 +34,16 @@ export function popModalLayer() {
   }
 }
 
+const SWIPE_DISMISS_DISTANCE = 96;
+const SWIPE_DISMISS_VELOCITY = 0.45;
+const MOBILE_BREAKPOINT_PX = 640;
+
 /**
- * Unified Mobile Bottom Sheet / Desktop Centered Dialog:
- * - Portals directly to `document.body` so ancestor stacking contexts NEVER trap it
- * - Zero colored header icon-box clutter; crisp title + optional factual context + 44×44 close button
+ * Unified Mobile Bottom Sheet / Desktop Centered Dialog backed by `@radix-ui/react-dialog`:
+ * - Portals via Radix `Dialog.Portal` so ancestor stacking contexts NEVER trap it
+ * - Synced with `pushModalLayer()` / `popModalLayer()` for `html[data-modal-open="true"]` & stacked z-index
+ * - Mobile (`< 640px`) touch swipe-down-to-dismiss gesture on the drag handle/header ONLY
  * - Pinned header + sticky footer stay visible above the Android virtual keyboard (IME)
- * - Body scroll lock with safe ref-counting + Escape key dismissal + full ARIA dialog attributes
  */
 export default function BottomSheet({
   open,
@@ -53,87 +58,235 @@ export default function BottomSheet({
 }) {
   const arch = useThemeArchitecture();
   const [layerZ, setLayerZ] = useState(62);
+  const [dragY, setDragY] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const [springBack, setSpringBack] = useState(false);
+
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
+  const dragRef = useRef({
+    active: false,
+    pointerId: null,
+    startY: 0,
+    captured: false,
+    samples: [],
+  });
+
   useEffect(() => {
-    if (!open) return undefined;
+    if (!open) {
+      setDragY(0);
+      setIsDragging(false);
+      setSpringBack(false);
+      dragRef.current.active = false;
+      dragRef.current.pointerId = null;
+      dragRef.current.captured = false;
+      return undefined;
+    }
+
     const z = pushModalLayer();
     setLayerZ(z);
 
-    const handleKey = (e) => {
-      if (e.key === 'Escape') {
-        onCloseRef.current?.();
-      }
-    };
-    window.addEventListener('keydown', handleKey);
-
     return () => {
-      window.removeEventListener('keydown', handleKey);
       popModalLayer();
     };
   }, [open]);
 
-  if (!open) return null;
+  useEffect(() => {
+    if (!springBack) return undefined;
+    const timer = setTimeout(() => setSpringBack(false), 230);
+    return () => clearTimeout(timer);
+  }, [springBack]);
 
-  const sheetNode = (
-    <div
-      onClick={() => {
-        if (closeOnOverlay) onClose?.();
+  const handleHeaderPointerDown = (e) => {
+    if (!onCloseRef.current) return;
+    if (typeof window !== 'undefined' && window.innerWidth >= MOBILE_BREAKPOINT_PX) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (
+      e.target instanceof Element &&
+      e.target.closest('button, a, input, select, textarea, [role="button"]')
+    ) {
+      return;
+    }
+
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    dragRef.current = {
+      active: true,
+      pointerId: e.pointerId,
+      startY: e.clientY,
+      captured: false,
+      samples: [{ y: e.clientY, t: now }],
+    };
+  };
+
+  const handleHeaderPointerMove = (e) => {
+    const state = dragRef.current;
+    if (!state.active || state.pointerId !== e.pointerId) return;
+
+    const dy = Math.max(0, e.clientY - state.startY);
+    if (!state.captured && dy > 4) {
+      state.captured = true;
+      setSpringBack(false);
+      setIsDragging(true);
+      try {
+        e.currentTarget.setPointerCapture?.(e.pointerId);
+      } catch {
+        // ignore synthetic events without active pointer
+      }
+    }
+
+    if (state.captured) {
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      state.samples.push({ y: e.clientY, t: now });
+      if (state.samples.length > 8) {
+        state.samples.shift();
+      }
+      setDragY(dy);
+    }
+  };
+
+  const finishHeaderDrag = (e, canceled) => {
+    const state = dragRef.current;
+    if (!state.active || state.pointerId !== e.pointerId) return;
+
+    const wasCaptured = state.captured;
+    const samples = state.samples;
+    state.active = false;
+    state.pointerId = null;
+    state.captured = false;
+
+    if (wasCaptured) {
+      try {
+        e.currentTarget.releasePointerCapture?.(e.pointerId);
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!wasCaptured) return;
+
+    setIsDragging(false);
+
+    const dy = Math.max(0, e.clientY - state.startY);
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const refSample =
+      samples.find((s) => now - s.t <= 120) ||
+      samples[0] || { y: state.startY, t: now };
+    const dt = Math.max(1, now - refSample.t);
+    const velocity = Math.max(0, (e.clientY - refSample.y) / dt);
+
+    if (!canceled && (dy >= SWIPE_DISMISS_DISTANCE || (dy >= 20 && velocity > SWIPE_DISMISS_VELOCITY))) {
+      setDragY(0);
+      setSpringBack(false);
+      onCloseRef.current?.();
+      return;
+    }
+
+    setSpringBack(true);
+    setDragY(0);
+  };
+
+  const contentStyle = isDragging
+    ? { transform: `translate3d(0, ${dragY}px, 0)`, transition: 'none' }
+    : springBack
+    ? { transform: 'translate3d(0, 0, 0)', transition: 'transform 220ms var(--g-ease-out)' }
+    : undefined;
+
+  return (
+    <Dialog.Root
+      open={Boolean(open)}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) {
+          onCloseRef.current?.();
+        }
       }}
-      style={{ zIndex: layerZ }}
-      className="g-modal-overlay"
-      role="dialog"
-      aria-modal="true"
-      aria-label={title || 'نافذة إجراءات'}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className={`g-dialog-sheet g-dialog-sheet-sticky ${maxWidth} animate-pop gap-3`}
-      >
-        <div className="g-sheet-handle" aria-hidden="true" />
+      <Dialog.Portal>
+        <Dialog.Overlay
+          style={{ zIndex: layerZ }}
+          className="g-modal-overlay g-radix-overlay"
+        >
+          <Dialog.Content
+            style={contentStyle}
+            onPointerDownOutside={(e) => {
+              if (!closeOnOverlay) {
+                e.preventDefault();
+              }
+            }}
+            onInteractOutside={(e) => {
+              if (!closeOnOverlay) {
+                e.preventDefault();
+              }
+            }}
+            onEscapeKeyDown={(e) => {
+              if (!onCloseRef.current) {
+                e.preventDefault();
+              }
+            }}
+            className={cn(
+              'g-dialog-sheet g-dialog-sheet-sticky g-radix-dialog gap-3 focus:outline-none',
+              maxWidth
+            )}
+          >
+            <div
+              onPointerDown={handleHeaderPointerDown}
+              onPointerMove={handleHeaderPointerMove}
+              onPointerUp={(e) => finishHeaderDrag(e, false)}
+              onPointerCancel={(e) => finishHeaderDrag(e, true)}
+              className="shrink-0 touch-none sm:touch-auto"
+            >
+              <div className="g-sheet-handle" aria-hidden="true" />
 
-        {(title || onClose) && (
-          <div className="flex items-center justify-between gap-3 pb-2.5 border-b border-line shrink-0">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <h3
-                  className={`text-sm sm:text-base ${arch.surfaces.headingWeight} tracking-tight text-ink m-0 truncate`}
-                >
-                  {title}
-                </h3>
-                {badge}
-              </div>
-              {subtitle && (
-                <p className="text-xs font-normal text-ink-muted m-0 mt-0.5 truncate">
-                  {subtitle}
-                </p>
+              {!title && (
+                <Dialog.Title className="sr-only">نافذة إجراءات</Dialog.Title>
+              )}
+
+              {(title || onClose) && (
+                <div className="flex items-center justify-between gap-3 pb-2.5 border-b border-line">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {title && (
+                        <Dialog.Title
+                          className={cn(
+                            'text-sm sm:text-base tracking-tight text-ink m-0 truncate',
+                            arch.surfaces.headingWeight
+                          )}
+                        >
+                          {title}
+                        </Dialog.Title>
+                      )}
+                      {badge}
+                    </div>
+                    {subtitle && (
+                      <Dialog.Description className="text-xs font-normal text-ink-muted m-0 mt-0.5 truncate">
+                        {subtitle}
+                      </Dialog.Description>
+                    )}
+                  </div>
+
+                  {onClose && (
+                    <Dialog.Close asChild>
+                      <button
+                        type="button"
+                        aria-label="إغلاق"
+                        className="w-11 h-11 rounded-full bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink flex items-center justify-center shrink-0 transition-[background-color,color,transform] duration-150 ease-[var(--g-ease-out)] active:scale-95"
+                      >
+                        <Icon name="close" size={20} />
+                      </button>
+                    </Dialog.Close>
+                  )}
+                </div>
               )}
             </div>
 
-            {onClose && (
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label="إغلاق"
-                className="w-11 h-11 rounded-full bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink flex items-center justify-center shrink-0 transition-[background-color,color,transform] duration-150 ease-[var(--g-ease-out)] active:scale-95"
-              >
-                <Icon name="close" size={20} />
-              </button>
+            <div className="g-dialog-body pe-0.5">{children}</div>
+
+            {footer && (
+              <div className="pt-3 border-t border-line shrink-0">{footer}</div>
             )}
-          </div>
-        )}
-
-        <div className="g-dialog-body pe-0.5">{children}</div>
-
-        {footer && (
-          <div className="pt-3 border-t border-line shrink-0">{footer}</div>
-        )}
-      </div>
-    </div>
+          </Dialog.Content>
+        </Dialog.Overlay>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
-
-  return typeof document !== 'undefined'
-    ? createPortal(sheetNode, document.body)
-    : sheetNode;
 }

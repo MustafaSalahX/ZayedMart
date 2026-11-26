@@ -45,8 +45,130 @@ export default function ThemePreviewCard({
         className="w-full h-[86px] rounded-[calc(var(--g-radius-md)-2px)] border overflow-hidden flex flex-col justify-between relative mb-2"
         aria-hidden="true"
       >
-        {/* 1. Theme-Specific Header Wireframe */}
-        {isGlass ? (
+        {isMinimal ? (
+          <div className="flex-1 min-h-0 flex flex-col justify-between">
+            <div className="flex-1 min-h-0 flex">
+              {/* Collapsible RTL Sidebar Rail */}
+              <div
+                style={{
+                  backgroundColor: 'var(--g-sidebar-bg, var(--g-surface-variant))',
+                  borderColor: 'var(--g-sidebar-border, var(--g-border))',
+                }}
+                className="w-6 shrink-0 border-e px-1 py-1.5 flex flex-col justify-between"
+              >
+                <div className="space-y-1">
+                  <span
+                    style={{ backgroundColor: 'var(--g-primary-solid)' }}
+                    className="block w-2.5 h-2.5 rounded-[3px] mx-auto"
+                  />
+                  <span
+                    style={{
+                      backgroundColor: 'var(--g-sidebar-accent, var(--g-surface-variant))',
+                      borderColor: 'var(--g-border)',
+                    }}
+                    className="w-full h-1.5 rounded-[2px] border flex items-center justify-center"
+                  >
+                    <span
+                      style={{ backgroundColor: 'var(--g-text)', opacity: 0.85 }}
+                      className="w-2.5 h-0.5 rounded-full"
+                    />
+                  </span>
+                  <span
+                    style={{ backgroundColor: 'var(--g-muted)', opacity: 0.35 }}
+                    className="block w-3 h-0.5 rounded-full mx-auto"
+                  />
+                  <span
+                    style={{ backgroundColor: 'var(--g-muted)', opacity: 0.35 }}
+                    className="block w-3 h-0.5 rounded-full mx-auto"
+                  />
+                </div>
+                <span
+                  style={{ backgroundColor: 'var(--g-border-strong)', opacity: 0.55 }}
+                  className="block w-2 h-2 rounded-full mx-auto"
+                />
+              </div>
+
+              {/* Slim Header + Rounded Zinc Dashboard-01 Cards */}
+              <div className="flex-1 min-w-0 flex flex-col justify-between">
+                <div
+                  style={{ borderBottomColor: 'var(--g-border)' }}
+                  className="h-3.5 border-b px-2 flex items-center justify-between"
+                >
+                  <div className="flex items-center gap-1">
+                    <span
+                      style={{ backgroundColor: 'var(--g-muted)', opacity: 0.5 }}
+                      className="w-1.5 h-1.5 rounded-[2px]"
+                    />
+                    <span
+                      style={{ backgroundColor: 'var(--g-text)', opacity: 0.8 }}
+                      className="w-5 h-1 rounded-full"
+                    />
+                  </div>
+                  <span
+                    style={{ backgroundColor: 'var(--g-muted)', opacity: 0.45 }}
+                    className="w-1.5 h-1.5 rounded-full"
+                  />
+                </div>
+
+                <div className="px-1.5 py-1.5 grid grid-cols-2 gap-1 flex-1 items-center">
+                  {[0, 1].map((idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        backgroundColor: 'var(--g-surface)',
+                        borderColor: 'var(--g-border)',
+                        boxShadow: 'var(--g-shadow-sm)',
+                      }}
+                      className="h-9 rounded-[5px] border p-1.5 flex flex-col justify-between"
+                    >
+                      <span
+                        style={{ backgroundColor: 'var(--g-muted)', opacity: 0.45 }}
+                        className="w-4 h-1 rounded-full"
+                      />
+                      <span
+                        style={{ backgroundColor: 'var(--g-text)', opacity: 0.85 }}
+                        className="w-6 h-1.5 rounded-[2px]"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Bottom Dock */}
+            <div
+              style={{
+                backgroundColor: 'var(--g-bg)',
+                borderTopColor: 'var(--g-border)',
+              }}
+              className="h-3 border-t px-4 flex items-center justify-around shrink-0"
+            >
+              <span
+                style={{
+                  backgroundColor: 'var(--g-surface-variant)',
+                  borderColor: 'var(--g-border)',
+                }}
+                className="w-3.5 h-1.5 rounded-[3px] border flex items-center justify-center"
+              >
+                <span
+                  style={{ backgroundColor: 'var(--g-text)', opacity: 0.85 }}
+                  className="w-1.5 h-0.5 rounded-full"
+                />
+              </span>
+              <span
+                style={{ backgroundColor: 'var(--g-muted)', opacity: 0.35 }}
+                className="w-1.5 h-1 rounded-full"
+              />
+              <span
+                style={{ backgroundColor: 'var(--g-muted)', opacity: 0.35 }}
+                className="w-1.5 h-1 rounded-full"
+              />
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* 1. Theme-Specific Header Wireframe */}
+            {isGlass ? (
           <div className="px-2 pt-2">
             <div
               style={{
@@ -63,31 +185,6 @@ export default function ThemePreviewCard({
               <span
                 style={{ backgroundColor: 'var(--g-glass-pill-active)' }}
                 className="w-5 h-2 rounded-full"
-              />
-            </div>
-          </div>
-        ) : isMinimal ? (
-          <div
-            style={{ borderBottomColor: 'var(--g-border)' }}
-            className="h-4 border-b px-2.5 flex items-center justify-between"
-          >
-            <span
-              style={{ backgroundColor: 'var(--g-text)', opacity: 0.85 }}
-              className="w-5 h-1"
-            />
-            <div className="flex items-center gap-1.5 h-full">
-              <span
-                style={{ borderBottomColor: 'var(--g-text)' }}
-                className="w-4 h-full border-b-[1.5px] flex items-center"
-              >
-                <span
-                  style={{ backgroundColor: 'var(--g-text)', opacity: 0.85 }}
-                  className="w-full h-1"
-                />
-              </span>
-              <span
-                style={{ backgroundColor: 'var(--g-muted)', opacity: 0.4 }}
-                className="w-4 h-1"
               />
             </div>
           </div>
@@ -171,40 +268,8 @@ export default function ThemePreviewCard({
           </div>
         )}
 
-        {/* 2. Theme-Specific Content Surface Wireframe */}
-        {isMinimal ? (
-          <div className="px-2.5 py-1.5 flex-1 flex flex-col justify-center gap-1.5">
-            <div
-              style={{
-                borderTopColor: 'var(--g-border)',
-                borderBottomColor: 'var(--g-border)',
-                backgroundColor: 'var(--g-border)',
-              }}
-              className="grid grid-cols-2 gap-px border-y"
-            >
-              <div style={{ backgroundColor: 'var(--g-bg)' }} className="p-1.5 space-y-1">
-                <div
-                  style={{ backgroundColor: 'var(--g-muted)', opacity: 0.4 }}
-                  className="w-5 h-1"
-                />
-                <div
-                  style={{ backgroundColor: 'var(--g-text)', opacity: 0.85 }}
-                  className="w-7 h-2"
-                />
-              </div>
-              <div style={{ backgroundColor: 'var(--g-bg)' }} className="p-1.5 space-y-1">
-                <div
-                  style={{ backgroundColor: 'var(--g-muted)', opacity: 0.4 }}
-                  className="w-5 h-1"
-                />
-                <div
-                  style={{ backgroundColor: 'var(--g-text)', opacity: 0.85 }}
-                  className="w-6 h-2"
-                />
-              </div>
-            </div>
-          </div>
-        ) : isGlass ? (
+            {/* 2. Theme-Specific Content Surface Wireframe */}
+            {isGlass ? (
           <div className="px-2 py-1.5 grid grid-cols-2 gap-1.5 flex-1 items-center">
             {[0, 1].map((idx) => (
               <div
@@ -258,8 +323,8 @@ export default function ThemePreviewCard({
           </div>
         )}
 
-        {/* 3. Theme-Specific Bottom Dock Wireframe */}
-        {isGlass ? (
+            {/* 3. Theme-Specific Bottom Dock Wireframe */}
+            {isGlass ? (
           <div className="px-3 pb-1.5">
             <div
               style={{
@@ -306,24 +371,6 @@ export default function ThemePreviewCard({
               />
             </div>
           </div>
-        ) : isMinimal ? (
-          <div
-            style={{ borderTopColor: 'var(--g-border)' }}
-            className="h-3 border-t px-4 flex items-center justify-around"
-          >
-            <span
-              style={{ backgroundColor: 'var(--g-text)' }}
-              className="w-1.5 h-1.5 rounded-full"
-            />
-            <span
-              style={{ backgroundColor: 'var(--g-muted)', opacity: 0.35 }}
-              className="w-1.5 h-1 rounded-full"
-            />
-            <span
-              style={{ backgroundColor: 'var(--g-muted)', opacity: 0.35 }}
-              className="w-1.5 h-1 rounded-full"
-            />
-          </div>
         ) : isElegant ? (
           <div
             style={{ borderTopColor: 'var(--g-border)' }}
@@ -364,13 +411,22 @@ export default function ThemePreviewCard({
             />
           </div>
         )}
+          </>
+        )}
       </div>
 
-      {/* Minimal Footer: 1–2 Word Theme Name + Active Check ONLY */}
+      {/* Minimal Footer: 1–2 Word Theme Name + Optional Default Tag + Active Check ONLY */}
       <div className="flex items-center justify-between gap-1.5 px-0.5">
-        <span className="text-xs font-semibold text-ink truncate">
-          {theme.nameAr}
-        </span>
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-xs font-semibold text-ink truncate">
+            {theme.nameAr}
+          </span>
+          {theme.isDefault && (
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded-[4px] bg-surface-2 border border-line text-[10px] font-medium text-ink-muted leading-none shrink-0">
+              افتراضي
+            </span>
+          )}
+        </div>
         <span
           aria-hidden="true"
           className={`w-4 h-4 rounded-full flex items-center justify-center shrink-0 transition-[background-color,color] duration-150 ${

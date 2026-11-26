@@ -51,6 +51,14 @@ export class RbacController {
           `SELECT * FROM system_users ORDER BY is_active DESC, created_at ASC`
         )
       : [];
+    if (
+      canManageUsers &&
+      this.db.needsProfileAvatarFallback &&
+      !this.db.schemaCaps.systemUsersRoleProfiles
+    ) {
+      const avatarMap = await this.db.loadProfileAvatarsMap();
+      this.db.applyProfileAvatarMap(avatarMap, { users: rawUsers });
+    }
 
     const users = rawUsers.map((u) => {
       const {
@@ -211,6 +219,18 @@ export class RbacController {
             now,
           ]
         );
+        if (String(avatar_url || '').trim() || String(avatar_preset || '').trim()) {
+          await this.db.saveProfileAvatar(
+            'user',
+            id,
+            {
+              avatar_url: String(avatar_url || '').trim(),
+              avatar_preset: String(avatar_preset || '').trim(),
+              avatar_color,
+            },
+            now
+          );
+        }
       }
 
       await this.db.recordAuditLog({
@@ -239,13 +259,19 @@ export class RbacController {
     @Res() res: Response
   ) {
     try {
-      const target = await this.db.queryOne<any>(
+      const rawTarget = await this.db.queryOne<any>(
         'SELECT * FROM system_users WHERE id = ?',
         [id]
       );
-      if (!target) {
+      if (!rawTarget) {
         return res.status(404).json({ error: 'الحساب غير موجود' });
       }
+      const { userRow: target } = await this.db.hydrateUserBundle(
+        rawTarget,
+        null,
+        null,
+        rawTarget.role
+      );
 
       const {
         username,
@@ -384,6 +410,22 @@ export class RbacController {
             target.id,
           ]
         );
+        if (
+          body?.avatar_url !== undefined ||
+          body?.avatar_preset !== undefined ||
+          body?.avatar_color !== undefined
+        ) {
+          await this.db.saveProfileAvatar(
+            'user',
+            target.id,
+            {
+              avatar_url: String(avatar_url || '').trim(),
+              avatar_preset: String(avatar_preset || '').trim(),
+              avatar_color,
+            },
+            nowIso
+          );
+        }
       }
 
       if (target.employee_id) {
@@ -427,6 +469,22 @@ export class RbacController {
               target.employee_id,
             ]
           );
+          if (
+            body?.avatar_url !== undefined ||
+            body?.avatar_preset !== undefined ||
+            body?.avatar_color !== undefined
+          ) {
+            await this.db.saveProfileAvatar(
+              'employee',
+              target.employee_id,
+              {
+                avatar_url: String(avatar_url || '').trim(),
+                avatar_preset: String(avatar_preset || '').trim(),
+                avatar_color,
+              },
+              nowIso
+            );
+          }
         }
       }
 
@@ -436,7 +494,6 @@ export class RbacController {
           'UPDATE user_sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0',
           [target.id]
         );
-        this.db.invalidateAuthCache();
         if (target.id === auth.user.id && is_active) {
           freshToken = await this.db.issueSessionForUser(
             { id: target.id, session_version: nextSessionVersion },
@@ -445,6 +502,7 @@ export class RbacController {
           );
         }
       }
+      this.db.invalidateAuthCache();
 
       await this.db.recordAuditLog({
         userId: auth.user.id,
@@ -472,13 +530,19 @@ export class RbacController {
     @Res() res: Response
   ) {
     try {
-      const target = await this.db.queryOne<any>(
+      const rawTarget = await this.db.queryOne<any>(
         'SELECT * FROM system_users WHERE id = ?',
         [id]
       );
-      if (!target) {
+      if (!rawTarget) {
         return res.status(404).json({ error: 'الحساب غير موجود' });
       }
+      const { userRow: target } = await this.db.hydrateUserBundle(
+        rawTarget,
+        null,
+        null,
+        rawTarget.role
+      );
 
       if (target.role === 'owner' && Number(target.is_active) === 1) {
         const activeOwnersRow = await this.db.queryOne<{ c: any }>(

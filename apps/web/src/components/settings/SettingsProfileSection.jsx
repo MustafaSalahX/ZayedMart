@@ -142,8 +142,8 @@ export default function SettingsProfileSection({
   const p = profileData || myProfile || authUser || {};
   const emp = p.employee || {};
   const effectiveAvatar =
-    p.effective_avatar_url || p.avatar_url || authUser?.avatar_url || '';
-  const ownAvatar = p.own_avatar_url ?? (p.avatar_url || authUser?.avatar_url || '');
+    p.effective_avatar_url ?? p.avatar_url ?? authUser?.avatar_url ?? '';
+  const ownAvatar = p.own_avatar_url ?? p.avatar_url ?? authUser?.avatar_url ?? '';
   const avatarPreset = p.avatar_preset || authUser?.avatar_preset || 'role_default';
   const avatarColor = p.avatar_color || authUser?.avatar_color || '';
   const username = p.username || authUser?.username || '';
@@ -173,7 +173,12 @@ export default function SettingsProfileSection({
       const res = await uploadMyAvatar(dataUrl, { applyToRoleDefault });
       setCropFile(null);
       if (res?.user) {
-        setProfileData((prev) => ({ ...(prev || {}), ...res.user }));
+        setProfileData((prev) => ({
+          ...(prev || {}),
+          ...res.user,
+          effective_avatar_url: res.user.effective_avatar_url ?? res.user.avatar_url ?? '',
+          own_avatar_url: res.user.own_avatar_url ?? '',
+        }));
         onUserUpdated?.(res.user);
       }
       onToast?.(
@@ -199,7 +204,12 @@ export default function SettingsProfileSection({
       });
       setPickerOpen(false);
       if (res?.user) {
-        setProfileData((prev) => ({ ...(prev || {}), ...res.user }));
+        setProfileData((prev) => ({
+          ...(prev || {}),
+          ...res.user,
+          effective_avatar_url: res.user.effective_avatar_url ?? res.user.avatar_url ?? '',
+          own_avatar_url: res.user.own_avatar_url ?? '',
+        }));
         onUserUpdated?.(res.user);
       }
       onToast?.('تم تحديث الأفاتار');
@@ -220,7 +230,8 @@ export default function SettingsProfileSection({
         setProfileData((prev) => ({
           ...(prev || {}),
           ...res.user,
-          own_avatar_url: '',
+          effective_avatar_url: res.user.effective_avatar_url ?? res.user.avatar_url ?? '',
+          own_avatar_url: res.user.own_avatar_url ?? '',
         }));
         onUserUpdated?.(res.user);
       }

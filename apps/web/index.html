@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="ar" dir="rtl" data-theme="classic" data-mode="light" data-density="comfortable" data-glass="auto">
+<html lang="ar" dir="rtl" data-theme="minimal" data-mode="light" data-density="comfortable" data-glass="auto">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#F8FAFD" />
+    <meta name="theme-color" content="#FFFFFF" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
@@ -19,7 +19,7 @@
         try {
           var META = {
             classic: ['#F8FAFD', '#131416'],
-            minimal: ['#FFFFFF', '#0A0A0A'],
+            minimal: ['#FFFFFF', '#09090B'],
             'liquid-glass': ['#DCEEFF', '#040B1A'],
             elegant: ['#FAF7F2', '#110E0C'],
             modern: ['#F6F7FA', '#0B0E14'],
@@ -30,13 +30,31 @@
             'desert-sand': 'elegant',
           };
           var html = document.documentElement;
-          var rawTheme = localStorage.getItem('zayed_theme_v1') || 'classic';
-          var mappedTheme = LEGACY[rawTheme] || rawTheme;
-          var theme = META[mappedTheme] ? mappedTheme : 'classic';
-          if (LEGACY[rawTheme]) {
-            try {
-              localStorage.setItem('zayed_theme_v1', theme);
-            } catch (e) {}
+          var explicitV2 = localStorage.getItem('zayed_theme_explicit_v2');
+          var rawTheme = localStorage.getItem('zayed_theme_v1');
+          var theme;
+          if (explicitV2 !== '1') {
+            if (!rawTheme || rawTheme === 'classic') {
+              theme = 'minimal';
+              try {
+                localStorage.setItem('zayed_theme_v1', 'minimal');
+              } catch (e) {}
+            } else {
+              var mappedTheme = LEGACY[rawTheme] || rawTheme;
+              theme = META[mappedTheme] ? mappedTheme : 'minimal';
+              try {
+                localStorage.setItem('zayed_theme_v1', theme);
+                localStorage.setItem('zayed_theme_explicit_v2', '1');
+              } catch (e) {}
+            }
+          } else {
+            var mapped = LEGACY[rawTheme] || rawTheme;
+            theme = META[mapped] ? mapped : 'minimal';
+            if (LEGACY[rawTheme]) {
+              try {
+                localStorage.setItem('zayed_theme_v1', theme);
+              } catch (e) {}
+            }
           }
 
           var modePref = localStorage.getItem('zayed_color_mode_v1');
@@ -95,7 +113,7 @@
           html.classList.toggle('lite-mode', lite);
           html.style.colorScheme = mode;
 
-          var metaColor = (META[theme] || META.classic)[isDark ? 1 : 0];
+          var metaColor = (META[theme] || META.minimal)[isDark ? 1 : 0];
           var metaEl = document.querySelector('meta[name="theme-color"]');
           if (metaEl) metaEl.setAttribute('content', metaColor);
           if (window.ZayedAndroidBridge && window.ZayedAndroidBridge.setSystemBars) {

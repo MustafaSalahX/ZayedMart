@@ -11,6 +11,7 @@ import {
   Icon,
   RoleAvatar,
   SegmentedControl,
+  Separator,
 } from './ui/index.js';
 
 function shiftIsoDate(dateStr, deltaDays) {
@@ -53,6 +54,9 @@ export default function TopBar({
   isSyncing = false,
   onFlushOfflineQueue,
   darkMode: darkModeProp,
+  onToggleDarkMode,
+  sidebarCollapsed = false,
+  onToggleSidebar,
   selectedDate,
   onChangeDate,
   todayKey,
@@ -72,6 +76,7 @@ export default function TopBar({
   const headerLayout = arch.shell.headerLayout;
   const darkMode = darkModeProp !== undefined ? darkModeProp : themeCtx.darkMode;
 
+  const isShadcnHeader = headerLayout === 'shadcn-sidebar-header';
   const isMinimal = headerLayout === 'minimal-slim';
   const isGlass = headerLayout === 'floating-glass-capsule';
   const isElegant = headerLayout === 'editorial-rule';
@@ -119,6 +124,37 @@ export default function TopBar({
     : offlineQueueCount > 0
     ? `معلق (${offlineQueueCount}) — اضغط للمزامنة`
     : 'متصل';
+
+  const currentTabMeta = navTabs.find((t) => t.id === activeTab);
+  const currentTabLabel =
+    currentTabMeta?.fullLabel ||
+    currentTabMeta?.label ||
+    (activeTab === 'settings' ? 'الإعدادات' : 'الرئيسية');
+
+  function handleToggleMode() {
+    if (onToggleDarkMode) {
+      onToggleDarkMode();
+    } else {
+      themeCtx.toggleDarkMode();
+    }
+  }
+
+  function renderSyncButton(idleCls, activeCls) {
+    return (
+      <button
+        type="button"
+        onClick={() => onFlushOfflineQueue?.()}
+        title={syncTitle}
+        aria-label={syncTitle}
+        className={`inline-flex items-center justify-center gap-1.5 shrink-0 transition-[background-color,transform] duration-150 active:scale-95 cursor-pointer ${
+          showSyncText ? activeCls : idleCls
+        }`}
+      >
+        <span className={`w-2 h-2 rounded-full shrink-0 ${syncDotCls}`} aria-hidden="true" />
+        {showSyncText && <span>{syncText}</span>}
+      </button>
+    );
+  }
 
   function handleOpenFullSettings(section = 'profile') {
     setSettingsSheetOpen(false);
@@ -310,20 +346,10 @@ export default function TopBar({
           {storeName || 'زايد مارت'}
         </h1>
 
-        <button
-          type="button"
-          onClick={() => onFlushOfflineQueue?.()}
-          title={syncTitle}
-          aria-label={syncTitle}
-          className={`inline-flex items-center justify-center gap-1.5 shrink-0 transition-[background-color,transform] duration-150 active:scale-95 cursor-pointer ${
-            showSyncText
-              ? 'min-h-[28px] px-2 py-0.5 rounded-full bg-warning-bg text-warning text-[11px] font-semibold'
-              : 'w-7 h-7 rounded-full hover:bg-surface-2'
-          }`}
-        >
-          <span className={`w-2 h-2 rounded-full shrink-0 ${syncDotCls}`} aria-hidden="true" />
-          {showSyncText && <span>{syncText}</span>}
-        </button>
+        {renderSyncButton(
+          'w-7 h-7 rounded-full hover:bg-surface-2',
+          'min-h-[28px] px-2 py-0.5 rounded-full bg-warning-bg text-warning text-[11px] font-semibold'
+        )}
       </div>
 
       {/* Center: Single-Row Desktop Navigation */}
@@ -446,7 +472,129 @@ export default function TopBar({
 
   return (
     <>
-      {isGlass ? (
+      {isShadcnHeader ? (
+        <header className="sticky top-0 z-30 w-full bg-canvas/95 pt-[var(--safe-top)]">
+          {/* Desktop Shadcn Sidebar Header */}
+          <div className="hidden md:flex h-14 border-b border-line bg-canvas/95 px-4 lg:px-6 items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <button
+                type="button"
+                onClick={() => onToggleSidebar?.()}
+                aria-label={
+                  sidebarCollapsed ? 'توسيع القائمة الجانبية' : 'طي القائمة الجانبية'
+                }
+                aria-expanded={!sidebarCollapsed}
+                title={`${sidebarCollapsed ? 'توسيع القائمة' : 'طي القائمة'} (Ctrl+B)`}
+                className="inline-flex items-center justify-center min-h-[38px] w-9 rounded-[var(--g-radius-btn)] text-ink-muted hover:text-ink hover:bg-surface-2 transition-[background-color,color,transform] duration-150 active:scale-[0.97] cursor-pointer shrink-0"
+              >
+                <Icon name="sidebar" size={18} />
+              </button>
+
+              <Separator orientation="vertical" className="h-4" />
+
+              <nav aria-label="مسار التنقل" className="flex items-center gap-1.5 text-sm min-w-0">
+                <span className="text-ink-muted truncate max-w-[160px]">
+                  {storeName || 'زايد مارت'}
+                </span>
+                <Icon
+                  name="chevron_left"
+                  size={14}
+                  className="text-ink-muted shrink-0 ltr:rotate-180"
+                />
+                <span className="font-semibold text-ink truncate">
+                  {currentTabLabel}
+                </span>
+              </nav>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              {renderSyncButton(
+                'w-9 h-9 rounded-[var(--g-radius-btn)] hover:bg-surface-2',
+                'min-h-[36px] px-2.5 py-1 rounded-[var(--g-radius-btn)] bg-warning-bg text-warning text-xs font-semibold'
+              )}
+
+              {showDateControl && (
+                <div className="flex items-center gap-1 px-2.5 min-h-[36px] rounded-[var(--g-radius-btn)] border border-line bg-surface hover:border-line-strong transition-[border-color] duration-150 shrink-0">
+                  <input
+                    type="date"
+                    value={selectedDate}
+                    max={todayKey}
+                    aria-label="تاريخ التشغيل"
+                    onChange={(e) => onChangeDate?.(e.target.value || todayKey)}
+                    className="bg-transparent text-xs font-medium outline-none num-ltr text-ink cursor-pointer"
+                  />
+                  {!isToday && (
+                    <button
+                      type="button"
+                      onClick={() => onChangeDate?.(todayKey)}
+                      className="text-[11px] font-semibold text-primary hover:underline px-1 cursor-pointer"
+                    >
+                      اليوم
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={handleToggleMode}
+                aria-label={darkMode ? 'التبديل للوضع النهاري' : 'التبديل للوضع الليلي'}
+                title={darkMode ? 'الوضع النهاري' : 'الوضع الليلي'}
+                className="inline-flex items-center justify-center min-h-[36px] w-9 rounded-[var(--g-radius-btn)] border border-line bg-surface text-ink-muted hover:text-ink hover:bg-surface-2 transition-[background-color,color,transform] duration-150 active:scale-[0.97] cursor-pointer shrink-0"
+              >
+                <Icon name={darkMode ? 'light_mode' : 'dark_mode'} size={17} />
+              </button>
+            </div>
+          </div>
+
+          {/* Mobile Shadcn Compact Header */}
+          <div className="flex md:hidden h-14 border-b border-line bg-canvas/95 px-3 items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <BrandLogo alt={storeName || 'زايد مارت'} size="xs" />
+              <h1 className="text-sm font-semibold tracking-tight m-0 truncate text-ink max-w-[130px]">
+                {storeName || 'زايد مارت'}
+              </h1>
+              {renderSyncButton(
+                'min-h-[44px] min-w-[44px] rounded-[var(--g-radius-btn)] hover:bg-surface-2',
+                'min-h-[44px] px-2.5 rounded-[var(--g-radius-btn)] bg-warning-bg text-warning text-[11px] font-semibold'
+              )}
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              {showDateControl && (
+                <button
+                  type="button"
+                  onClick={() => setDateSheetOpen(true)}
+                  aria-label="تاريخ التشغيل"
+                  className={`inline-flex items-center justify-center gap-1.5 min-h-[44px] px-2.5 rounded-[var(--g-radius-btn)] border border-line bg-surface text-xs font-medium shrink-0 cursor-pointer transition-[background-color,color,transform] duration-150 active:scale-[0.97] ${
+                    !isToday ? 'text-primary font-semibold' : 'text-ink'
+                  }`}
+                >
+                  <Icon name="calendar_today" size={16} />
+                  <span className="num-ltr">{shortDateDisplay}</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => setSettingsSheetOpen(true)}
+                aria-label="القائمة والحساب"
+                title={authUser?.display_name || 'الحساب'}
+                className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-full hover:bg-surface-2 transition-[transform,background-color] duration-150 active:scale-[0.96] cursor-pointer shrink-0"
+              >
+                <RoleAvatar
+                  src={authUser?.effective_avatar_url || authUser?.avatar_url}
+                  name={authUser?.display_name}
+                  role={role}
+                  color={authUser?.avatar_color}
+                  preset={authUser?.avatar_preset}
+                  size="xs"
+                />
+              </button>
+            </div>
+          </div>
+        </header>
+      ) : isGlass ? (
         <header className="sticky top-0 z-30 w-full pointer-events-none pt-[calc(var(--safe-top)+0.5rem)] px-3 sm:px-5">
           <div className="pointer-events-auto max-w-7xl mx-auto g-glass-capsule rounded-[22px] lg:rounded-full px-3 sm:px-4 py-1">
             {headerInner}

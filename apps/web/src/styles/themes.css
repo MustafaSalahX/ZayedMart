@@ -229,14 +229,14 @@
 }
 
 /* ============================================================================
- * THEME 2: minimal — البساطة (Swiss / Linear Utilitarian Minimalism)
- * Pure crisp #FFFFFF / #0A0A0A canvas, 1px hairlines, 6px radii, ZERO shadows
+ * THEME 2: minimal — البساطة (Shadcn New York — Zinc)
+ * Crisp #FFFFFF / #09090B Zinc palette, bordered cards, Chrome 64+ sRGB/rgba
  * ============================================================================ */
 [data-theme='minimal'][data-mode='light'] {
   color-scheme: light;
   --g-theme-font-default: var(--font-ibm);
   --g-theme-color-meta: #FFFFFF;
-  --topbar-h: calc(3.25rem + var(--safe-top));
+  --topbar-h: calc(3.5rem + var(--safe-top));
   --bottom-nav-h: calc(3.85rem + var(--safe-bottom));
 
   --g-bg: #FFFFFF;
@@ -248,6 +248,10 @@
   --g-surface-2: #F4F4F5;
   --g-surface-tint: #FAFAFA;
   --g-surface-inset: #F4F4F5;
+  --g-sidebar-bg: #FAFAFA;
+  --g-sidebar-border: #E4E4E7;
+  --g-sidebar-accent: #F4F4F5;
+  --g-ring-soft: rgba(24, 24, 27, 0.14);
   --g-surface-glass: rgba(255, 255, 255, 0.98);
   --g-surface-glass-strong: rgba(255, 255, 255, 0.99);
   --g-surface-glass-press: #ECECEE;
@@ -256,26 +260,26 @@
   --g-glass-pill-specular: none;
 
   --g-border: #E4E4E7;
-  --g-border-subtle: #F0F0F2;
+  --g-border-subtle: #F4F4F5;
   --g-border-strong: #71717A;
   --g-glass-border: #E4E4E7;
   --g-glass-rim-gradient: none;
 
-  --g-text: #111111;
+  --g-text: #09090B;
   --g-muted: #52525B;
   --g-text-muted: #52525B;
 
-  --g-primary: #111111;
-  --g-primary-solid: #111111;
-  --g-primary-solid-hover: #2C2C30;
-  --g-primary-hover: #2C2C30;
-  --g-on-primary: #FFFFFF;
-  --g-primary-container: #F0F0F2;
-  --g-primary-subtle: #F0F0F2;
-  --g-on-primary-container: #111111;
+  --g-primary: #18181B;
+  --g-primary-solid: #18181B;
+  --g-primary-solid-hover: #27272A;
+  --g-primary-hover: #27272A;
+  --g-on-primary: #FAFAFA;
+  --g-primary-container: #F4F4F5;
+  --g-primary-subtle: #F4F4F5;
+  --g-on-primary-container: #18181B;
   --g-secondary-container: #ECECEE;
-  --g-on-secondary-container: #111111;
-  --g-ring-focus: #111111;
+  --g-on-secondary-container: #18181B;
+  --g-ring-focus: #18181B;
 
   --g-green: #24592E;
   --g-green-bg: #EDF4EE;
@@ -315,20 +319,20 @@
   --g-accent-bg: #E8F3FB;
   --g-accent-border: #7EB2DB;
 
-  --g-snackbar-bg: #111111;
+  --g-snackbar-bg: #18181B;
   --g-snackbar-text: #FAFAFA;
 
-  --g-shadow-sm: none;
-  --g-shadow: none;
-  --g-shadow-elevated: 0 12px 32px rgba(17, 17, 17, 0.08);
+  --g-shadow-sm: 0 1px 2px 0 rgba(9, 9, 11, 0.05);
+  --g-shadow: 0 2px 8px -2px rgba(9, 9, 11, 0.08);
+  --g-shadow-elevated: 0 12px 32px rgba(9, 9, 11, 0.08);
   --g-shadow-press: none;
-  --g-shadow-fab: 0 2px 10px rgba(17, 17, 17, 0.14);
+  --g-shadow-fab: 0 2px 10px rgba(9, 9, 11, 0.14);
 
-  --g-radius-sm: 0.25rem;
-  --g-radius-md: 0.375rem;
-  --g-radius-card: 0.375rem;
-  --g-radius-sheet: 0.625rem;
-  --g-radius-btn: 0.375rem;
+  --g-radius-sm: 0.375rem;
+  --g-radius-md: 0.5rem;
+  --g-radius-card: 0.75rem;
+  --g-radius-sheet: 0.875rem;
+  --g-radius-btn: 0.5rem;
   --g-radius-pill: 0.375rem;
 
   --g-blur-sm: 0px;
@@ -344,47 +348,51 @@
 [data-theme='minimal'][data-mode='dark'] {
   color-scheme: dark;
   --g-theme-font-default: var(--font-ibm);
-  --g-theme-color-meta: #0A0A0A;
-  --topbar-h: calc(3.25rem + var(--safe-top));
+  --g-theme-color-meta: #09090B;
+  --topbar-h: calc(3.5rem + var(--safe-top));
   --bottom-nav-h: calc(3.85rem + var(--safe-bottom));
 
-  --g-bg: #0A0A0A;
+  --g-bg: #09090B;
   --g-bg-mesh: none;
   --g-bg-canvas-wash: none;
-  --g-surface: #0A0A0A;
-  --g-surface-elevated: #121214;
-  --g-surface-variant: #17171A;
-  --g-surface-2: #17171A;
-  --g-surface-tint: #121215;
+  --g-surface: #09090B;
+  --g-surface-elevated: #111114;
+  --g-surface-variant: #18181B;
+  --g-surface-2: #18181B;
+  --g-surface-tint: #18181B;
   --g-surface-inset: #141417;
-  --g-surface-glass: rgba(10, 10, 10, 0.98);
-  --g-surface-glass-strong: rgba(18, 18, 20, 0.99);
-  --g-surface-glass-press: #1F1F24;
-  --g-glass-control: #17171A;
-  --g-glass-pill-active: #27272B;
+  --g-sidebar-bg: #111114;
+  --g-sidebar-border: #27272A;
+  --g-sidebar-accent: #1F1F23;
+  --g-ring-soft: rgba(250, 250, 250, 0.18);
+  --g-surface-glass: rgba(9, 9, 11, 0.98);
+  --g-surface-glass-strong: rgba(17, 17, 20, 0.99);
+  --g-surface-glass-press: #1F1F23;
+  --g-glass-control: #18181B;
+  --g-glass-pill-active: #27272A;
   --g-glass-pill-specular: none;
 
-  --g-border: #26262A;
+  --g-border: #27272A;
   --g-border-subtle: #1D1D21;
   --g-border-strong: #71717A;
-  --g-glass-border: #26262A;
+  --g-glass-border: #27272A;
   --g-glass-rim-gradient: none;
 
-  --g-text: #F4F4F5;
+  --g-text: #FAFAFA;
   --g-muted: #A1A1AA;
   --g-text-muted: #A1A1AA;
 
-  --g-primary: #F4F4F5;
-  --g-primary-solid: #F4F4F5;
-  --g-primary-solid-hover: #D4D4D8;
-  --g-primary-hover: #D4D4D8;
-  --g-on-primary: #0A0A0A;
-  --g-primary-container: #222226;
-  --g-primary-subtle: #222226;
-  --g-on-primary-container: #F4F4F5;
-  --g-secondary-container: #27272B;
-  --g-on-secondary-container: #F4F4F5;
-  --g-ring-focus: #F4F4F5;
+  --g-primary: #FAFAFA;
+  --g-primary-solid: #FAFAFA;
+  --g-primary-solid-hover: #E4E4E7;
+  --g-primary-hover: #E4E4E7;
+  --g-on-primary: #18181B;
+  --g-primary-container: #27272A;
+  --g-primary-subtle: #27272A;
+  --g-on-primary-container: #FAFAFA;
+  --g-secondary-container: #27272A;
+  --g-on-secondary-container: #FAFAFA;
+  --g-ring-focus: #FAFAFA;
 
   --g-green: #86D49B;
   --g-green-bg: #142619;
@@ -424,20 +432,20 @@
   --g-accent-bg: #132433;
   --g-accent-border: #3B739E;
 
-  --g-snackbar-bg: #F4F4F5;
-  --g-snackbar-text: #0A0A0A;
+  --g-snackbar-bg: #FAFAFA;
+  --g-snackbar-text: #09090B;
 
-  --g-shadow-sm: none;
-  --g-shadow: none;
+  --g-shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.35);
+  --g-shadow: 0 4px 12px -2px rgba(0, 0, 0, 0.45);
   --g-shadow-elevated: 0 16px 40px rgba(0, 0, 0, 0.62);
   --g-shadow-press: none;
   --g-shadow-fab: 0 4px 16px rgba(0, 0, 0, 0.45);
 
-  --g-radius-sm: 0.25rem;
-  --g-radius-md: 0.375rem;
-  --g-radius-card: 0.375rem;
-  --g-radius-sheet: 0.625rem;
-  --g-radius-btn: 0.375rem;
+  --g-radius-sm: 0.375rem;
+  --g-radius-md: 0.5rem;
+  --g-radius-card: 0.75rem;
+  --g-radius-sheet: 0.875rem;
+  --g-radius-btn: 0.5rem;
   --g-radius-pill: 0.375rem;
 
   --g-blur-sm: 0px;

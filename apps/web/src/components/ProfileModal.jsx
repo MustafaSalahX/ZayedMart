@@ -221,7 +221,7 @@ export default function ProfileModal({
               <div className="space-y-3">
                 <div className="flex items-center gap-3">
                   <RoleAvatar
-                    src={p.effective_avatar_url || p.avatar_url || authUser?.avatar_url}
+                    src={p.effective_avatar_url ?? p.avatar_url ?? authUser?.avatar_url}
                     name={displayName}
                     role={p.role || authUser?.role}
                     color={p.avatar_color || authUser?.avatar_color}

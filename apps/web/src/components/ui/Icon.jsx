@@ -17,6 +17,7 @@ import {
   CaretLeft,
   CaretRight,
   CaretUp,
+  CaretUpDown,
   CashRegister,
   ChartBar,
   ChatsCircle,
@@ -85,6 +86,7 @@ import {
   SealCheck,
   ShieldCheck,
   ShieldStar,
+  SidebarSimple,
   SignOut,
   Siren,
   SlidersHorizontal,
@@ -152,6 +154,8 @@ const ICON_REGISTRY = {
   chevron_right: CaretRight,
   expand_more: CaretDown,
   expand_less: CaretUp,
+  unfold_more: CaretUpDown,
+  sidebar: SidebarSimple,
   swap_horiz: ArrowsLeftRight,
   search: MagnifyingGlass,
   person_search: UserFocus,
@@ -254,7 +258,7 @@ const ICON_REGISTRY = {
   category: Tag,
 };
 
-const AUTO_RTL_MIRROR = new Set(['logout', 'send']);
+const AUTO_RTL_MIRROR = new Set(['logout', 'send', 'sidebar']);
 
 /**
  * Human-Crafted Vector Icon System backed by tree-shaken `@phosphor-icons/react`.

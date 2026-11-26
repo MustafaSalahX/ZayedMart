@@ -27,6 +27,7 @@ export default function BottomNav({
   const arch = useThemeArchitecture();
   const dockLayout = arch.shell.bottomNavLayout;
 
+  const isShadcn = dockLayout === 'shadcn-dock';
   const isMinimal = dockLayout === 'minimal-hairline';
   const isGlass = dockLayout === 'floating-glass-dock';
   const isElegant = dockLayout === 'editorial-hairline';
@@ -79,7 +80,9 @@ export default function BottomNav({
 
   const formatBadgeCount = (n) => (n > 99 ? '99+' : n);
 
-  const navContainerCls = isGlass
+  const navContainerCls = isShadcn
+    ? 'md:hidden fixed bottom-0 inset-x-0 z-35 bg-canvas/95 border-t border-line px-2 py-1 pb-[calc(0.25rem+var(--safe-bottom))]'
+    : isGlass
     ? 'md:hidden fixed bottom-[calc(var(--safe-bottom)+0.75rem)] inset-x-3.5 max-w-[420px] mx-auto z-35 g-glass-dock rounded-[28px] p-1.5'
     : isModern
     ? 'md:hidden fixed bottom-[calc(var(--safe-bottom)+0.625rem)] inset-x-3 max-w-[420px] mx-auto z-35 rounded-2xl bg-surface-elevated border border-line shadow-[var(--g-shadow-elevated)] p-1.5'
@@ -90,6 +93,37 @@ export default function BottomNav({
     : 'md:hidden fixed bottom-0 inset-x-0 z-35 g-bottom-nav shadow-[var(--g-shadow-elevated)]';
 
   const renderSlot = ({ id, icon, label, active, badge, badgeTone, onClick, ariaExpanded }) => {
+    if (isShadcn) {
+      return (
+        <button
+          key={id}
+          type="button"
+          aria-current={active ? 'page' : undefined}
+          aria-expanded={ariaExpanded}
+          onClick={onClick}
+          className={`flex flex-col items-center justify-center gap-1 min-h-[52px] py-1 px-1 rounded-[var(--g-radius-md)] min-w-0 relative transition-[background-color,color,transform] duration-150 ease-[var(--g-ease-out)] active:scale-[0.96] cursor-pointer ${
+            active
+              ? 'bg-surface-2 text-ink font-semibold'
+              : 'bg-transparent text-ink-muted hover:text-ink font-medium'
+          }`}
+        >
+          <span className="relative inline-flex items-center justify-center">
+            <Icon name={icon} size={20} filled={active} />
+            {badge > 0 && (
+              <span
+                className={`absolute -top-1.5 -end-2 min-w-[16px] h-[16px] px-1 rounded-full text-[9px] font-bold flex items-center justify-center num-ltr ${badgeTone}`}
+              >
+                {formatBadgeCount(badge)}
+              </span>
+            )}
+          </span>
+          <span className="text-[10px] leading-none truncate max-w-full px-0.5">
+            {label}
+          </span>
+        </button>
+      );
+    }
+
     if (isMinimal) {
       return (
         <button
@@ -286,7 +320,11 @@ export default function BottomNav({
       <nav aria-label="التنقل الرئيسي للموبايل" className={navContainerCls}>
         <div
           className={`grid ${colClass} items-center ${
-            isGlass || isModern ? 'gap-1' : isMinimal ? 'h-[60px] px-1 gap-0.5' : 'h-16 px-1 gap-0.5'
+            isShadcn || isGlass || isModern
+              ? 'gap-1'
+              : isMinimal
+              ? 'h-[60px] px-1 gap-0.5'
+              : 'h-16 px-1 gap-0.5'
           }`}
         >
           {visibleTabs.map((item) =>

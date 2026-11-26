@@ -140,12 +140,12 @@
       background-color var(--g-motion-fast) ease;
   }
 
-  /* Minimalism: Pure flat architectural surface + global automatic de-boxing! */
+  /* Shadcn New York (minimal): clean bordered Zinc card framing + flat nested de-boxing */
   [data-theme='minimal'] .g-card {
     background-color: var(--g-surface);
     border: 1px solid var(--g-border);
     border-radius: var(--g-radius-card);
-    box-shadow: none;
+    box-shadow: var(--g-shadow-sm);
   }
 
   [data-theme='minimal'] .g-card.g-card-flush {
@@ -153,6 +153,7 @@
     border: none;
     border-bottom: 1px solid var(--g-border);
     border-radius: 0;
+    box-shadow: none;
   }
 
   /* Zero Boxes-Inside-Boxes in Minimalism: nested cards flatten to hairline sections */
@@ -176,7 +177,7 @@
     }
 
     [data-theme='minimal'] .g-card-interactive:hover {
-      box-shadow: none;
+      box-shadow: var(--g-shadow);
       border-color: var(--g-border-strong);
     }
 
@@ -199,10 +200,10 @@
   }
 
   [data-theme='minimal'] .g-grouped-list {
-    background-color: transparent;
-    border-left: none;
-    border-right: none;
-    border-radius: 0;
+    background-color: var(--g-surface);
+    border: 1px solid var(--g-border);
+    border-radius: var(--g-radius-card);
+    box-shadow: var(--g-shadow-sm);
   }
 
   [data-theme='liquid-glass'] .g-grouped-list {
@@ -280,6 +281,10 @@
   .g-input:focus {
     border-color: var(--g-primary);
     background-color: var(--g-surface);
+  }
+
+  [data-theme='minimal'] .g-input:focus {
+    box-shadow: 0 0 0 3px var(--g-ring-soft);
   }
 
   /* Legacy alias for PwaInstallBanner & Button hooks */
@@ -431,6 +436,112 @@
 
 .walkie-pulse-ring {
   animation: walkiePulseRing 1.35s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* Radix UI Overlays, Dialogs & Popovers/Dropdowns (Chrome 64+, Reduced-Motion & Lite-Mode Safe) */
+@keyframes gRadixOverlayIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes gRadixOverlayOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes gRadixDialogIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes gRadixDialogOut {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+}
+
+@keyframes gRadixPopoverIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes gRadixPopoverOut {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+.g-radix-overlay[data-state='open'] {
+  animation: gRadixOverlayIn var(--g-motion-base) var(--g-ease-out);
+}
+.g-radix-overlay[data-state='closed'] {
+  animation: gRadixOverlayOut var(--g-motion-fast) ease-in;
+}
+
+.g-radix-dialog[data-state='open'] {
+  animation: gRadixDialogIn var(--g-motion-base) var(--g-ease-out);
+}
+.g-radix-dialog[data-state='closed'] {
+  animation: gRadixDialogOut var(--g-motion-fast) ease-in;
+}
+
+.g-radix-popover[data-state='open'] {
+  animation: gRadixPopoverIn var(--g-motion-fast) var(--g-ease-out);
+}
+.g-radix-popover[data-state='closed'] {
+  animation: gRadixPopoverOut 100ms ease-in;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .g-radix-overlay[data-state='open'],
+  .g-radix-dialog[data-state='open'],
+  .g-radix-popover[data-state='open'] {
+    animation: gRadixOverlayIn 120ms ease-out !important;
+  }
+  .g-radix-overlay[data-state='closed'],
+  .g-radix-dialog[data-state='closed'],
+  .g-radix-popover[data-state='closed'] {
+    animation: gRadixOverlayOut 80ms ease-in !important;
+  }
+}
+
+html.lite-mode .g-radix-overlay[data-state='open'],
+html.lite-mode .g-radix-overlay[data-state='closed'],
+html.lite-mode .g-radix-dialog[data-state='open'],
+html.lite-mode .g-radix-dialog[data-state='closed'],
+html.lite-mode .g-radix-popover[data-state='open'],
+html.lite-mode .g-radix-popover[data-state='closed'] {
+  animation: none !important;
 }
 
 /* Print Layout strictly for QR Employee Cards (unconstrained multi-page A4, always crisp B&W) */

@@ -67,4 +67,26 @@
   --radius-card: var(--g-radius-card);
   --radius-btn: var(--g-radius-btn);
   --font-sans: var(--g-font);
+
+  /* Shadcn New York Token Aliases (Chrome 64+ Safe) */
+  --color-background: var(--g-bg);
+  --color-foreground: var(--g-text);
+  --color-card: var(--g-surface);
+  --color-card-foreground: var(--g-text);
+  --color-popover: var(--g-surface-elevated);
+  --color-popover-foreground: var(--g-text);
+  --color-secondary: var(--g-surface-variant);
+  --color-secondary-foreground: var(--g-text);
+  --color-muted: var(--g-surface-variant);
+  --color-muted-foreground: var(--g-muted);
+  --color-destructive: var(--g-danger-solid);
+  --color-destructive-foreground: var(--g-on-danger);
+  --color-border: var(--g-border);
+  --color-input: var(--g-border);
+  --color-ring: var(--g-ring-focus);
+  --color-sidebar: var(--g-sidebar-bg, var(--g-surface));
+  --color-sidebar-foreground: var(--g-text);
+  --color-sidebar-border: var(--g-sidebar-border, var(--g-border));
+  --color-sidebar-accent: var(--g-sidebar-accent, var(--g-surface-variant));
+  --color-sidebar-accent-foreground: var(--g-text);
 }

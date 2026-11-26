@@ -12,6 +12,22 @@ export const LEGACY_THEME_MAP = Object.freeze({
 
 export const THEMES_REGISTRY = Object.freeze([
   Object.freeze({
+    id: 'minimal',
+    nameAr: 'البساطة',
+    nameEn: 'Minimal',
+    category: 'core',
+    isDefault: true,
+    defaultFont: 'ibm',
+    supportsGlass: false,
+    metaLight: '#FFFFFF',
+    metaDark: '#09090B',
+    lightStatusBar: true,
+    swatches: Object.freeze({
+      light: ['#FFFFFF', '#F4F4F5', '#18181B', '#24592E'],
+      dark: ['#09090B', '#18181B', '#FAFAFA', '#86D49B'],
+    }),
+  }),
+  Object.freeze({
     id: 'classic',
     nameAr: 'كلاسيك',
     nameEn: 'Classic',
@@ -24,21 +40,6 @@ export const THEMES_REGISTRY = Object.freeze([
     swatches: Object.freeze({
       light: ['#F8FAFD', '#FFFFFF', '#0B57D0', '#146C2E'],
       dark: ['#131416', '#1D1F22', '#9FC5FF', '#81C995'],
-    }),
-  }),
-  Object.freeze({
-    id: 'minimal',
-    nameAr: 'البساطة',
-    nameEn: 'Minimal',
-    category: 'core',
-    defaultFont: 'ibm',
-    supportsGlass: false,
-    metaLight: '#FFFFFF',
-    metaDark: '#0A0A0A',
-    lightStatusBar: true,
-    swatches: Object.freeze({
-      light: ['#FFFFFF', '#F4F4F5', '#111111', '#24592E'],
-      dark: ['#0A0A0A', '#17171A', '#F4F4F5', '#86D49B'],
     }),
   }),
   Object.freeze({
@@ -131,7 +132,7 @@ export const GLASS_OPTIONS = Object.freeze([
 ]);
 
 export const DEFAULT_DISPLAY_PREFS = Object.freeze({
-  theme: 'classic',
+  theme: 'minimal',
   modePref: 'light',
   fontFamily: 'auto',
   fontScale: 'scale-normal',
@@ -144,9 +145,9 @@ export const DEFAULT_DISPLAY_PREFS = Object.freeze({
 });
 
 export function normalizeThemeId(value) {
-  if (typeof value !== 'string') return 'classic';
+  if (typeof value !== 'string') return 'minimal';
   const mapped = LEGACY_THEME_MAP[value] || value;
-  return THEME_MAP[mapped] ? mapped : 'classic';
+  return THEME_MAP[mapped] ? mapped : 'minimal';
 }
 
 export function normalizeModePref(value) {
@@ -177,7 +178,7 @@ export function normalizeGlassMode(value, reducedBlurAlias) {
 }
 
 export function getThemeMetaColor(themeId, resolvedMode) {
-  const meta = THEME_MAP[normalizeThemeId(themeId)] || THEME_MAP.classic;
+  const meta = THEME_MAP[normalizeThemeId(themeId)] || THEME_MAP.minimal;
   const isDark = resolvedMode === 'dark';
   return {
     color: isDark ? meta.metaDark : meta.metaLight,

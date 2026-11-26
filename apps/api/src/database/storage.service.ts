@@ -118,7 +118,8 @@ export class StorageService {
 
   async uploadAvatarDataUrl(
     dataUrl: string,
-    ownerKey = 'user'
+    ownerKey = 'user',
+    options?: { preferDataUrlWhenNoCloudBucket?: boolean }
   ): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
     if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) {
       return { ok: false, error: 'صيغة الصورة الشخصية غير صالحة' };
@@ -172,7 +173,7 @@ export class StorageService {
       }
     }
 
-    if (this.isServerless) {
+    if (this.isServerless || options?.preferDataUrlWhenNoCloudBucket) {
       return { ok: true, url: dataUrl };
     }
 

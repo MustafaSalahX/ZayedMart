@@ -8,26 +8,27 @@ export const THEME_ARCHITECTURES = Object.freeze({
   minimal: Object.freeze({
     id: 'minimal',
     shell: Object.freeze({
-      headerLayout: 'minimal-slim',
-      bottomNavLayout: 'minimal-hairline',
+      headerLayout: 'shadcn-sidebar-header',
+      sidebarLayout: 'shadcn-collapsible-rail',
+      bottomNavLayout: 'shadcn-dock',
       headerDetached: false,
       bottomNavDetached: false,
       showBrandBar: false,
       showLogoBox: false,
-      headerNavStyle: 'underline',
-      bottomNavIndicator: 'dot',
-      maxContentWidth: 'max-w-6xl',
-      mainPaddingClass: 'px-4 sm:px-8 py-5 sm:py-7',
+      headerNavStyle: 'shadcn-sidebar',
+      bottomNavIndicator: 'shadcn-pill',
+      maxContentWidth: 'max-w-7xl',
+      mainPaddingClass: 'px-4 sm:px-6 lg:px-8 py-5 sm:py-6',
     }),
     backdrop: Object.freeze({
       variant: 'none',
       supportsGlass: false,
     }),
     surfaces: Object.freeze({
-      architecture: 'flat-hairline',
+      architecture: 'shadcn-zinc',
       iconContainer: 'bare',
-      kpiLayout: 'hairline-strip',
-      filterRailStyle: 'underline',
+      kpiLayout: 'shadcn-cards',
+      filterRailStyle: 'shadcn-tabs',
       listDivider: 'divide-y divide-line-subtle',
       buttonRadius: 'rounded-[var(--g-radius-btn)]',
       headingWeight: 'font-semibold',
@@ -182,5 +183,5 @@ export const THEME_ARCHITECTURES = Object.freeze({
 });
 
 export function getThemeArchitecture(themeId) {
-  return THEME_ARCHITECTURES[themeId] || THEME_ARCHITECTURES.classic;
+  return THEME_ARCHITECTURES[themeId] || THEME_ARCHITECTURES.minimal;
 }

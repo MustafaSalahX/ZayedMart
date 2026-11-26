@@ -135,6 +135,18 @@ const SCHEDULE_DDL_STATEMENTS = [
   `CREATE INDEX IF NOT EXISTS idx_dayoff_swaps_target_pending ON dayoff_swap_requests(target_employee_id, week_start_date) WHERE status IN ('pending_requester', 'pending_peer', 'pending_manager')`,
 ];
 
+const PROFILE_AVATARS_DDL_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS profile_avatars (
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    avatar_url TEXT DEFAULT '',
+    avatar_preset TEXT DEFAULT '',
+    avatar_color TEXT DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (entity_type, entity_id)
+  )`,
+];
+
 export interface ScheduleSettings {
   swapRequiresManagerApproval: boolean;
   minOnDuty: {
@@ -194,6 +206,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private initialized = false;
   private initPromise: Promise<void> | null = null;
   private cachedSessionSecret = '';
+  private profileAvatarsRemoteReady = false;
+  private profileAvatarsSqliteReady = false;
   private readonly authCache = new Map<string, { auth: AuthContext; expiresAt: number }>();
   private readonly decryptedPinCache = new Map<string, string>();
 
@@ -217,6 +231,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       this.schemaCaps.employeesAvatars &&
       this.schemaCaps.attendanceCctvMeta &&
       this.schemaCaps.walkiePresenceAvatar
+    );
+  }
+
+  public get needsProfileAvatarFallback(): boolean {
+    return !(
+      this.schemaCaps.systemUsersRoleProfiles &&
+      this.schemaCaps.rolePoliciesAvatars &&
+      this.schemaCaps.employeesAvatars
     );
   }
 
@@ -845,6 +867,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         updated_at_ms BIGINT NOT NULL
       )`,
       ...SCHEDULE_DDL_STATEMENTS,
+      ...PROFILE_AVATARS_DDL_STATEMENTS,
     ];
 
     if (this.sqliteDb) {
@@ -855,6 +878,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           // ignore
         }
       }
+      this.profileAvatarsSqliteReady = true;
       if (process.env.ZAYED_SKIP_AUTO_SCHEMA_ALTER !== '1') {
         this.ensureCctvColumnsOnSqlite();
         this.ensureRoleProfilesColumnsOnSqlite();
@@ -866,11 +890,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         const rows = this.useSupabaseRpc
           ? (
               await execSupabaseRpcSql<{ key: string; value: string }>(
-                "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38', 'migration_schedule_tables_v41', 'migration_rbac_schedule_v41', 'migration_cctv_verify_v42', 'migration_rbac_attendance_strict_v42', 'migration_role_profiles_v43', 'migration_rbac_profile_self_v43')"
+                "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38', 'migration_schedule_tables_v41', 'migration_rbac_schedule_v41', 'migration_cctv_verify_v42', 'migration_rbac_attendance_strict_v42', 'migration_role_profiles_v43', 'migration_rbac_profile_self_v43', 'migration_profile_avatars_table_v44')"
               )
             ).rows
           : await this.queryAll<{ key: string; value: string }>(
-              "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38', 'migration_schedule_tables_v41', 'migration_rbac_schedule_v41', 'migration_cctv_verify_v42', 'migration_rbac_attendance_strict_v42', 'migration_role_profiles_v43', 'migration_rbac_profile_self_v43')"
+              "SELECT key, value FROM settings WHERE key IN ('session_hmac_secret', 'migration_rbac_walkie_v38', 'migration_schedule_tables_v41', 'migration_rbac_schedule_v41', 'migration_cctv_verify_v42', 'migration_rbac_attendance_strict_v42', 'migration_role_profiles_v43', 'migration_rbac_profile_self_v43', 'migration_profile_avatars_table_v44')"
             );
         const secretRow = rows.find((r) => r.key === 'session_hmac_secret');
         if (secretRow?.value) {
@@ -887,6 +911,15 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
               await this.upsertSetting('migration_schedule_tables_v41', 'done');
             } catch {
               // ignore non-fatal DDL migration if already provisioned or offline
+            }
+          }
+          const profileAvatarsMigrated = rows.find(
+            (r) => r.key === 'migration_profile_avatars_table_v44'
+          );
+          if (profileAvatarsMigrated?.value !== 'done' || this.needsProfileAvatarFallback) {
+            const ready = await this.ensureProfileAvatarsTable();
+            if (ready && profileAvatarsMigrated?.value !== 'done') {
+              await this.upsertSetting('migration_profile_avatars_table_v44', 'done').catch(() => {});
             }
           }
           const cctvMigrated = rows.find((r) => r.key === 'migration_cctv_verify_v42');
@@ -1662,11 +1695,275 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     await this.upsertSetting(`user_prefs:${userId}`, serialized);
   }
 
+  async ensureProfileAvatarsTable(): Promise<boolean> {
+    try {
+      if (this.pgPool) {
+        if (this.profileAvatarsRemoteReady) return true;
+        for (const sql of PROFILE_AVATARS_DDL_STATEMENTS) {
+          await this.execute(sql);
+        }
+        this.profileAvatarsRemoteReady = true;
+        return true;
+      }
+      if (this.useSupabaseRpc && this.storageMode === 'supabase_postgres') {
+        if (this.profileAvatarsRemoteReady) return true;
+        for (const sql of PROFILE_AVATARS_DDL_STATEMENTS) {
+          await execSupabaseRpcSql(sql);
+        }
+        this.profileAvatarsRemoteReady = true;
+        return true;
+      }
+      if (this.sqliteDb) {
+        if (this.profileAvatarsSqliteReady) return true;
+        for (const sql of PROFILE_AVATARS_DDL_STATEMENTS) {
+          this.sqliteDb.exec(sql);
+        }
+        this.profileAvatarsSqliteReady = true;
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  async saveProfileAvatar(
+    entityType: 'user' | 'employee' | 'role',
+    entityId: string,
+    patch: { avatar_url?: string; avatar_preset?: string; avatar_color?: string },
+    nowIso = new Date().toISOString()
+  ): Promise<void> {
+    if (!entityId) return;
+    const ready = await this.ensureProfileAvatarsTable();
+    if (!ready) return;
+    const existing = await this.queryOne<{
+      avatar_url: string;
+      avatar_preset: string;
+      avatar_color: string;
+    }>(
+      'SELECT avatar_url, avatar_preset, avatar_color FROM profile_avatars WHERE entity_type = ? AND entity_id = ? LIMIT 1',
+      [entityType, entityId]
+    );
+    const nextUrl =
+      patch.avatar_url !== undefined
+        ? String(patch.avatar_url || '').trim()
+        : String(existing?.avatar_url || '').trim();
+    const nextPreset =
+      patch.avatar_preset !== undefined
+        ? String(patch.avatar_preset || '').trim()
+        : String(existing?.avatar_preset || '').trim();
+    const nextColor =
+      patch.avatar_color !== undefined
+        ? String(patch.avatar_color || '').trim()
+        : String(existing?.avatar_color || '').trim();
+
+    await this.execute(
+      `INSERT INTO profile_avatars (entity_type, entity_id, avatar_url, avatar_preset, avatar_color, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (entity_type, entity_id) DO UPDATE SET
+         avatar_url = EXCLUDED.avatar_url,
+         avatar_preset = EXCLUDED.avatar_preset,
+         avatar_color = EXCLUDED.avatar_color,
+         updated_at = EXCLUDED.updated_at`,
+      [entityType, entityId, nextUrl, nextPreset, nextColor, nowIso]
+    );
+  }
+
+  async loadProfileAvatarsMap(): Promise<
+    Map<string, { avatar_url: string; avatar_preset: string; avatar_color: string }>
+  > {
+    const map = new Map<
+      string,
+      { avatar_url: string; avatar_preset: string; avatar_color: string }
+    >();
+    if (!this.needsProfileAvatarFallback) return map;
+    const ready = await this.ensureProfileAvatarsTable();
+    if (!ready) return map;
+    const rows = await this.queryAll<{
+      entity_type: string;
+      entity_id: string;
+      avatar_url: string;
+      avatar_preset: string;
+      avatar_color: string;
+    }>('SELECT entity_type, entity_id, avatar_url, avatar_preset, avatar_color FROM profile_avatars');
+    for (const r of rows) {
+      map.set(`${r.entity_type}:${r.entity_id}`, {
+        avatar_url: String(r.avatar_url || '').trim(),
+        avatar_preset: String(r.avatar_preset || '').trim(),
+        avatar_color: String(r.avatar_color || '').trim(),
+      });
+    }
+    return map;
+  }
+
+  applyProfileAvatarMap(
+    avatarMap: Map<string, { avatar_url: string; avatar_preset: string; avatar_color: string }>,
+    targets: { users?: any[]; employees?: any[]; rolePolicies?: any[] }
+  ): void {
+    if (!avatarMap || avatarMap.size === 0) return;
+    if (!this.schemaCaps.systemUsersRoleProfiles && Array.isArray(targets.users)) {
+      for (const u of targets.users) {
+        if (!u?.id) continue;
+        const entry = avatarMap.get(`user:${u.id}`);
+        if (entry) {
+          u.avatar_url = entry.avatar_url;
+          u.avatar_preset = entry.avatar_preset;
+          if (entry.avatar_color) u.avatar_color = entry.avatar_color;
+        }
+      }
+    }
+    if (!this.schemaCaps.employeesAvatars && Array.isArray(targets.employees)) {
+      for (const e of targets.employees) {
+        if (!e?.id) continue;
+        const entry = avatarMap.get(`employee:${e.id}`);
+        if (entry) {
+          e.avatar_url = entry.avatar_url;
+          e.avatar_preset = entry.avatar_preset;
+          if (entry.avatar_color) e.avatar_color = entry.avatar_color;
+        }
+      }
+    }
+    if (!this.schemaCaps.rolePoliciesAvatars && Array.isArray(targets.rolePolicies)) {
+      for (const rp of targets.rolePolicies) {
+        if (!rp?.role) continue;
+        const entry = avatarMap.get(`role:${rp.role}`);
+        if (entry) {
+          rp.avatar_url = entry.avatar_url;
+          rp.avatar_preset = entry.avatar_preset;
+          if (entry.avatar_color) rp.avatar_color = entry.avatar_color;
+        }
+      }
+    }
+  }
+
+  buildRolePoliciesMapWithFallback(
+    rolePoliciesRows: any[],
+    avatarMap: Map<string, { avatar_url: string; avatar_preset: string; avatar_color: string }>
+  ): Map<string, any> {
+    const map = new Map<string, any>(
+      (rolePoliciesRows || []).map((rp) => [rp.role, { ...rp }])
+    );
+    if (!this.schemaCaps.rolePoliciesAvatars && avatarMap && avatarMap.size > 0) {
+      for (const [key, entry] of avatarMap.entries()) {
+        if (!key.startsWith('role:')) continue;
+        const roleId = key.slice('role:'.length);
+        const existing = map.get(roleId);
+        if (existing) {
+          existing.avatar_url = entry.avatar_url;
+          existing.avatar_preset = entry.avatar_preset;
+          if (entry.avatar_color) existing.avatar_color = entry.avatar_color;
+        } else {
+          map.set(roleId, {
+            role: roleId,
+            avatar_url: entry.avatar_url,
+            avatar_preset: entry.avatar_preset,
+            avatar_color: entry.avatar_color,
+          });
+        }
+      }
+    }
+    return map;
+  }
+
+  async hydrateUserBundle(
+    userRow: any,
+    empRow?: any,
+    rolePolicyRow?: any,
+    roleName?: string
+  ): Promise<{ userRow: any; empRow: any; rolePolicyRow: any }> {
+    if (!this.needsProfileAvatarFallback) {
+      return { userRow, empRow, rolePolicyRow };
+    }
+    const ready = await this.ensureProfileAvatarsTable();
+    if (!ready) {
+      return { userRow, empRow, rolePolicyRow };
+    }
+
+    const conditions: string[] = [];
+    const params: any[] = [];
+    if (userRow?.id && !this.schemaCaps.systemUsersRoleProfiles) {
+      conditions.push("(entity_type = 'user' AND entity_id = ?)");
+      params.push(userRow.id);
+    }
+    const empId = empRow?.id || userRow?.employee_id || '';
+    if (empRow && empId && !this.schemaCaps.employeesAvatars) {
+      conditions.push("(entity_type = 'employee' AND entity_id = ?)");
+      params.push(empId);
+    }
+    const resolvedRole = roleName || userRow?.role || rolePolicyRow?.role || '';
+    if (resolvedRole && !this.schemaCaps.rolePoliciesAvatars) {
+      conditions.push("(entity_type = 'role' AND entity_id = ?)");
+      params.push(resolvedRole);
+    }
+
+    if (conditions.length === 0) {
+      return { userRow, empRow, rolePolicyRow };
+    }
+
+    const rows = await this.queryAll<{
+      entity_type: string;
+      entity_id: string;
+      avatar_url: string;
+      avatar_preset: string;
+      avatar_color: string;
+    }>(
+      `SELECT entity_type, entity_id, avatar_url, avatar_preset, avatar_color
+       FROM profile_avatars
+       WHERE ${conditions.join(' OR ')}`,
+      params
+    );
+
+    const byKey = new Map(rows.map((r) => [`${r.entity_type}:${r.entity_id}`, r]));
+    let nextUser = userRow;
+    let nextEmp = empRow;
+    let nextRolePolicy = rolePolicyRow;
+
+    if (userRow?.id && !this.schemaCaps.systemUsersRoleProfiles) {
+      const uEntry = byKey.get(`user:${userRow.id}`);
+      if (uEntry) {
+        nextUser = {
+          ...userRow,
+          avatar_url: String(uEntry.avatar_url || '').trim(),
+          avatar_preset: String(uEntry.avatar_preset || '').trim(),
+          ...(uEntry.avatar_color ? { avatar_color: String(uEntry.avatar_color).trim() } : {}),
+        };
+      }
+    }
+
+    if (empRow && empId && !this.schemaCaps.employeesAvatars) {
+      const eEntry = byKey.get(`employee:${empId}`);
+      if (eEntry) {
+        nextEmp = {
+          ...empRow,
+          avatar_url: String(eEntry.avatar_url || '').trim(),
+          avatar_preset: String(eEntry.avatar_preset || '').trim(),
+          ...(eEntry.avatar_color ? { avatar_color: String(eEntry.avatar_color).trim() } : {}),
+        };
+      }
+    }
+
+    if (resolvedRole && !this.schemaCaps.rolePoliciesAvatars) {
+      const rEntry = byKey.get(`role:${resolvedRole}`);
+      if (rEntry) {
+        nextRolePolicy = {
+          ...(rolePolicyRow || { role: resolvedRole }),
+          avatar_url: String(rEntry.avatar_url || '').trim(),
+          avatar_preset: String(rEntry.avatar_preset || '').trim(),
+          ...(rEntry.avatar_color ? { avatar_color: String(rEntry.avatar_color).trim() } : {}),
+        };
+      }
+    }
+
+    return { userRow: nextUser, empRow: nextEmp, rolePolicyRow: nextRolePolicy };
+  }
+
   resolveEffectiveAvatarUrl(user?: any, emp?: any, rolePolicy?: any): string {
     const uUrl = String(user?.avatar_url || '').trim();
     if (uUrl) return uUrl;
     const eUrl = String(emp?.avatar_url || '').trim();
     if (eUrl) return eUrl;
+    const explicitPreset = String(user?.avatar_preset || emp?.avatar_preset || '').trim();
+    if (explicitPreset && explicitPreset !== 'role_default') return '';
     const rUrl = String(rolePolicy?.avatar_url || '').trim();
     if (rUrl) return rUrl;
     return '';
@@ -1687,6 +1984,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       role_label: roleMeta.label || userRow.role,
       avatar_color: userRow.avatar_color || rolePolicyRow?.avatar_color || roleMeta.color || '#0B57D0',
       avatar_url: effectiveAvatar,
+      effective_avatar_url: effectiveAvatar,
       own_avatar_url: String(userRow.avatar_url || '').trim(),
       role_default_avatar_url: String(rolePolicyRow?.avatar_url || '').trim(),
       avatar_preset: String(userRow.avatar_preset || empRow?.avatar_preset || rolePolicyRow?.avatar_preset || '').trim(),
@@ -1816,7 +2114,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       return null;
     }
 
-    const [permissions, rolePolicyRow, empRow, preferences] = await Promise.all([
+    const [permissions, rolePolicyRowRaw, empRowRaw, preferences] = await Promise.all([
       this.getRolePermissions(user.role, user.custom_permissions_json),
       this.queryOne<any>('SELECT * FROM role_policies WHERE role = ? LIMIT 1', [user.role]),
       user.employee_id
@@ -1825,31 +2123,46 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       this.loadUserPreferences(user),
     ]);
 
-    const roleMeta = ROLES_METADATA[user.role] || { shortLabel: user.role, label: user.role };
+    const {
+      userRow: hydratedUser,
+      empRow,
+      rolePolicyRow,
+    } = await this.hydrateUserBundle(user, empRowRaw, rolePolicyRowRaw, user.role);
+
+    const roleMeta = ROLES_METADATA[hydratedUser.role] || {
+      shortLabel: hydratedUser.role,
+      label: hydratedUser.role,
+    };
     const actorLabel =
-      user.role === 'kiosk'
+      hydratedUser.role === 'kiosk'
         ? 'كشك العمال'
-        : `${user.display_name} (${roleMeta.shortLabel})`;
-    const effectiveAvatarUrl = this.resolveEffectiveAvatarUrl(user, empRow, rolePolicyRow);
+        : `${hydratedUser.display_name} (${roleMeta.shortLabel})`;
+    const effectiveAvatarUrl = this.resolveEffectiveAvatarUrl(
+      hydratedUser,
+      empRow,
+      rolePolicyRow
+    );
 
     const resolvedAuth: AuthContext = {
       sessionId: session.id,
       user: {
-        id: user.id,
-        username: user.username,
-        display_name: user.display_name,
-        role: user.role,
-        role_label: roleMeta.label || user.role,
-        avatar_color: user.avatar_color || rolePolicyRow?.avatar_color || '#0B57D0',
+        id: hydratedUser.id,
+        username: hydratedUser.username,
+        display_name: hydratedUser.display_name,
+        role: hydratedUser.role,
+        role_label: roleMeta.label || hydratedUser.role,
+        avatar_color: hydratedUser.avatar_color || rolePolicyRow?.avatar_color || '#0B57D0',
         avatar_url: effectiveAvatarUrl,
-        avatar_preset: String(user.avatar_preset || empRow?.avatar_preset || rolePolicyRow?.avatar_preset || '').trim(),
-        employee_id: user.employee_id || '',
+        avatar_preset: String(
+          hydratedUser.avatar_preset || empRow?.avatar_preset || rolePolicyRow?.avatar_preset || ''
+        ).trim(),
+        employee_id: hydratedUser.employee_id || '',
         preferences,
       },
       permissions,
       actorLabel,
       has(perm: string) {
-        return user.role === 'owner' || permissions.includes(perm);
+        return hydratedUser.role === 'owner' || permissions.includes(perm);
       },
     };
     this.authCache.set(rawToken, { auth: resolvedAuth, expiresAt: Date.now() + 10000 });
@@ -2654,6 +2967,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     const defaultsByEmp = new Map<string, any>(defaultRows.map((d) => [d.employee_id, d]));
     const overridesByEmp = new Map<string, any>(overrideRows.map((o) => [o.employee_id, o]));
 
+    if (this.needsProfileAvatarFallback && !this.schemaCaps.employeesAvatars) {
+      const avatarMap = await this.loadProfileAvatarsMap();
+      this.applyProfileAvatarMap(avatarMap, { employees: combinedEmployees });
+    }
+
     return combinedEmployees.map((emp) => ({
       ...emp,
       ...this.enrichEmployeeScheduleDayOff(
@@ -2745,10 +3063,16 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     let dayoffOverrides: any[] = [];
     let rawPendingSwaps: any[] = [];
     let rolePoliciesRows: any[] = [];
+    let profileAvatarsMap = new Map<
+      string,
+      { avatar_url: string; avatar_preset: string; avatar_color: string }
+    >();
 
     if (this.useSupabaseRpc) {
       try {
-        const batchResults = await execSupabaseRpcBatch([
+        const includeProfileAvatarsInBatch =
+          this.needsProfileAvatarFallback && (await this.ensureProfileAvatarsTable());
+        const batchStatements: Array<{ sql: string; params?: any[] }> = [
           { sql: 'SELECT key, value FROM settings' },
           {
             sql: 'SELECT * FROM employees WHERE is_active = 1 ORDER BY department, emp_code, name',
@@ -2810,7 +3134,15 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
           {
             sql: 'SELECT * FROM role_policies',
           },
-        ]);
+          ...(includeProfileAvatarsInBatch
+            ? [
+                {
+                  sql: 'SELECT entity_type, entity_id, avatar_url, avatar_preset, avatar_color FROM profile_avatars',
+                },
+              ]
+            : []),
+        ];
+        const batchResults = await execSupabaseRpcBatch(batchStatements);
 
         this.storageMode = 'supabase_postgres';
         const settingsRows = batchResults[0]?.rows || [];
@@ -2833,6 +3165,15 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         dayoffOverrides = canAttendance || canScheduleRead ? batchResults[13]?.rows || [] : [];
         rawPendingSwaps = canScheduleRead ? batchResults[14]?.rows || [] : [];
         rolePoliciesRows = batchResults[15]?.rows || [];
+        if (includeProfileAvatarsInBatch) {
+          for (const r of batchResults[16]?.rows || []) {
+            profileAvatarsMap.set(`${r.entity_type}:${r.entity_id}`, {
+              avatar_url: String(r.avatar_url || '').trim(),
+              avatar_preset: String(r.avatar_preset || '').trim(),
+              avatar_color: String(r.avatar_color || '').trim(),
+            });
+          }
+        }
       } catch (err) {
         if (this.isServerless) throw err;
         this.storageMode = 'sqlite_local';
@@ -2955,10 +3296,22 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       dayoffOverrides = dayoffOverridesRes;
       rawPendingSwaps = rawPendingSwapsRes;
       rolePoliciesRows = rolePoliciesRes;
+      if (this.needsProfileAvatarFallback) {
+        profileAvatarsMap = await this.loadProfileAvatarsMap();
+      }
     }
 
-    const rolePoliciesByRole = new Map<string, any>(
-      rolePoliciesRows.map((rp) => [rp.role, rp])
+    if (this.needsProfileAvatarFallback) {
+      this.applyProfileAvatarMap(profileAvatarsMap, {
+        users: activeSysUsersAll,
+        employees,
+        rolePolicies: rolePoliciesRows,
+      });
+    }
+
+    const rolePoliciesByRole = this.buildRolePoliciesMapWithFallback(
+      rolePoliciesRows,
+      profileAvatarsMap
     );
 
     let attendanceLogs: any[] = [];
@@ -3478,7 +3831,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         effective_avatar_url: effectiveSelfAvatarUrl,
         role_default_avatar_url: String(rolePolicySelf?.avatar_url || '').trim(),
         avatar_preset: selfAvatarPreset,
-        preferences: this.parsePreferencesJson(userRow?.preferences_json),
+        preferences: this.parsePreferencesJson(
+          userRow?.preferences_json ?? settings[`user_prefs:${userRow?.id}`]
+        ),
         password_changed_at: userRow?.password_changed_at || '',
         username_changed_at: userRow?.username_changed_at || '',
         my_password: myPass,

@@ -23,6 +23,7 @@ import {
 
 const STORAGE_KEYS = {
   theme: 'zayed_theme_v1',
+  themeExplicitV2: 'zayed_theme_explicit_v2',
   modePref: 'zayed_color_mode_v1',
   legacyDark: 'zayed_dark_mode',
   fontFamily: 'zayed_font_family_v2',
@@ -60,12 +61,43 @@ function readInitialBool(key, fallback) {
   return fallback;
 }
 
+function markExplicitThemeV2() {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(STORAGE_KEYS.themeExplicitV2, '1');
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
 function readInitialPrefs() {
   if (typeof window === 'undefined') {
     return { ...DEFAULT_DISPLAY_PREFS };
   }
   try {
-    const theme = normalizeThemeId(localStorage.getItem(STORAGE_KEYS.theme));
+    const explicitV2 = localStorage.getItem(STORAGE_KEYS.themeExplicitV2);
+    const rawTheme = localStorage.getItem(STORAGE_KEYS.theme);
+    let theme;
+    if (explicitV2 !== '1') {
+      if (!rawTheme || rawTheme === 'classic') {
+        theme = 'minimal';
+        try {
+          localStorage.setItem(STORAGE_KEYS.theme, 'minimal');
+        } catch {
+          // ignore
+        }
+      } else {
+        theme = normalizeThemeId(rawTheme);
+        try {
+          localStorage.setItem(STORAGE_KEYS.theme, theme);
+          localStorage.setItem(STORAGE_KEYS.themeExplicitV2, '1');
+        } catch {
+          // ignore
+        }
+      }
+    } else {
+      theme = normalizeThemeId(rawTheme);
+    }
     const rawMode = localStorage.getItem(STORAGE_KEYS.modePref);
     const modePref = rawMode
       ? normalizeModePref(rawMode)
@@ -323,7 +355,10 @@ export function ThemeProvider({
   );
 
   const setTheme = useCallback(
-    (id) => applyThemeTransition({ theme: normalizeThemeId(id) }),
+    (id) => {
+      markExplicitThemeV2();
+      applyThemeTransition({ theme: normalizeThemeId(id) });
+    },
     [applyThemeTransition]
   );
 
@@ -418,7 +453,10 @@ export function ThemeProvider({
     (serverPrefs) => {
       if (!serverPrefs || typeof serverPrefs !== 'object') return;
       const patch = {};
-      if (serverPrefs.theme !== undefined) patch.theme = normalizeThemeId(serverPrefs.theme);
+      if (typeof serverPrefs.theme === 'string' && serverPrefs.theme.trim()) {
+        patch.theme = normalizeThemeId(serverPrefs.theme.trim());
+        markExplicitThemeV2();
+      }
       if (serverPrefs.modePref !== undefined || serverPrefs.mode !== undefined) {
         patch.modePref = normalizeModePref(serverPrefs.modePref ?? serverPrefs.mode);
       }
@@ -460,7 +498,7 @@ export function ThemeProvider({
     () => ({
       theme: prefs.theme,
       effectiveTheme,
-      themeMeta: THEME_MAP[effectiveTheme] || THEME_MAP.classic,
+      themeMeta: THEME_MAP[effectiveTheme] || THEME_MAP.minimal,
       architecture,
       setTheme,
       modePref: prefs.modePref,
@@ -523,9 +561,9 @@ export function ThemeProvider({
 
 const FALLBACK_THEME_CTX = Object.freeze({
   ...DEFAULT_DISPLAY_PREFS,
-  effectiveTheme: 'classic',
-  themeMeta: THEME_MAP.classic,
-  architecture: getThemeArchitecture('classic'),
+  effectiveTheme: 'minimal',
+  themeMeta: THEME_MAP.minimal,
+  architecture: getThemeArchitecture('minimal'),
   resolvedMode: 'light',
   darkMode: false,
   isKioskLocked: false,
@@ -555,5 +593,5 @@ export function useTheme() {
 
 export function useThemeArchitecture() {
   const { architecture } = useTheme();
-  return architecture || getThemeArchitecture('classic');
+  return architecture || getThemeArchitecture('minimal');
 }

@@ -17,8 +17,15 @@ import {
   SkeletonKpiStrip,
   SkeletonList,
   StatusDot,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
   ToggleSwitch,
 } from './ui/index.js';
+import { useThemeArchitecture } from '../lib/themeContext.jsx';
 import {
   postActionWithOfflineSupport,
   apiRequest,
@@ -134,6 +141,8 @@ export default function AttendanceView({
   onToast,
   onPreviewImage,
 }) {
+  const arch = useThemeArchitecture();
+  const isMinimalTable = arch.id === 'minimal';
   const [, setTick] = useState(0);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDept, setSelectedDept] = useState('الكل');
@@ -293,6 +302,14 @@ export default function AttendanceView({
     }
     return attendanceLogs;
   }, [attendanceLogs, statusFilter]);
+
+  const employeeById = useMemo(() => {
+    const map = new Map();
+    for (const emp of employees) {
+      if (emp?.id) map.set(emp.id, emp);
+    }
+    return map;
+  }, [employees]);
 
   const presentCount = useMemo(
     () => employees.filter((e) => e.currentStatus === 'present').length,
@@ -739,6 +756,276 @@ export default function AttendanceView({
     });
   }
 
+  function getEmployeeRowState(emp) {
+    const breakMins = getBreakElapsedMinutes(emp);
+    const empAllowedBreak = emp.allowedBreakMinutes || maxBreakMinutes || 30;
+    const breakExceeded =
+      emp.currentStatus === 'on_break' && breakMins > empAllowedBreak;
+    const cctvStatus = getEmployeeCctvStatus(emp);
+    const canEmpWrite = canActOnEmployee();
+    const isSelfCard = isOwnEmployeeRecord(emp);
+    const isCardBusy = busyEmployeeId === emp.id;
+    const canCheckInAfterCheckout = Boolean(
+      emp.nextCheckInAvailability?.canCheckIn
+    );
+    const nextWindowTimeStr =
+      emp.nextCheckInAvailability?.windowOpenTimeStr ||
+      emp.shift_start ||
+      '08:00';
+
+    const isOffToday =
+      emp.currentStatus === 'absent' &&
+      emp.isScheduledOff &&
+      !emp.workedOnDayOff;
+
+    const dotTone = isOffToday
+      ? 'purple'
+      : emp.currentStatus === 'present'
+      ? 'success'
+      : emp.currentStatus === 'on_break'
+      ? breakExceeded
+        ? 'danger'
+        : 'warning'
+      : emp.currentStatus === 'checked_out'
+      ? 'primary'
+      : 'neutral';
+
+    const dotLabel = isOffToday
+      ? 'إجازة'
+      : emp.currentStatus === 'present'
+      ? 'حاضر'
+      : emp.currentStatus === 'on_break'
+      ? `بريك ${breakMins}د`
+      : emp.currentStatus === 'checked_out'
+      ? 'منصرف'
+      : 'غائب';
+
+    const metaParts = [
+      emp.department,
+      `${emp.shift_start || '08:00'}–${emp.shift_end || '20:00'}`,
+      emp.checkInTime ? extractLocalHHMM(emp.checkInTime) : '',
+      isOwner && emp.emp_code ? `#${emp.emp_code}` : '',
+    ].filter(Boolean);
+
+    return {
+      breakMins,
+      empAllowedBreak,
+      breakExceeded,
+      cctvStatus,
+      canEmpWrite,
+      isSelfCard,
+      isCardBusy,
+      canCheckInAfterCheckout,
+      nextWindowTimeStr,
+      dotTone,
+      dotLabel,
+      metaParts,
+    };
+  }
+
+  function renderEmployeeActions(emp, row) {
+    return (
+      <>
+        {canVerify &&
+          emp.latestLogId &&
+          (row.cctvStatus === 'pending' || row.cctvStatus === 'mismatch') && (
+            <Button
+              variant={row.cctvStatus === 'mismatch' ? 'dangerTonal' : 'secondary'}
+              size="sm"
+              loading={verifyBusyLogId === emp.latestLogId}
+              onClick={(e) => handleVerifyLog(emp.latestLogId, e)}
+            >
+              تأكيد
+            </Button>
+          )}
+
+        {row.canEmpWrite && emp.currentStatus === 'absent' && (
+          <Button
+            variant="success"
+            size="sm"
+            loading={row.isCardBusy}
+            disabled={submitting && !row.isCardBusy}
+            onClick={(e) => handleQuickCardAction(emp, 'check_in', e)}
+          >
+            حضور
+          </Button>
+        )}
+
+        {row.canEmpWrite && emp.currentStatus === 'present' && (
+          <>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={submitting}
+              onClick={() => openEmployeeModal(emp, 30)}
+            >
+              بريك
+            </Button>
+            <Button
+              variant="dangerTonal"
+              size="sm"
+              disabled={submitting}
+              onClick={() => setConfirmCheckoutEmp(emp)}
+            >
+              انصراف
+            </Button>
+          </>
+        )}
+
+        {row.canEmpWrite && emp.currentStatus === 'on_break' && (
+          <>
+            <Button
+              variant="primary"
+              size="sm"
+              loading={row.isCardBusy}
+              disabled={submitting && !row.isCardBusy}
+              onClick={(e) => handleQuickCardAction(emp, 'break_end', e)}
+            >
+              عودة
+            </Button>
+            <Button
+              variant="dangerTonal"
+              size="sm"
+              disabled={submitting}
+              onClick={() => setConfirmCheckoutEmp(emp)}
+            >
+              انصراف
+            </Button>
+          </>
+        )}
+
+        {row.canEmpWrite && emp.currentStatus === 'checked_out' && (
+          <>
+            {row.canCheckInAfterCheckout ? (
+              <Button
+                variant="success"
+                size="sm"
+                loading={row.isCardBusy}
+                disabled={submitting && !row.isCardBusy}
+                onClick={(e) => handleQuickCardAction(emp, 'check_in', e)}
+              >
+                حضور
+              </Button>
+            ) : (
+              <>
+                <span className="num-ltr text-xs text-ink-muted px-1">
+                  يفتح {row.nextWindowTimeStr}
+                </span>
+                {canManageRecords && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={submitting}
+                    onClick={() => setConfirmReopenEmp(emp)}
+                  >
+                    إعادة فتح
+                  </Button>
+                )}
+              </>
+            )}
+          </>
+        )}
+      </>
+    );
+  }
+
+  function renderLogActions(log, meta, logCctvStatus) {
+    return (
+      <>
+        {log.proof_url && (
+          <button
+            type="button"
+            onClick={() =>
+              onPreviewImage?.(
+                log.proof_url,
+                `${log.employee_name} - ${meta.label}`
+              )
+            }
+            aria-label="عرض الإثبات"
+            className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-primary inline-flex items-center justify-center cursor-pointer"
+          >
+            <Icon name="image" size={18} />
+          </button>
+        )}
+
+        {canVerify && logCctvStatus !== 'confirmed' && (
+          <Button
+            variant="secondary"
+            size="sm"
+            loading={verifyBusyLogId === log.id}
+            onClick={(e) => handleVerifyLog(log.id, e)}
+          >
+            تأكيد
+          </Button>
+        )}
+
+        {canVerify && (
+          <button
+            type="button"
+            onClick={(e) => openCctvReviewForLog(log, e)}
+            aria-label="مراجعة بالكاميرا"
+            className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink inline-flex items-center justify-center cursor-pointer"
+          >
+            <Icon name="videocam" size={18} />
+          </button>
+        )}
+
+        {canManageRecords && (
+          <>
+            <button
+              type="button"
+              onClick={() => openEditAttendanceLog(log)}
+              aria-label={`تعديل حركة ${log.employee_name}`}
+              className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink inline-flex items-center justify-center cursor-pointer"
+            >
+              <Icon name="edit" size={18} />
+            </button>
+            <button
+              type="button"
+              onClick={() => setDeleteLogTarget(log)}
+              aria-label={`حذف حركة ${log.employee_name}`}
+              className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-danger-bg text-ink-muted hover:text-danger inline-flex items-center justify-center cursor-pointer"
+            >
+              <Icon name="delete" size={18} />
+            </button>
+          </>
+        )}
+      </>
+    );
+  }
+
+  function renderCctvStatusCell(status, observedTime = '') {
+    if (status === 'none') {
+      return <span className="text-xs text-ink-muted">—</span>;
+    }
+    const tone =
+      status === 'confirmed'
+        ? 'success'
+        : status === 'mismatch'
+        ? 'danger'
+        : 'warning';
+    const label =
+      status === 'confirmed'
+        ? 'مؤكد'
+        : status === 'mismatch'
+        ? 'تعارض'
+        : 'بانتظار';
+    return (
+      <div className="inline-flex flex-col gap-0.5">
+        <StatusDot
+          tone={tone}
+          label={label}
+          tintedText={status === 'mismatch'}
+        />
+        {observedTime && (
+          <span className="num-ltr text-[11px] text-ink-muted">
+            DVR {observedTime}
+          </span>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-5">
       {/* 1. Borderless Header & Toolbar */}
@@ -883,229 +1170,203 @@ export default function AttendanceView({
             }
           />
         ) : (
-          <GroupedList>
-            {filteredEmployees.map((emp) => {
-              const breakMins = getBreakElapsedMinutes(emp);
-              const empAllowedBreak = emp.allowedBreakMinutes || maxBreakMinutes || 30;
-              const breakExceeded =
-                emp.currentStatus === 'on_break' && breakMins > empAllowedBreak;
-              const cctvStatus = getEmployeeCctvStatus(emp);
-              const canEmpWrite = canActOnEmployee();
-              const isSelfCard = isOwnEmployeeRecord(emp);
-              const isCardBusy = busyEmployeeId === emp.id;
-              const canCheckInAfterCheckout = Boolean(
-                emp.nextCheckInAvailability?.canCheckIn
-              );
-              const nextWindowTimeStr =
-                emp.nextCheckInAvailability?.windowOpenTimeStr ||
-                emp.shift_start ||
-                '08:00';
+          <>
+            {isMinimalTable && (
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead className="min-w-[200px]">الموظف</TableHead>
+                      <TableHead>القسم والشفت</TableHead>
+                      <TableHead>الحالة</TableHead>
+                      <TableHead>الوقت والمدة</TableHead>
+                      <TableHead>الكاميرا</TableHead>
+                      <TableHead className="text-end">إجراءات</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filteredEmployees.map((emp) => {
+                      const row = getEmployeeRowState(emp);
+                      const shiftLabel =
+                        emp.shiftDurationLabel ||
+                        formatShiftDurationArabicClient(
+                          emp.shiftDurationHours ||
+                            computeShiftDurationHoursClient(emp.shift_start, emp.shift_end)
+                        );
+                      const punchStr = emp.checkInTime
+                        ? emp.checkOutTime
+                          ? `${extractLocalHHMM(emp.checkInTime)} – ${extractLocalHHMM(emp.checkOutTime)}`
+                          : extractLocalHHMM(emp.checkInTime)
+                        : '—';
 
-              const isOffToday =
-                emp.currentStatus === 'absent' &&
-                emp.isScheduledOff &&
-                !emp.workedOnDayOff;
+                      return (
+                        <TableRow
+                          key={emp.id}
+                          className={row.isSelfCard ? 'bg-surface-tint' : undefined}
+                        >
+                          <TableCell>
+                            <button
+                              type="button"
+                              onClick={() => openEmployeeModal(emp)}
+                              className="flex items-center gap-2.5 min-w-0 text-start bg-transparent border-0 p-0 cursor-pointer group"
+                            >
+                              <RoleAvatar
+                                src={emp.avatar_url || ''}
+                                name={emp.name}
+                                role={emp.system_role || ''}
+                                color={emp.avatar_color || ''}
+                                preset="initials_gradient"
+                                size="sm"
+                                shape="circle"
+                              />
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-ink truncate group-hover:underline">
+                                  {emp.name}
+                                </div>
+                                {isOwner && emp.emp_code && (
+                                  <div className="num-ltr text-xs text-ink-muted">
+                                    #{emp.emp_code}
+                                  </div>
+                                )}
+                              </div>
+                            </button>
+                          </TableCell>
+                          <TableCell>
+                            <div className="text-sm text-ink truncate">
+                              {emp.department || '—'}
+                            </div>
+                            <div className="num-ltr text-xs text-ink-muted">
+                              {emp.shift_start || '08:00'}–{emp.shift_end || '20:00'}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex flex-col gap-0.5">
+                              <StatusDot
+                                tone={row.dotTone}
+                                label={row.dotLabel}
+                                tintedText={row.dotTone === 'danger' || row.dotTone === 'warning'}
+                              />
+                              {emp.lateMinutes > 0 && (
+                                <span className="num-ltr text-xs text-warning font-medium">
+                                  تأخير {emp.lateMinutes}د
+                                </span>
+                              )}
+                              {row.breakExceeded && (
+                                <span className="num-ltr text-xs text-danger font-medium">
+                                  تجاوز +{row.breakMins - row.empAllowedBreak}د
+                                </span>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="num-ltr text-sm font-medium text-ink">
+                              {punchStr}
+                            </div>
+                            <div className="num-ltr text-xs text-ink-muted">
+                              {emp.totalBreakMinutes > 0
+                                ? `بريك ${emp.totalBreakMinutes}د`
+                                : shiftLabel}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            {renderCctvStatusCell(
+                              row.cctvStatus,
+                              row.cctvStatus !== 'none' ? emp.latestCctvObservedTime || '' : ''
+                            )}
+                          </TableCell>
+                          <TableCell className="text-end">
+                            <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                              {renderEmployeeActions(emp, row)}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
 
-              const dotTone = isOffToday
-                ? 'purple'
-                : emp.currentStatus === 'present'
-                ? 'success'
-                : emp.currentStatus === 'on_break'
-                ? breakExceeded
-                  ? 'danger'
-                  : 'warning'
-                : emp.currentStatus === 'checked_out'
-                ? 'primary'
-                : 'neutral';
+            <div className={isMinimalTable ? 'md:hidden' : undefined}>
+              <GroupedList>
+                {filteredEmployees.map((emp) => {
+                  const row = getEmployeeRowState(emp);
 
-              const dotLabel = isOffToday
-                ? 'إجازة'
-                : emp.currentStatus === 'present'
-                ? 'حاضر'
-                : emp.currentStatus === 'on_break'
-                ? `بريك ${breakMins}د`
-                : emp.currentStatus === 'checked_out'
-                ? 'منصرف'
-                : 'غائب';
-
-              const metaParts = [
-                emp.department,
-                `${emp.shift_start || '08:00'}–${emp.shift_end || '20:00'}`,
-                emp.checkInTime ? extractLocalHHMM(emp.checkInTime) : '',
-                isOwner && emp.emp_code ? `#${emp.emp_code}` : '',
-              ].filter(Boolean);
-
-              return (
-                <div
-                  key={emp.id}
-                  className={`min-h-[60px] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
-                    isSelfCard ? 'bg-surface-tint' : ''
-                  }`}
-                >
-                  {/* Tappable Employee Info -> Details Sheet */}
-                  <button
-                    type="button"
-                    onClick={() => openEmployeeModal(emp)}
-                    className="flex items-center gap-3 min-w-0 flex-1 text-start bg-transparent border-0 p-0 cursor-pointer"
-                  >
-                    <RoleAvatar
-                      src={emp.avatar_url || ''}
-                      name={emp.name}
-                      role={emp.system_role || ''}
-                      color={emp.avatar_color || ''}
-                      preset="initials_gradient"
-                      size="sm"
-                      shape="circle"
-                    />
-
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 flex-wrap min-w-0">
-                        <span className="text-sm font-semibold text-ink truncate">
-                          {emp.name}
-                        </span>
-                        <StatusDot
-                          tone={dotTone}
-                          label={dotLabel}
-                          tintedText={dotTone === 'danger' || dotTone === 'warning'}
+                  return (
+                    <div
+                      key={emp.id}
+                      className={`min-h-[60px] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                        row.isSelfCard ? 'bg-surface-tint' : ''
+                      }`}
+                    >
+                      {/* Tappable Employee Info -> Details Sheet */}
+                      <button
+                        type="button"
+                        onClick={() => openEmployeeModal(emp)}
+                        className="flex items-center gap-3 min-w-0 flex-1 text-start bg-transparent border-0 p-0 cursor-pointer"
+                      >
+                        <RoleAvatar
+                          src={emp.avatar_url || ''}
+                          name={emp.name}
+                          role={emp.system_role || ''}
+                          color={emp.avatar_color || ''}
+                          preset="initials_gradient"
+                          size="sm"
+                          shape="circle"
                         />
-                        {cctvStatus === 'confirmed' && (
-                          <Icon
-                            name="verified"
-                            size={14}
-                            filled
-                            className="text-success shrink-0"
-                            ariaLabel="مؤكد بالكاميرا"
-                          />
-                        )}
-                      </div>
 
-                      <div className="text-xs text-ink-muted truncate num-ltr mt-0.5">
-                        {metaParts.join(' · ')}
-                        {emp.lateMinutes > 0 && (
-                          <span className="text-warning font-medium">
-                            {' '}
-                            · تأخير {emp.lateMinutes}د
-                          </span>
-                        )}
-                        {cctvStatus === 'mismatch' && (
-                          <span className="text-danger font-medium"> · تعارض كاميرا</span>
-                        )}
-                        {breakExceeded && (
-                          <span className="text-danger font-medium">
-                            {' '}
-                            · تجاوز +{breakMins - empAllowedBreak}د
-                          </span>
-                        )}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap min-w-0">
+                            <span className="text-sm font-semibold text-ink truncate">
+                              {emp.name}
+                            </span>
+                            <StatusDot
+                              tone={row.dotTone}
+                              label={row.dotLabel}
+                              tintedText={row.dotTone === 'danger' || row.dotTone === 'warning'}
+                            />
+                            {row.cctvStatus === 'confirmed' && (
+                              <Icon
+                                name="verified"
+                                size={14}
+                                filled
+                                className="text-success shrink-0"
+                                ariaLabel="مؤكد بالكاميرا"
+                              />
+                            )}
+                          </div>
+
+                          <div className="text-xs text-ink-muted truncate num-ltr mt-0.5">
+                            {row.metaParts.join(' · ')}
+                            {emp.lateMinutes > 0 && (
+                              <span className="text-warning font-medium">
+                                {' '}
+                                · تأخير {emp.lateMinutes}د
+                              </span>
+                            )}
+                            {row.cctvStatus === 'mismatch' && (
+                              <span className="text-danger font-medium"> · تعارض كاميرا</span>
+                            )}
+                            {row.breakExceeded && (
+                              <span className="text-danger font-medium">
+                                {' '}
+                                · تجاوز +{row.breakMins - row.empAllowedBreak}د
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </button>
+
+                      {/* End Action Strip */}
+                      <div className="flex items-center justify-end gap-1.5 flex-wrap shrink-0">
+                        {renderEmployeeActions(emp, row)}
                       </div>
                     </div>
-                  </button>
-
-                  {/* End Action Strip */}
-                  <div className="flex items-center justify-end gap-1.5 flex-wrap shrink-0">
-                    {canVerify &&
-                      emp.latestLogId &&
-                      (cctvStatus === 'pending' || cctvStatus === 'mismatch') && (
-                        <Button
-                          variant={cctvStatus === 'mismatch' ? 'dangerTonal' : 'secondary'}
-                          size="sm"
-                          loading={verifyBusyLogId === emp.latestLogId}
-                          onClick={(e) => handleVerifyLog(emp.latestLogId, e)}
-                        >
-                          تأكيد
-                        </Button>
-                      )}
-
-                    {canEmpWrite && emp.currentStatus === 'absent' && (
-                      <Button
-                        variant="success"
-                        size="sm"
-                        loading={isCardBusy}
-                        disabled={submitting && !isCardBusy}
-                        onClick={(e) => handleQuickCardAction(emp, 'check_in', e)}
-                      >
-                        حضور
-                      </Button>
-                    )}
-
-                    {canEmpWrite && emp.currentStatus === 'present' && (
-                      <>
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          disabled={submitting}
-                          onClick={() => openEmployeeModal(emp, 30)}
-                        >
-                          بريك
-                        </Button>
-                        <Button
-                          variant="dangerTonal"
-                          size="sm"
-                          disabled={submitting}
-                          onClick={() => setConfirmCheckoutEmp(emp)}
-                        >
-                          انصراف
-                        </Button>
-                      </>
-                    )}
-
-                    {canEmpWrite && emp.currentStatus === 'on_break' && (
-                      <>
-                        <Button
-                          variant="primary"
-                          size="sm"
-                          loading={isCardBusy}
-                          disabled={submitting && !isCardBusy}
-                          onClick={(e) => handleQuickCardAction(emp, 'break_end', e)}
-                        >
-                          عودة
-                        </Button>
-                        <Button
-                          variant="dangerTonal"
-                          size="sm"
-                          disabled={submitting}
-                          onClick={() => setConfirmCheckoutEmp(emp)}
-                        >
-                          انصراف
-                        </Button>
-                      </>
-                    )}
-
-                    {canEmpWrite && emp.currentStatus === 'checked_out' && (
-                      <>
-                        {canCheckInAfterCheckout ? (
-                          <Button
-                            variant="success"
-                            size="sm"
-                            loading={isCardBusy}
-                            disabled={submitting && !isCardBusy}
-                            onClick={(e) => handleQuickCardAction(emp, 'check_in', e)}
-                          >
-                            حضور
-                          </Button>
-                        ) : (
-                          <>
-                            <span className="num-ltr text-xs text-ink-muted px-1">
-                              يفتح {nextWindowTimeStr}
-                            </span>
-                            {canManageRecords && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                disabled={submitting}
-                                onClick={() => setConfirmReopenEmp(emp)}
-                              >
-                                إعادة فتح
-                              </Button>
-                            )}
-                          </>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </GroupedList>
+                  );
+                })}
+              </GroupedList>
+            </div>
+          </>
         )}
       </div>
 
@@ -1138,133 +1399,182 @@ export default function AttendanceView({
               }
             />
           ) : (
-            <GroupedList>
-              {displayedLogs.map((log) => {
-                const meta = ACTION_META[log.action_type] || ACTION_META.check_in;
-                const logCctvStatus = getLogCctvStatus(log);
-                const subParts = [
-                  log.department,
-                  log.recorded_by,
-                  log.late_minutes > 0 ? `تأخير ${log.late_minutes}د` : '',
-                  log.break_duration_minutes > 0 ? `بريك ${log.break_duration_minutes}د` : '',
-                  log.cctv_observed_time ? `DVR ${log.cctv_observed_time}` : '',
-                  log.note || log.break_reason || '',
-                ].filter(Boolean);
+            <>
+              {isMinimalTable && (
+                <div className="hidden md:block">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="hover:bg-transparent">
+                        <TableHead className="min-w-[180px]">الموظف</TableHead>
+                        <TableHead>القسم / المسجل</TableHead>
+                        <TableHead>الحركة</TableHead>
+                        <TableHead>الوقت والمدة</TableHead>
+                        <TableHead>الكاميرا</TableHead>
+                        <TableHead className="text-end">إجراءات</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {displayedLogs.map((log) => {
+                        const meta = ACTION_META[log.action_type] || ACTION_META.check_in;
+                        const logCctvStatus = getLogCctvStatus(log);
+                        const empMatch = employeeById.get(log.employee_id);
+                        const noteText = log.note || log.break_reason || '';
 
-                return (
-                  <div
-                    key={log.id}
-                    className="min-h-[54px] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                      <StatusDot
-                        tone={logCctvStatus === 'mismatch' ? 'danger' : meta.dotTone}
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-                          <span className="text-xs sm:text-sm font-medium text-ink truncate">
-                            {meta.label} ·{' '}
-                            <button
-                              type="button"
-                              onClick={() =>
-                                onOpenPersonLog?.(log.employee_id, log.employee_name)
-                              }
-                              className="font-semibold hover:underline text-ink bg-transparent border-0 p-0 cursor-pointer"
-                            >
-                              {log.employee_name}
-                            </button>
-                          </span>
-                          {logCctvStatus === 'confirmed' && (
-                            <Icon
-                              name="verified"
-                              size={14}
-                              filled
-                              className="text-success shrink-0"
-                              ariaLabel="مؤكد بالكاميرا"
-                            />
-                          )}
-                          {logCctvStatus === 'mismatch' && (
-                            <span className="text-xs font-medium text-danger shrink-0">
-                              تعارض
-                            </span>
-                          )}
-                        </div>
-                        {subParts.length > 0 && (
-                          <div className="text-xs text-ink-muted truncate">
-                            {subParts.join(' · ')}
+                        return (
+                          <TableRow key={log.id}>
+                            <TableCell>
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <RoleAvatar
+                                  src={empMatch?.avatar_url || ''}
+                                  name={log.employee_name}
+                                  role={empMatch?.system_role || ''}
+                                  color={empMatch?.avatar_color || ''}
+                                  preset="initials_gradient"
+                                  size="xs"
+                                  shape="circle"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    onOpenPersonLog?.(log.employee_id, log.employee_name)
+                                  }
+                                  className="text-sm font-semibold text-ink hover:underline text-start bg-transparent border-0 p-0 cursor-pointer truncate"
+                                >
+                                  {log.employee_name}
+                                </button>
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <div className="text-sm text-ink truncate">
+                                {log.department || empMatch?.department || '—'}
+                              </div>
+                              {log.recorded_by && (
+                                <div className="text-xs text-ink-muted truncate">
+                                  {log.recorded_by}
+                                </div>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex flex-col gap-0.5 min-w-0">
+                                <StatusDot
+                                  tone={logCctvStatus === 'mismatch' ? 'danger' : meta.dotTone}
+                                  label={meta.label}
+                                />
+                                {noteText && (
+                                  <span className="text-xs text-ink-muted truncate max-w-[200px]">
+                                    {noteText}
+                                  </span>
+                                )}
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <div className="num-ltr text-sm font-medium text-ink">
+                                {extractLocalHHMM(log.timestamp) || '—'}
+                              </div>
+                              {(log.late_minutes > 0 || log.break_duration_minutes > 0) && (
+                                <div className="num-ltr text-xs text-ink-muted">
+                                  {[
+                                    log.late_minutes > 0 ? `تأخير ${log.late_minutes}د` : '',
+                                    log.break_duration_minutes > 0
+                                      ? `بريك ${log.break_duration_minutes}د`
+                                      : '',
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' · ')}
+                                </div>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {renderCctvStatusCell(
+                                logCctvStatus,
+                                log.cctv_observed_time || ''
+                              )}
+                            </TableCell>
+                            <TableCell className="text-end">
+                              <div className="flex items-center justify-end gap-1 flex-wrap">
+                                {renderLogActions(log, meta, logCctvStatus)}
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+
+              <div className={isMinimalTable ? 'md:hidden' : undefined}>
+                <GroupedList>
+                  {displayedLogs.map((log) => {
+                    const meta = ACTION_META[log.action_type] || ACTION_META.check_in;
+                    const logCctvStatus = getLogCctvStatus(log);
+                    const subParts = [
+                      log.department,
+                      log.recorded_by,
+                      log.late_minutes > 0 ? `تأخير ${log.late_minutes}د` : '',
+                      log.break_duration_minutes > 0 ? `بريك ${log.break_duration_minutes}د` : '',
+                      log.cctv_observed_time ? `DVR ${log.cctv_observed_time}` : '',
+                      log.note || log.break_reason || '',
+                    ].filter(Boolean);
+
+                    return (
+                      <div
+                        key={log.id}
+                        className="min-h-[54px] px-3.5 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                          <StatusDot
+                            tone={logCctvStatus === 'mismatch' ? 'danger' : meta.dotTone}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                              <span className="text-xs sm:text-sm font-medium text-ink truncate">
+                                {meta.label} ·{' '}
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    onOpenPersonLog?.(log.employee_id, log.employee_name)
+                                  }
+                                  className="font-semibold hover:underline text-ink bg-transparent border-0 p-0 cursor-pointer"
+                                >
+                                  {log.employee_name}
+                                </button>
+                              </span>
+                              {logCctvStatus === 'confirmed' && (
+                                <Icon
+                                  name="verified"
+                                  size={14}
+                                  filled
+                                  className="text-success shrink-0"
+                                  ariaLabel="مؤكد بالكاميرا"
+                                />
+                              )}
+                              {logCctvStatus === 'mismatch' && (
+                                <span className="text-xs font-medium text-danger shrink-0">
+                                  تعارض
+                                </span>
+                              )}
+                            </div>
+                            {subParts.length > 0 && (
+                              <div className="text-xs text-ink-muted truncate">
+                                {subParts.join(' · ')}
+                              </div>
+                            )}
                           </div>
-                        )}
+                        </div>
+
+                        <div className="w-full sm:w-auto flex items-center justify-between sm:justify-end gap-1.5 flex-wrap pt-1 sm:pt-0 shrink-0">
+                          <span className="num-ltr text-xs font-medium text-ink-muted px-1">
+                            {extractLocalHHMM(log.timestamp)}
+                          </span>
+                          {renderLogActions(log, meta, logCctvStatus)}
+                        </div>
                       </div>
-                    </div>
-
-                    <div className="w-full sm:w-auto flex items-center justify-between sm:justify-end gap-1.5 flex-wrap pt-1 sm:pt-0 shrink-0">
-                      <span className="num-ltr text-xs font-medium text-ink-muted px-1">
-                        {extractLocalHHMM(log.timestamp)}
-                      </span>
-
-                      {log.proof_url && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onPreviewImage?.(
-                              log.proof_url,
-                              `${log.employee_name} - ${meta.label}`
-                            )
-                          }
-                          aria-label="عرض الإثبات"
-                          className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-primary inline-flex items-center justify-center cursor-pointer"
-                        >
-                          <Icon name="image" size={18} />
-                        </button>
-                      )}
-
-                      {canVerify && logCctvStatus !== 'confirmed' && (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          loading={verifyBusyLogId === log.id}
-                          onClick={(e) => handleVerifyLog(log.id, e)}
-                        >
-                          تأكيد
-                        </Button>
-                      )}
-
-                      {canVerify && (
-                        <button
-                          type="button"
-                          onClick={(e) => openCctvReviewForLog(log, e)}
-                          aria-label="مراجعة بالكاميرا"
-                          className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink inline-flex items-center justify-center cursor-pointer"
-                        >
-                          <Icon name="videocam" size={18} />
-                        </button>
-                      )}
-
-                      {canManageRecords && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => openEditAttendanceLog(log)}
-                            aria-label={`تعديل حركة ${log.employee_name}`}
-                            className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-surface-2 text-ink-muted hover:text-ink inline-flex items-center justify-center cursor-pointer"
-                          >
-                            <Icon name="edit" size={18} />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setDeleteLogTarget(log)}
-                            aria-label={`حذف حركة ${log.employee_name}`}
-                            className="w-11 h-11 sm:w-9 sm:h-9 rounded-[var(--g-radius-btn)] bg-transparent hover:bg-danger-bg text-ink-muted hover:text-danger inline-flex items-center justify-center cursor-pointer"
-                          >
-                            <Icon name="delete" size={18} />
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </GroupedList>
+                    );
+                  })}
+                </GroupedList>
+              </div>
+            </>
           )}
         </section>
       )}

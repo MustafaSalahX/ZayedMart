@@ -208,7 +208,7 @@ export class SettingsController {
       [userId]
     );
     if (!userRow) return null;
-    const [empRow, rolePolicyRow, preferences] = await Promise.all([
+    const [empRowRaw, rolePolicyRowRaw, preferences] = await Promise.all([
       userRow.employee_id
         ? this.db.queryOne<any>('SELECT * FROM employees WHERE id = ? LIMIT 1', [
             userRow.employee_id,
@@ -220,8 +220,13 @@ export class SettingsController {
       ),
       this.db.loadUserPreferences(userRow),
     ]);
+    const {
+      userRow: hydratedUser,
+      empRow,
+      rolePolicyRow,
+    } = await this.db.hydrateUserBundle(userRow, empRowRaw, rolePolicyRowRaw, userRow.role);
     return {
-      ...this.db.buildPublicUserPayload(userRow, empRow, rolePolicyRow),
+      ...this.db.buildPublicUserPayload(hydratedUser, empRow, rolePolicyRow),
       preferences,
     };
   }
@@ -240,13 +245,19 @@ export class SettingsController {
   ) {
     if (this.rejectIfKiosk(auth, res)) return;
     try {
-      const userRow = await this.db.queryOne<any>(
+      const rawUserRow = await this.db.queryOne<any>(
         'SELECT * FROM system_users WHERE id = ? LIMIT 1',
         [auth.user.id]
       );
-      if (!userRow) {
+      if (!rawUserRow) {
         return res.status(404).json({ ok: false, error: 'الحساب غير موجود' });
       }
+      const { userRow } = await this.db.hydrateUserBundle(
+        rawUserRow,
+        null,
+        null,
+        rawUserRow.role
+      );
 
       let nextDisplayName = userRow.display_name;
       if (body?.display_name !== undefined) {
@@ -300,6 +311,22 @@ export class SettingsController {
            WHERE id = ?`,
           [nextDisplayName, nextColor, nowIso, userRow.id]
         );
+        if (
+          body?.avatar_preset !== undefined ||
+          body?.avatar_color !== undefined ||
+          oldAvatarToDelete
+        ) {
+          await this.db.saveProfileAvatar(
+            'user',
+            userRow.id,
+            {
+              avatar_url: nextAvatarUrl,
+              avatar_preset: nextPreset,
+              avatar_color: nextColor,
+            },
+            nowIso
+          );
+        }
       }
 
       if (userRow.employee_id) {
@@ -344,11 +371,29 @@ export class SettingsController {
             [nextDisplayName, nextColor, nowIso, userRow.employee_id]
           );
         }
+
+        if (
+          !this.db.schemaCaps.employeesAvatars &&
+          (body?.avatar_preset !== undefined || body?.avatar_color !== undefined || oldAvatarToDelete)
+        ) {
+          await this.db.saveProfileAvatar(
+            'employee',
+            userRow.employee_id,
+            {
+              avatar_url: nextAvatarUrl,
+              avatar_preset: nextPreset,
+              avatar_color: nextColor,
+            },
+            nowIso
+          );
+        }
       }
 
       if (oldAvatarToDelete) {
         await this.storage.deleteManagedAvatar(oldAvatarToDelete);
       }
+
+      this.db.invalidateAuthCache();
 
       await this.db.recordAuditLog({
         userId: auth.user.id,
@@ -378,24 +423,23 @@ export class SettingsController {
   ) {
     if (this.rejectIfKiosk(auth, res)) return;
     try {
-      const userRow = await this.db.queryOne<any>(
+      const rawUserRow = await this.db.queryOne<any>(
         'SELECT * FROM system_users WHERE id = ? LIMIT 1',
         [auth.user.id]
       );
-      if (!userRow) {
+      if (!rawUserRow) {
         return res.status(404).json({ ok: false, error: 'الحساب غير موجود' });
       }
+      const { userRow } = await this.db.hydrateUserBundle(
+        rawUserRow,
+        null,
+        null,
+        rawUserRow.role
+      );
 
-      if (!this.db.schemaCaps.systemUsersRoleProfiles) {
-        return res.status(503).json({
-          ok: false,
-          code: 'SCHEMA_MIGRATION_REQUIRED',
-          error:
-            'يتطلب حفظ الصور الشخصية تشغيل تحديث قاعدة البيانات (schema.sql) في Supabase SQL Editor أولاً',
-        });
-      }
-
-      const uploaded = await this.storage.uploadAvatarDataUrl(body?.dataUrl, userRow.id);
+      const uploaded = await this.storage.uploadAvatarDataUrl(body?.dataUrl, userRow.id, {
+        preferDataUrlWhenNoCloudBucket: this.db.storageMode === 'supabase_postgres',
+      });
       if (uploaded.ok === false) {
         return res.status(400).json({ ok: false, error: uploaded.error });
       }
@@ -403,33 +447,49 @@ export class SettingsController {
       const nowIso = new Date().toISOString();
       const oldAvatarUrl = userRow.avatar_url || '';
 
-      await this.db.execute(
-        `UPDATE system_users
-         SET avatar_url = ?, avatar_preset = '', updated_at = ?
-         WHERE id = ?`,
-        [uploaded.url, nowIso, userRow.id]
-      );
-
-      if (userRow.employee_id && this.db.schemaCaps.employeesAvatars) {
+      if (this.db.schemaCaps.systemUsersRoleProfiles) {
         await this.db.execute(
-          `UPDATE employees
+          `UPDATE system_users
            SET avatar_url = ?, avatar_preset = '', updated_at = ?
            WHERE id = ?`,
-          [uploaded.url, nowIso, userRow.employee_id]
+          [uploaded.url, nowIso, userRow.id]
+        );
+      } else {
+        await this.db.saveProfileAvatar(
+          'user',
+          userRow.id,
+          { avatar_url: uploaded.url, avatar_preset: '' },
+          nowIso
         );
       }
 
-      if (
-        body?.apply_to_role_default &&
-        auth.has('users:manage') &&
-        this.db.schemaCaps.rolePoliciesAvatars
-      ) {
+      if (userRow.employee_id) {
+        if (this.db.schemaCaps.employeesAvatars) {
+          await this.db.execute(
+            `UPDATE employees
+             SET avatar_url = ?, avatar_preset = '', updated_at = ?
+             WHERE id = ?`,
+            [uploaded.url, nowIso, userRow.employee_id]
+          );
+        } else {
+          await this.db.saveProfileAvatar(
+            'employee',
+            userRow.employee_id,
+            { avatar_url: uploaded.url, avatar_preset: '' },
+            nowIso
+          );
+        }
+      }
+
+      if (body?.apply_to_role_default && auth.has('users:manage')) {
         await this.upsertRoleDefaultAvatar(userRow.role, uploaded.url, nowIso);
       }
 
       if (oldAvatarUrl && oldAvatarUrl !== uploaded.url) {
         await this.storage.deleteManagedAvatar(oldAvatarUrl);
       }
+
+      this.db.invalidateAuthCache();
 
       await this.db.recordAuditLog({
         userId: auth.user.id,
@@ -459,36 +519,53 @@ export class SettingsController {
   ) {
     if (this.rejectIfKiosk(auth, res)) return;
     try {
-      const userRow = await this.db.queryOne<any>(
+      const rawUserRow = await this.db.queryOne<any>(
         'SELECT * FROM system_users WHERE id = ? LIMIT 1',
         [auth.user.id]
       );
-      if (!userRow) {
+      if (!rawUserRow) {
         return res.status(404).json({ ok: false, error: 'الحساب غير موجود' });
       }
-
-      if (!this.db.schemaCaps.systemUsersRoleProfiles) {
-        const user = await this.loadFullPublicUser(userRow.id);
-        return res.json({ ok: true, user });
-      }
+      const { userRow } = await this.db.hydrateUserBundle(
+        rawUserRow,
+        null,
+        null,
+        rawUserRow.role
+      );
 
       const oldAvatarUrl = userRow.avatar_url || '';
       const nowIso = new Date().toISOString();
 
-      await this.db.execute(
-        `UPDATE system_users SET avatar_url = '', updated_at = ? WHERE id = ?`,
-        [nowIso, userRow.id]
-      );
-      if (userRow.employee_id && this.db.schemaCaps.employeesAvatars) {
+      if (this.db.schemaCaps.systemUsersRoleProfiles) {
         await this.db.execute(
-          `UPDATE employees SET avatar_url = '', updated_at = ? WHERE id = ?`,
-          [nowIso, userRow.employee_id]
+          `UPDATE system_users SET avatar_url = '', updated_at = ? WHERE id = ?`,
+          [nowIso, userRow.id]
         );
+      } else {
+        await this.db.saveProfileAvatar('user', userRow.id, { avatar_url: '' }, nowIso);
+      }
+
+      if (userRow.employee_id) {
+        if (this.db.schemaCaps.employeesAvatars) {
+          await this.db.execute(
+            `UPDATE employees SET avatar_url = '', updated_at = ? WHERE id = ?`,
+            [nowIso, userRow.employee_id]
+          );
+        } else {
+          await this.db.saveProfileAvatar(
+            'employee',
+            userRow.employee_id,
+            { avatar_url: '' },
+            nowIso
+          );
+        }
       }
 
       if (oldAvatarUrl) {
         await this.storage.deleteManagedAvatar(oldAvatarUrl);
       }
+
+      this.db.invalidateAuthCache();
 
       await this.db.recordAuditLog({
         userId: auth.user.id,
@@ -642,6 +719,7 @@ export class SettingsController {
         severity: 'warning',
       });
 
+      this.db.invalidateAuthCache();
       await this.realtime.broadcastStoreUpdate('username_update');
       const user = await this.loadFullPublicUser(userRow.id);
       return res.json({ ok: true, user });
@@ -812,6 +890,7 @@ export class SettingsController {
       }
 
       await this.db.saveUserPreferences(userRow.id, serialized, new Date().toISOString());
+      this.db.invalidateAuthCache();
 
       return res.json({ ok: true, preferences: merged });
     } catch (err: any) {
@@ -879,6 +958,10 @@ export class SettingsController {
   // =========================================================================
 
   private async upsertRoleDefaultAvatar(role: string, avatarUrl: string, nowIso: string) {
+    if (!this.db.schemaCaps.rolePoliciesAvatars) {
+      await this.db.saveProfileAvatar('role', role, { avatar_url: avatarUrl }, nowIso);
+      return;
+    }
     const existing = await this.db.queryOne<{ role: string }>(
       'SELECT role FROM role_policies WHERE role = ? LIMIT 1',
       [role]
@@ -903,15 +986,19 @@ export class SettingsController {
   async getRoleAccounts(@Res() res: Response) {
     try {
       const secretHex = await this.db.getSessionSecret();
-      const [users, rolePolicies, employees] = await Promise.all([
+      const [users, rolePolicies, employees, avatarMap] = await Promise.all([
         this.db.queryAll<any>(
           `SELECT * FROM system_users ORDER BY is_active DESC, created_at ASC`
         ),
         this.db.queryAll<any>('SELECT * FROM role_policies'),
         this.db.queryAll<any>('SELECT * FROM employees'),
+        this.db.loadProfileAvatarsMap(),
       ]);
 
-      const policyMap = new Map<string, any>(rolePolicies.map((rp) => [rp.role, rp]));
+      if (this.db.needsProfileAvatarFallback) {
+        this.db.applyProfileAvatarMap(avatarMap, { users, employees, rolePolicies });
+      }
+      const policyMap = this.db.buildRolePoliciesMapWithFallback(rolePolicies, avatarMap);
       const empMap = new Map<string, any>(employees.map((e) => [e.id, e]));
 
       const countsByRole = new Map<string, { total: number; active: number }>();
@@ -992,23 +1079,22 @@ export class SettingsController {
         return res.status(403).json({ ok: false, error: 'تعديل صورة دور المالك متاح للمالك فقط' });
       }
 
-      if (!this.db.schemaCaps.rolePoliciesAvatars) {
-        return res.status(503).json({
-          ok: false,
-          code: 'SCHEMA_MIGRATION_REQUIRED',
-          error:
-            'يتطلب حفظ صور الأدوار تشغيل تحديث قاعدة البيانات (schema.sql) في Supabase SQL Editor أولاً',
-        });
-      }
-
-      const uploaded = await this.storage.uploadAvatarDataUrl(body?.dataUrl, `role_${role}`);
+      const uploaded = await this.storage.uploadAvatarDataUrl(body?.dataUrl, `role_${role}`, {
+        preferDataUrlWhenNoCloudBucket: this.db.storageMode === 'supabase_postgres',
+      });
       if (uploaded.ok === false) {
         return res.status(400).json({ ok: false, error: uploaded.error });
       }
 
-      const prevRow = await this.db.queryOne<any>(
+      const rawPrevRow = await this.db.queryOne<any>(
         'SELECT * FROM role_policies WHERE role = ? LIMIT 1',
         [role]
+      );
+      const { rolePolicyRow: prevRow } = await this.db.hydrateUserBundle(
+        null,
+        null,
+        rawPrevRow,
+        role
       );
       const nowIso = new Date().toISOString();
       await this.upsertRoleDefaultAvatar(role, uploaded.url, nowIso);
@@ -1016,6 +1102,8 @@ export class SettingsController {
       if (prevRow?.avatar_url && prevRow.avatar_url !== uploaded.url) {
         await this.storage.deleteManagedAvatar(prevRow.avatar_url);
       }
+
+      this.db.invalidateAuthCache();
 
       await this.db.recordAuditLog({
         userId: auth.user.id,
@@ -1049,19 +1137,23 @@ export class SettingsController {
         return res.status(403).json({ ok: false, error: 'تعديل صورة دور المالك متاح للمالك فقط' });
       }
 
-      if (!this.db.schemaCaps.rolePoliciesAvatars) {
-        return res.json({ ok: true, role });
-      }
-
-      const prevRow = await this.db.queryOne<any>(
+      const rawPrevRow = await this.db.queryOne<any>(
         'SELECT * FROM role_policies WHERE role = ? LIMIT 1',
         [role]
+      );
+      const { rolePolicyRow: prevRow } = await this.db.hydrateUserBundle(
+        null,
+        null,
+        rawPrevRow,
+        role
       );
       await this.upsertRoleDefaultAvatar(role, '', new Date().toISOString());
 
       if (prevRow?.avatar_url) {
         await this.storage.deleteManagedAvatar(prevRow.avatar_url);
       }
+
+      this.db.invalidateAuthCache();
 
       await this.db.recordAuditLog({
         userId: auth.user.id,
@@ -1090,30 +1182,30 @@ export class SettingsController {
     @Res() res: Response
   ) {
     try {
-      const target = await this.db.queryOne<any>(
+      const rawTarget = await this.db.queryOne<any>(
         'SELECT * FROM system_users WHERE id = ? LIMIT 1',
         [id]
       );
-      if (!target) {
+      if (!rawTarget) {
         return res.status(404).json({ ok: false, error: 'الحساب غير موجود' });
       }
-      if (target.role === 'owner' && auth.user.role !== 'owner') {
+      if (rawTarget.role === 'owner' && auth.user.role !== 'owner') {
         return res.status(403).json({
           ok: false,
           error: 'غير مصرح بتعديل صورة حساب المالك إلا بواسطة المالك',
         });
       }
 
-      if (!this.db.schemaCaps.systemUsersRoleProfiles) {
-        return res.status(503).json({
-          ok: false,
-          code: 'SCHEMA_MIGRATION_REQUIRED',
-          error:
-            'يتطلب حفظ الصور الشخصية تشغيل تحديث قاعدة البيانات (schema.sql) في Supabase SQL Editor أولاً',
-        });
-      }
+      const { userRow: target } = await this.db.hydrateUserBundle(
+        rawTarget,
+        null,
+        null,
+        rawTarget.role
+      );
 
-      const uploaded = await this.storage.uploadAvatarDataUrl(body?.dataUrl, target.id);
+      const uploaded = await this.storage.uploadAvatarDataUrl(body?.dataUrl, target.id, {
+        preferDataUrlWhenNoCloudBucket: this.db.storageMode === 'supabase_postgres',
+      });
       if (uploaded.ok === false) {
         return res.status(400).json({ ok: false, error: uploaded.error });
       }
@@ -1121,20 +1213,40 @@ export class SettingsController {
       const nowIso = new Date().toISOString();
       const oldUrl = target.avatar_url || '';
 
-      await this.db.execute(
-        `UPDATE system_users SET avatar_url = ?, avatar_preset = '', updated_at = ? WHERE id = ?`,
-        [uploaded.url, nowIso, target.id]
-      );
-      if (target.employee_id && this.db.schemaCaps.employeesAvatars) {
+      if (this.db.schemaCaps.systemUsersRoleProfiles) {
         await this.db.execute(
-          `UPDATE employees SET avatar_url = ?, avatar_preset = '', updated_at = ? WHERE id = ?`,
-          [uploaded.url, nowIso, target.employee_id]
+          `UPDATE system_users SET avatar_url = ?, avatar_preset = '', updated_at = ? WHERE id = ?`,
+          [uploaded.url, nowIso, target.id]
         );
+      } else {
+        await this.db.saveProfileAvatar(
+          'user',
+          target.id,
+          { avatar_url: uploaded.url, avatar_preset: '' },
+          nowIso
+        );
+      }
+      if (target.employee_id) {
+        if (this.db.schemaCaps.employeesAvatars) {
+          await this.db.execute(
+            `UPDATE employees SET avatar_url = ?, avatar_preset = '', updated_at = ? WHERE id = ?`,
+            [uploaded.url, nowIso, target.employee_id]
+          );
+        } else {
+          await this.db.saveProfileAvatar(
+            'employee',
+            target.employee_id,
+            { avatar_url: uploaded.url, avatar_preset: '' },
+            nowIso
+          );
+        }
       }
 
       if (oldUrl && oldUrl !== uploaded.url) {
         await this.storage.deleteManagedAvatar(oldUrl);
       }
+
+      this.db.invalidateAuthCache();
 
       await this.db.recordAuditLog({
         userId: auth.user.id,
@@ -1161,41 +1273,59 @@ export class SettingsController {
     @Res() res: Response
   ) {
     try {
-      const target = await this.db.queryOne<any>(
+      const rawTarget = await this.db.queryOne<any>(
         'SELECT * FROM system_users WHERE id = ? LIMIT 1',
         [id]
       );
-      if (!target) {
+      if (!rawTarget) {
         return res.status(404).json({ ok: false, error: 'الحساب غير موجود' });
       }
-      if (target.role === 'owner' && auth.user.role !== 'owner') {
+      if (rawTarget.role === 'owner' && auth.user.role !== 'owner') {
         return res.status(403).json({
           ok: false,
           error: 'غير مصرح بحذف صورة حساب المالك إلا بواسطة المالك',
         });
       }
 
-      if (!this.db.schemaCaps.systemUsersRoleProfiles) {
-        return res.json({ ok: true, id: target.id });
-      }
+      const { userRow: target } = await this.db.hydrateUserBundle(
+        rawTarget,
+        null,
+        null,
+        rawTarget.role
+      );
 
       const oldUrl = target.avatar_url || '';
       const nowIso = new Date().toISOString();
 
-      await this.db.execute(
-        `UPDATE system_users SET avatar_url = '', updated_at = ? WHERE id = ?`,
-        [nowIso, target.id]
-      );
-      if (target.employee_id && this.db.schemaCaps.employeesAvatars) {
+      if (this.db.schemaCaps.systemUsersRoleProfiles) {
         await this.db.execute(
-          `UPDATE employees SET avatar_url = '', updated_at = ? WHERE id = ?`,
-          [nowIso, target.employee_id]
+          `UPDATE system_users SET avatar_url = '', updated_at = ? WHERE id = ?`,
+          [nowIso, target.id]
         );
+      } else {
+        await this.db.saveProfileAvatar('user', target.id, { avatar_url: '' }, nowIso);
+      }
+      if (target.employee_id) {
+        if (this.db.schemaCaps.employeesAvatars) {
+          await this.db.execute(
+            `UPDATE employees SET avatar_url = '', updated_at = ? WHERE id = ?`,
+            [nowIso, target.employee_id]
+          );
+        } else {
+          await this.db.saveProfileAvatar(
+            'employee',
+            target.employee_id,
+            { avatar_url: '' },
+            nowIso
+          );
+        }
       }
 
       if (oldUrl) {
         await this.storage.deleteManagedAvatar(oldUrl);
       }
+
+      this.db.invalidateAuthCache();
 
       await this.db.recordAuditLog({
         userId: auth.user.id,
@@ -1223,13 +1353,19 @@ export class SettingsController {
     @Res() res: Response
   ) {
     try {
-      const target = await this.db.queryOne<any>(
+      const rawTarget = await this.db.queryOne<any>(
         'SELECT * FROM system_users WHERE id = ? LIMIT 1',
         [id]
       );
-      if (!target) {
+      if (!rawTarget) {
         return res.status(404).json({ ok: false, error: 'الحساب غير موجود' });
       }
+      const { userRow: target } = await this.db.hydrateUserBundle(
+        rawTarget,
+        null,
+        null,
+        rawTarget.role
+      );
 
       // Escalation guards
       const nextRole = body?.role !== undefined ? String(body.role).trim() : target.role;
@@ -1401,6 +1537,22 @@ export class SettingsController {
             target.id,
           ]
         );
+        if (
+          body?.avatar_preset !== undefined ||
+          body?.avatar_color !== undefined ||
+          oldAvatarToDelete
+        ) {
+          await this.db.saveProfileAvatar(
+            'user',
+            target.id,
+            {
+              avatar_url: nextAvatarUrl,
+              avatar_preset: nextPreset,
+              avatar_color: nextColor,
+            },
+            nowIso
+          );
+        }
       }
 
       // Sync non-badge fields to linked employee (never corrupt employees.emp_code QR badge!)
@@ -1435,6 +1587,22 @@ export class SettingsController {
               target.employee_id,
             ]
           );
+          if (
+            body?.avatar_preset !== undefined ||
+            body?.avatar_color !== undefined ||
+            oldAvatarToDelete
+          ) {
+            await this.db.saveProfileAvatar(
+              'employee',
+              target.employee_id,
+              {
+                avatar_url: nextAvatarUrl,
+                avatar_preset: nextPreset,
+                avatar_color: nextColor,
+              },
+              nowIso
+            );
+          }
         }
       }
 
@@ -1448,7 +1616,6 @@ export class SettingsController {
           'UPDATE user_sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0',
           [target.id]
         );
-        this.db.invalidateAuthCache();
         if (target.id === auth.user.id && nextActive) {
           freshToken = await this.db.issueSessionForUser(
             { id: target.id, session_version: nextSessionVersion },
@@ -1457,6 +1624,7 @@ export class SettingsController {
           );
         }
       }
+      this.db.invalidateAuthCache();
 
       await this.db.recordAuditLog({
         userId: auth.user.id,

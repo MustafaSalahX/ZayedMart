@@ -2376,5 +2376,121 @@ describe('Legacy Unmigrated Schema Compatibility E2E (missing v4.2 CCTV & v4.3 a
     const rbacOverview = await api('/api/rbac/overview', 'GET', undefined, token);
     assert.equal(rbacOverview.status, 200);
     assert.ok(Array.isArray(rbacOverview.json.users));
+
+    // Legacy unmigrated schema avatar preset + photo upload + role default avatar + account avatar
+    const VALID_TINY_PNG =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+    // 1) Self-service avatar preset selection persists immediately across /profile/me, /auth/me, /bootstrap, /auth/profiles
+    const presetSave = await api(
+      '/api/profile/me',
+      'PUT',
+      { avatar_preset: 'badge_crown', avatar_color: '#007B83', clear_photo: true },
+      token
+    );
+    assert.equal(presetSave.status, 200);
+    assert.equal(presetSave.json.user.avatar_preset, 'badge_crown');
+    assert.equal(presetSave.json.user.avatar_color, '#007B83');
+    assert.equal(presetSave.json.user.effective_avatar_url, '');
+
+    const [profAfterPreset, meAfterPreset, bootAfterPreset, pubAfterPreset] = await Promise.all([
+      api('/api/profile/me', 'GET', undefined, token),
+      api('/api/auth/me', 'GET', undefined, token),
+      api('/api/bootstrap', 'GET', undefined, token),
+      api('/api/auth/profiles'),
+    ]);
+    assert.equal(profAfterPreset.json.profile.avatar_preset, 'badge_crown');
+    assert.equal(meAfterPreset.json.user.avatar_preset, 'badge_crown');
+    assert.equal(bootAfterPreset.json.myProfile.avatar_preset, 'badge_crown');
+    assert.equal(
+      pubAfterPreset.json.profiles.find((p) => p.id === presetSave.json.user.id)?.avatar_preset,
+      'badge_crown'
+    );
+
+    // 2) Self-service photo upload succeeds without 503 SCHEMA_MIGRATION_REQUIRED
+    const selfUpload = await api(
+      '/api/profile/me/avatar',
+      'POST',
+      { dataUrl: VALID_TINY_PNG },
+      token
+    );
+    assert.equal(selfUpload.status, 200);
+    assert.equal(selfUpload.json.ok, true);
+    assert.ok(selfUpload.json.avatar_url);
+    assert.equal(selfUpload.json.user.effective_avatar_url, selfUpload.json.avatar_url);
+
+    const [profAfterPhoto, meAfterPhoto, bootAfterPhoto, pubAfterPhoto] = await Promise.all([
+      api('/api/profile/me', 'GET', undefined, token),
+      api('/api/auth/me', 'GET', undefined, token),
+      api('/api/bootstrap', 'GET', undefined, token),
+      api('/api/auth/profiles'),
+    ]);
+    assert.equal(profAfterPhoto.json.profile.avatar_url, selfUpload.json.avatar_url);
+    assert.equal(meAfterPhoto.json.user.avatar_url, selfUpload.json.avatar_url);
+    assert.equal(bootAfterPhoto.json.myProfile.avatar_url, selfUpload.json.avatar_url);
+    assert.equal(
+      pubAfterPhoto.json.profiles.find((p) => p.id === selfUpload.json.user.id)?.avatar_url,
+      selfUpload.json.avatar_url
+    );
+
+    // 3) Role default avatar upload + delete on unmigrated schema
+    const roleUpload = await api(
+      '/api/settings/roles/cashier/avatar',
+      'POST',
+      { dataUrl: VALID_TINY_PNG },
+      token
+    );
+    assert.equal(roleUpload.status, 200);
+    assert.ok(roleUpload.json.avatar_url);
+
+    const accountsAfterRoleUpload = await api('/api/settings/role-accounts', 'GET', undefined, token);
+    assert.equal(accountsAfterRoleUpload.status, 200);
+    assert.equal(
+      accountsAfterRoleUpload.json.roles.find((r) => r.id === 'cashier')?.avatar_url,
+      roleUpload.json.avatar_url
+    );
+
+    // Employee/cashier inherits role default photo unless they pick an explicit preset
+    const cashierLogin = await api('/api/auth/login', 'POST', { password: '777' });
+    assert.equal(cashierLogin.status, 200);
+    assert.equal(cashierLogin.json.user.effective_avatar_url, roleUpload.json.avatar_url);
+    const cashierToken = cashierLogin.json.token;
+
+    const cashierPresetOverride = await api(
+      '/api/profile/me',
+      'PUT',
+      { avatar_preset: 'badge_star', avatar_color: '#146C2E', clear_photo: true },
+      cashierToken
+    );
+    assert.equal(cashierPresetOverride.status, 200);
+    assert.equal(cashierPresetOverride.json.user.avatar_preset, 'badge_star');
+    assert.equal(cashierPresetOverride.json.user.own_avatar_url, '');
+    assert.equal(cashierPresetOverride.json.user.effective_avatar_url, '');
+
+    const roleDelete = await api(
+      '/api/settings/roles/cashier/avatar',
+      'DELETE',
+      undefined,
+      token
+    );
+    assert.equal(roleDelete.status, 200);
+
+    // 4) Admin account avatar upload + self-service delete
+    const targetAccount = accountsAfterRoleUpload.json.accounts.find(
+      (a) => a.employee_id === empId
+    );
+    assert.ok(targetAccount);
+    const acctAvatarUpload = await api(
+      `/api/settings/role-accounts/${targetAccount.id}/avatar`,
+      'POST',
+      { dataUrl: VALID_TINY_PNG },
+      token
+    );
+    assert.equal(acctAvatarUpload.status, 200);
+    assert.ok(acctAvatarUpload.json.avatar_url);
+
+    const selfDelete = await api('/api/profile/me/avatar', 'DELETE', undefined, token);
+    assert.equal(selfDelete.status, 200);
+    assert.equal(selfDelete.json.user.own_avatar_url, '');
   });
 });
